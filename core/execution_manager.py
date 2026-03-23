@@ -16,6 +16,8 @@ from core.alerts import (
     alert_counts,
     alert_summary,
 )
+from core.file_watch_backend import FILE_WATCH_SUPPORTED_CONDITIONS, create_file_watch_backend
+from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID
 from core.state import MAX_TASK_GOAL_CHARS, MAX_TASK_REPLACEMENT_GOAL_CHARS, TaskState
 from core.watchers import (
@@ -391,6 +393,8 @@ class ExecutionManager:
         alert_state_path = self.agent.settings.get("alert_state_path", DEFAULT_ALERT_HISTORY_PATH)
         self.alert_store = AlertStore(alert_state_path, max_items=max_alert_items)
         self.scheduler_poll_seconds = max(1, int(self.agent.settings.get("scheduler_poll_seconds", DEFAULT_SCHEDULER_POLL_SECONDS)))
+        self.scheduler_backend = create_scheduler_backend(self.agent.settings)
+        self.file_watch_backend = create_file_watch_backend(self.agent.settings)
 
         loaded = self.queue_store.load()
         self._tasks: List[Dict[str, Any]] = list(loaded.get("tasks", []))
@@ -422,9 +426,12 @@ class ExecutionManager:
             )
         self._last_result: Dict[str, Any] = {}
         self._last_result_message: str = ""
+        self._recent_file_watch_events: List[Dict[str, Any]] = []
 
         auto_start = False
         with self._lock:
+            self.scheduler_backend.sync_scheduled_tasks(self._scheduled_tasks)
+            self.file_watch_backend.sync_watches(self._watches)
             changed = self._sync_scheduled_tasks_locked()
             promoted, scheduled_auto_start = self._promote_due_scheduled_tasks_locked()
             watch_changed, watch_auto_start = self._process_watches_locked(force_check=True)
@@ -443,6 +450,14 @@ class ExecutionManager:
 
     def shutdown(self):
         self._scheduler_stop.set()
+        try:
+            self.scheduler_backend.shutdown()
+        except Exception:
+            pass
+        try:
+            self.file_watch_backend.shutdown()
+        except Exception:
+            pass
 
     def _start_scheduler_thread(self):
         if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
@@ -689,9 +704,11 @@ class ExecutionManager:
 
     def _persist_scheduled_locked(self):
         self.scheduled_store.save(self._scheduled_tasks)
+        self.scheduler_backend.sync_scheduled_tasks(self._scheduled_tasks)
 
     def _persist_watches_locked(self):
         self.watch_store.save(self._watches)
+        self.file_watch_backend.sync_watches(self._watches)
 
     def _persist_alerts_locked(self):
         self.alert_store.save(self._alerts)
@@ -1409,6 +1426,7 @@ class ExecutionManager:
         promoted = 0
         auto_start = False
         now = _local_now()
+        due_ids = self.scheduler_backend.drain_due_scheduled_ids()
         had_queued_before = self._has_queued_tasks_locked()
 
         for scheduled_task in self._scheduled_tasks:
@@ -1416,7 +1434,9 @@ class ExecutionManager:
                 continue
 
             next_run = _parse_local_datetime(scheduled_task.get("next_run_at", ""))
-            if next_run is None or next_run > now:
+            scheduled_id = str(scheduled_task.get("scheduled_id", "")).strip()
+            backend_due = bool(scheduled_id and scheduled_id in due_ids)
+            if not backend_due and (next_run is None or next_run > now):
                 continue
 
             queue_task = self._enqueue_task_locked(
@@ -1452,6 +1472,12 @@ class ExecutionManager:
 
     def _watch_due_locked(self, watch: Dict[str, Any], now_ts: float) -> bool:
         last_checked = _parse_local_datetime(watch.get("last_checked_at", ""))
+        condition_type = str(watch.get("condition_type", "")).strip().lower()
+        target_path = str(watch.get("target", "")).strip()
+        if condition_type in FILE_WATCH_SUPPORTED_CONDITIONS and target_path:
+            since_timestamp = last_checked.timestamp() if last_checked is not None else 0.0
+            if self.file_watch_backend.has_recent_signal(target_path, since_timestamp=since_timestamp):
+                return True
         if last_checked is None:
             return True
         interval_seconds = max(2, int(watch.get("interval_seconds", self.scheduler_poll_seconds)))
@@ -1484,6 +1510,9 @@ class ExecutionManager:
         auto_start = False
         now_ts = time.time()
         now_text = _iso_timestamp(now_ts)
+        backend_events = self.file_watch_backend.consume_events(limit=24)
+        if backend_events:
+            self._recent_file_watch_events = list(backend_events)[-24:]
         had_queued_before = self._has_queued_tasks_locked()
         state = self._load_state_for_scope_locked(DEFAULT_STATE_SCOPE_ID)
 
@@ -2536,6 +2565,34 @@ class ExecutionManager:
             "counts": counts,
             "latest_alert": items[0] if items else {},
         }
+
+    def _infrastructure_snapshot_locked(self) -> Dict[str, Any]:
+        try:
+            from tools.desktop import get_desktop_backend_status
+        except Exception:
+            desktop_status = {
+                "window": {"active": "unavailable", "reason": "error", "available": False},
+                "screenshot": {"active": "unavailable", "reason": "error", "available": False},
+                "ui_evidence": {"active": "unavailable", "reason": "error", "available": False},
+            }
+        else:
+            try:
+                desktop_status = get_desktop_backend_status()
+            except Exception:
+                desktop_status = {
+                    "window": {"active": "unavailable", "reason": "error", "available": False},
+                    "screenshot": {"active": "unavailable", "reason": "error", "available": False},
+                    "ui_evidence": {"active": "unavailable", "reason": "error", "available": False},
+                }
+        return {
+            "scheduler": self.scheduler_backend.status_snapshot(),
+            "file_watch": {
+                **self.file_watch_backend.status_snapshot(),
+                "recent_events": list(self._recent_file_watch_events[-12:]),
+            },
+            "desktop": desktop_status,
+        }
+
     def get_snapshot(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         auto_start = False
         filtered_view = bool(str(session_id).strip() or str(state_scope_id).strip())
@@ -2645,6 +2702,7 @@ class ExecutionManager:
             snapshot["alerts"] = alert_snapshot
             snapshot["alert_items"] = alert_snapshot.get("items", [])
             snapshot["latest_alert"] = alert_snapshot.get("latest_alert", {})
+            snapshot["infrastructure"] = self._infrastructure_snapshot_locked()
             snapshot["session_id"] = normalized_session_id
             snapshot["state_scope_id"] = normalized_scope_id
             snapshot["paused"] = bool(snapshot.get("paused", False) or queue_snapshot.get("active_task", {}).get("status") == "paused")

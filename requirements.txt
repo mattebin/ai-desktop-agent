@@ -2,3 +2,8 @@ requests
 pyyaml
 keyboard
 playwright
+APScheduler
+watchdog
+PyWinCtl
+mss
+pywinauto

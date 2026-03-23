@@ -12,10 +12,12 @@ mods = [
     "live_agent_eval",
     "core.agent",
     "core.alerts",
+    "core.backend_schemas",
     "core.browser_tasks",
     "core.chat_sessions",
     "core.config",
     "core.execution_manager",
+    "core.file_watch_backend",
     "core.local_api",
     "core.local_api_client",
     "core.local_api_events",
@@ -23,6 +25,7 @@ mods = [
     "core.operator_behavior",
     "core.operator_controller",
     "core.run_history",
+    "core.scheduler_backend",
     "core.session_store",
     "core.state",
     "core.safety",
@@ -32,6 +35,7 @@ mods = [
     "tools.registry",
     "tools.browser",
     "tools.desktop",
+    "tools.desktop_backends",
     "tools.files",
     "tools.shell",
 ]
@@ -51,12 +55,14 @@ if failed:
 from core.alerts import AlertStore
 from core.chat_sessions import ChatSessionManager
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
+from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer
 from core.local_api_client import LocalOperatorApiClient
 from core.operator_behavior import classify_chat_turn, looks_like_simple_conversation_turn
 from core.operator_controller import OperatorController
 from core.run_history import RunHistoryStore
+from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID, SessionStore
 from core.state import TaskState
 from core.tool_runtime import ToolRuntime
@@ -65,9 +71,12 @@ from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks,
 from live_agent_eval import SCENARIO_NAMES, _interpreter_has_playwright, _project_venv_python
 from tools.browser import shutdown_browser_runtime
 from tools.desktop import (
+    desktop_capture_screenshot,
     desktop_click_point,
     desktop_list_windows,
     desktop_type_text,
+    get_desktop_backend_status,
+    probe_ui_evidence,
     shutdown_desktop_runtime,
 )
 from tools.registry import get_tools
@@ -104,10 +113,71 @@ if not isinstance(snapshot.get("human_control", {}), dict):
     raise SystemExit("OperatorController.get_snapshot() did not include human-control state.")
 if not isinstance(snapshot.get("task_control", {}), dict):
     raise SystemExit("OperatorController.get_snapshot() did not include task-control state.")
+if not isinstance(snapshot.get("infrastructure", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include infrastructure backend state.")
 runtime = snapshot.get("runtime", {})
 if runtime.get("active_model") != "gpt-5.4" or runtime.get("reasoning_effort") != "medium":
     raise SystemExit("OperatorController.get_snapshot() did not expose the expected runtime model configuration.")
 print("[OK] operator controller snapshot")
+
+scheduler_backend = create_scheduler_backend({"scheduler_backend": "apscheduler"})
+scheduler_backend.sync_scheduled_tasks(
+    [
+        {
+            "scheduled_id": "sched-smoke",
+            "goal": "scheduler smoke",
+            "status": "scheduled",
+            "recurrence": "once",
+            "scheduled_for": "2099-01-01T00:00:00+00:00",
+            "next_run_at": "2099-01-01T00:00:00+00:00",
+        }
+    ]
+)
+scheduler_status = scheduler_backend.status_snapshot()
+if scheduler_status.get("active") not in {"apscheduler", "polling"}:
+    raise SystemExit("Scheduler backend did not expose a valid active backend.")
+if not isinstance(scheduler_status.get("metadata", {}).get("jobs", []), list):
+    raise SystemExit("Scheduler backend did not expose normalized scheduled jobs.")
+fallback_scheduler = create_scheduler_backend({"scheduler_backend": "missing-backend"})
+fallback_scheduler_status = fallback_scheduler.status_snapshot()
+if fallback_scheduler_status.get("active") != "polling":
+    raise SystemExit("Scheduler backend did not fall back to polling for an unknown backend preference.")
+scheduler_backend.shutdown()
+fallback_scheduler.shutdown()
+print("[OK] scheduler backends")
+
+file_watch_backend = create_file_watch_backend({"file_watch_backend": "watchdog"})
+watch_probe_root = Path("data") / "smoke_watch_backend"
+watch_probe_root.mkdir(parents=True, exist_ok=True)
+watch_probe_file = watch_probe_root / "watch_probe.txt"
+watch_probe_file.write_text("initial", encoding="utf-8")
+file_watch_backend.sync_watches(
+    [
+        {
+            "watch_id": "watch-smoke",
+            "condition_type": "file_changed",
+            "target": str(watch_probe_file),
+        }
+    ]
+)
+watch_probe_file.write_text("changed", encoding="utf-8")
+watch_signal = False
+for _ in range(20):
+    if file_watch_backend.has_recent_signal(str(watch_probe_file), since_timestamp=0.0):
+        watch_signal = True
+        break
+    time.sleep(0.1)
+watch_events = file_watch_backend.consume_events()
+if not watch_signal:
+    raise SystemExit("File-watch backend did not detect a recent local file signal.")
+if watch_events and not isinstance(watch_events[0], dict):
+    raise SystemExit("File-watch backend did not return normalized watch events.")
+fallback_file_watch = create_file_watch_backend({"file_watch_backend": "missing-backend"})
+if fallback_file_watch.status_snapshot().get("active") != "polling":
+    raise SystemExit("File-watch backend did not fall back to polling for an unknown backend preference.")
+file_watch_backend.shutdown()
+fallback_file_watch.shutdown()
+print("[OK] file-watch backends")
 
 registered_tools = {tool.get("name", "") for tool in get_tools()}
 expected_desktop_tools = {
@@ -147,6 +217,20 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     )
     if not type_preview.get("paused", False) or not type_preview.get("approval_required", False) or type_preview.get("checkpoint_tool") != "desktop_type_text":
         raise SystemExit("desktop_type_text() did not require approval in the expected bounded way.")
+desktop_backend_status = get_desktop_backend_status()
+for required_backend in ("window", "screenshot", "ui_evidence"):
+    if not isinstance(desktop_backend_status.get(required_backend, {}), dict):
+        raise SystemExit("Desktop backend status did not include the expected backend sections.")
+desktop_capture = desktop_capture_screenshot({"scope": "desktop", "name": "desktop_backend_smoke"})
+if not desktop_capture.get("ok", False) or not Path(str(desktop_capture.get("screenshot_path", ""))).exists():
+    raise SystemExit("desktop_capture_screenshot() did not capture a bounded screenshot with the backend layer active.")
+if Path(str(desktop_capture.get("screenshot_path", ""))).suffix.lower() not in {".png", ".bmp"}:
+    raise SystemExit("desktop_capture_screenshot() did not use an expected bounded screenshot extension.")
+ui_evidence_probe = probe_ui_evidence(target="active_window", limit=3)
+if ui_evidence_probe.get("kind") != "ui_evidence_observation":
+    raise SystemExit("probe_ui_evidence() did not return the expected normalized evidence envelope.")
+if not isinstance(ui_evidence_probe.get("data", {}).get("controls", []), list):
+    raise SystemExit("probe_ui_evidence() did not return normalized control evidence.")
 print("[OK] desktop tools")
 
 client = LocalOperatorApiClient("http://127.0.0.1:8765/")

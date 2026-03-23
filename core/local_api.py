@@ -153,6 +153,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "latest_alert": snapshot.get("latest_alert", {}),
         "latest_run": snapshot.get("latest_run", {}),
         "runtime": snapshot.get("runtime", {}),
+        "infrastructure": snapshot.get("infrastructure", {}),
         "behavior": behavior,
         "human_control": snapshot.get("human_control", {}),
         "action_policy": snapshot.get("action_policy", {}),
@@ -172,6 +173,7 @@ def _active_task_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "behavior": snapshot.get("behavior", {}),
         "human_control": snapshot.get("human_control", {}),
         "task_control": snapshot.get("task_control", {}),
+        "infrastructure": snapshot.get("infrastructure", {}),
     }
 
 

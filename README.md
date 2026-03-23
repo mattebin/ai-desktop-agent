@@ -13,6 +13,7 @@ This project is now a serious local operator framework with:
 - approval-gated safety
 - Playwright-only browser operations
 - bounded desktop-control primitives
+- optional local infrastructure backends for scheduling, file watching, desktop observation, and future UI evidence
 - live eval coverage for core and realistic workflows
 
 ## Current architecture
@@ -46,6 +47,28 @@ Not included:
 - unrestricted keyboard/mouse control
 - autonomous desktop navigation loops
 - broad dangerous autonomy
+
+## Local-only infrastructure backends
+
+This project now includes optional local backends that strengthen offline/runtime plumbing without widening operator behavior:
+
+- `APScheduler`
+  Preferred in-process scheduler backend under the existing queue/scheduler model.
+- `watchdog`
+  Preferred local filesystem event backend for file-based watch triggers.
+- `PyWinCtl`
+  Preferred desktop window metadata/focus backend for bounded window observation.
+- `mss`
+  Preferred bounded desktop screenshot backend.
+- `pywinauto`
+  Future-facing read-only UI evidence backend scaffold only.
+
+These integrations are intentionally narrow:
+
+- they are optional and fallback-safe
+- they do not add broad new control loops
+- they do not change model-facing behavior by themselves
+- they do not widen the current bounded desktop action scope
 
 ## Project philosophy
 

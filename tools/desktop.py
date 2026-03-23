@@ -7,6 +7,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from tools.desktop_backends import (
+    create_screenshot_backend,
+    create_ui_evidence_backend,
+    create_window_backend,
+    describe_backends,
+)
+
 
 DESKTOP_DEFAULT_WINDOW_LIMIT = 12
 DESKTOP_DEFAULT_MAX_OBSERVATION_AGE_SECONDS = 45
@@ -225,6 +232,10 @@ gdi32.DeleteDC.restype = ctypes.c_bool
 _DESKTOP_OBSERVATIONS: Dict[str, Dict[str, Any]] = {}
 _OBSERVATION_LOCK = threading.RLock()
 _OBSERVATION_COUNTER = 0
+_BACKEND_LOCK = threading.RLock()
+_WINDOW_BACKEND = None
+_SCREENSHOT_BACKEND = None
+_UI_EVIDENCE_BACKEND = None
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -395,7 +406,7 @@ def _window_is_listable(hwnd: int, *, include_minimized: bool) -> bool:
     return rect["width"] >= 40 and rect["height"] >= 30
 
 
-def _enum_windows(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
+def _enum_windows_native(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
     windows: List[Dict[str, Any]] = []
 
     @EnumWindowsProc
@@ -413,9 +424,63 @@ def _enum_windows(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAU
     return windows[:limit]
 
 
-def _active_window_info() -> Dict[str, Any]:
+def _active_window_info_native() -> Dict[str, Any]:
     hwnd = int(user32.GetForegroundWindow() or 0)
     return _window_info(hwnd)
+
+
+def _get_window_backend():
+    global _WINDOW_BACKEND
+    with _BACKEND_LOCK:
+        if _WINDOW_BACKEND is None:
+            _WINDOW_BACKEND = create_window_backend(
+                list_delegate=_enum_windows_native,
+                active_delegate=_active_window_info_native,
+                focus_delegate=_focus_window_handle_native,
+            )
+        return _WINDOW_BACKEND
+
+
+def _get_screenshot_backend():
+    global _SCREENSHOT_BACKEND
+    with _BACKEND_LOCK:
+        if _SCREENSHOT_BACKEND is None:
+            _SCREENSHOT_BACKEND = create_screenshot_backend(capture_delegate=_capture_bitmap_native)
+        return _SCREENSHOT_BACKEND
+
+
+def _get_ui_evidence_backend():
+    global _UI_EVIDENCE_BACKEND
+    with _BACKEND_LOCK:
+        if _UI_EVIDENCE_BACKEND is None:
+            _UI_EVIDENCE_BACKEND = create_ui_evidence_backend()
+        return _UI_EVIDENCE_BACKEND
+
+
+def get_desktop_backend_status() -> Dict[str, Any]:
+    return describe_backends(
+        window_backend=_get_window_backend(),
+        screenshot_backend=_get_screenshot_backend(),
+        ui_evidence_backend=_get_ui_evidence_backend(),
+    )
+
+
+def probe_ui_evidence(*, target: str = "active_window", limit: int = 8) -> Dict[str, Any]:
+    return _get_ui_evidence_backend().probe(target=target, limit=limit)
+
+
+def _enum_windows(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
+    result = _get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    windows = data.get("windows", []) if isinstance(data, dict) else []
+    return windows if isinstance(windows, list) else []
+
+
+def _active_window_info() -> Dict[str, Any]:
+    result = _get_window_backend().get_active_window()
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    active_window = data.get("active_window", {}) if isinstance(data, dict) else {}
+    return active_window if isinstance(active_window, dict) else {}
 
 
 def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
@@ -507,8 +572,20 @@ def _lookup_observation(token: str) -> Dict[str, Any]:
 
 
 def shutdown_desktop_runtime():
+    global _WINDOW_BACKEND, _SCREENSHOT_BACKEND, _UI_EVIDENCE_BACKEND
     with _OBSERVATION_LOCK:
         _DESKTOP_OBSERVATIONS.clear()
+    with _BACKEND_LOCK:
+        for backend in (_WINDOW_BACKEND, _SCREENSHOT_BACKEND, _UI_EVIDENCE_BACKEND):
+            if backend is None:
+                continue
+            try:
+                backend.shutdown()
+            except Exception:
+                pass
+        _WINDOW_BACKEND = None
+        _SCREENSHOT_BACKEND = None
+        _UI_EVIDENCE_BACKEND = None
 
 
 def _desktop_result(
@@ -597,7 +674,7 @@ def _foreground_window_matches(observation: Dict[str, Any], current_active_windo
     return expected_window_id == current_window_id
 
 
-def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
+def _focus_window_handle_native(hwnd: int) -> Tuple[bool, str]:
     handle = int(hwnd or 0)
     if handle <= 0 or not user32.IsWindow(ctypes.c_void_p(handle)):
         return False, "The requested window no longer exists."
@@ -630,13 +707,13 @@ def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
             except Exception:
                 pass
 
-    active = _active_window_info()
+    active = _active_window_info_native()
     if str(active.get("window_id", "")).strip() == _hex_hwnd(handle):
         return True, ""
     return False, "Windows did not grant foreground focus to the requested window."
 
 
-def _capture_bitmap(path: Path, *, x: int, y: int, width: int, height: int) -> Tuple[bool, str]:
+def _capture_bitmap_native(path: Path, *, x: int, y: int, width: int, height: int) -> Tuple[bool, str]:
     if width <= 0 or height <= 0:
         return False, "Screenshot bounds were empty."
 
@@ -715,6 +792,34 @@ def _capture_bitmap(path: Path, *, x: int, y: int, width: int, height: int) -> T
                 pass
 
 
+def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
+    result = _get_window_backend().focus_window(window_id=_hex_hwnd(hwnd))
+    if not isinstance(result, dict):
+        return False, "Could not focus the requested window."
+    return bool(result.get("ok", False)), str(result.get("error", "") or "")
+
+
+def _capture_with_backend(
+    path: Path,
+    *,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    scope: str,
+    active_window_title: str = "",
+) -> Dict[str, Any]:
+    return _get_screenshot_backend().capture(
+        path,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        scope=scope,
+        active_window_title=active_window_title,
+    )
+
+
 def _capture_path(args: Dict[str, Any]) -> Path:
     name = str(args.get("name", "") or args.get("output_name", "")).strip()
     safe_name = "".join(ch for ch in name if ch.isalnum() or ch in {"-", "_"}).strip("._")
@@ -722,7 +827,10 @@ def _capture_path(args: Dict[str, Any]) -> Path:
         safe_name = f"desktop_capture_{int(time.time() * 1000)}"
     root = Path.cwd() / "data" / "desktop_captures"
     root.mkdir(parents=True, exist_ok=True)
-    return root / f"{safe_name}.bmp"
+    extension = str(getattr(_get_screenshot_backend(), "file_extension", ".bmp") or ".bmp").strip()
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return root / f"{safe_name}{extension}"
 
 
 def desktop_list_windows(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -823,11 +931,23 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
     capture_x = int(bounds.get("x", 0))
     capture_y = int(bounds.get("y", 0))
     path = _capture_path(args)
-    ok, error = _capture_bitmap(path, x=capture_x, y=capture_y, width=width, height=height)
+    capture_result = _capture_with_backend(
+        path,
+        x=capture_x,
+        y=capture_y,
+        width=width,
+        height=height,
+        scope=scope,
+        active_window_title=str(active_window.get("title", "") or ""),
+    )
+    ok = bool(capture_result.get("ok", False))
+    error = str(capture_result.get("error", "") or "").strip()
+    capture_data = capture_result.get("data", {}) if isinstance(capture_result.get("data", {}), dict) else {}
+    captured_path = str(capture_data.get("path", "") or "").strip() or str(path)
     observation = _register_observation(
         active_window=active_window,
         windows=windows,
-        screenshot_path=str(path) if ok else "",
+        screenshot_path=captured_path if ok else "",
         screenshot_scope=scope,
     )
     if not ok:
