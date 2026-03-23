@@ -11,6 +11,10 @@ BACKEND_REASON_CODES = {
     "active",
     "scheduled",
     "triggered",
+    "collected",
+    "partial",
+    "retained",
+    "pruned",
     "filesystem_event",
     "state_changed",
     "captured",
@@ -25,6 +29,7 @@ BACKEND_REASON_CODES = {
     "invalid_input",
     "not_found",
     "stale",
+    "missing_artifact",
     "error",
 }
 
@@ -267,4 +272,55 @@ def normalize_ui_evidence_observation(
         "reason": _normalize_reason(reason, default="inspected"),
         "timestamp": _iso_timestamp(),
         "metadata": _sanitize_metadata(metadata or {}),
+    }
+
+
+def normalize_screen_observation(
+    *,
+    virtual_screen: Dict[str, Any] | None = None,
+    monitors: Iterable[Dict[str, Any]] | None = None,
+    backend: str = "",
+    reason: str = "inspected",
+    metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    rect = virtual_screen if isinstance(virtual_screen, dict) else {}
+    normalized_monitors: List[Dict[str, Any]] = []
+    for item in list(monitors or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        normalized_monitors.append(
+            {
+                "left": _coerce_int(item.get("left", 0), 0, minimum=-100_000, maximum=100_000),
+                "top": _coerce_int(item.get("top", 0), 0, minimum=-100_000, maximum=100_000),
+                "width": _coerce_int(item.get("width", 0), 0, minimum=0, maximum=100_000),
+                "height": _coerce_int(item.get("height", 0), 0, minimum=0, maximum=100_000),
+            }
+        )
+    return {
+        "virtual_screen": {
+            "x": _coerce_int(rect.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(rect.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(rect.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(rect.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "monitor_count": len(normalized_monitors),
+        "monitors": normalized_monitors,
+        "backend": _trim_text(backend, limit=60),
+        "reason": _normalize_reason(reason, default="inspected"),
+        "metadata": _sanitize_metadata(metadata or {}),
+    }
+
+
+def normalize_desktop_evidence_ref(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    return {
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
+        "reason": _normalize_reason(value.get("reason", "collected"), default="collected"),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "bundle_path": _trim_text(value.get("bundle_path", ""), limit=320),
+        "screenshot_path": _trim_text(value.get("screenshot_path", ""), limit=320),
+        "observation_token": _trim_text(value.get("observation_token", ""), limit=120),
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "backend": _trim_text(value.get("backend", ""), limit=120),
     }

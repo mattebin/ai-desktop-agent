@@ -52,6 +52,10 @@ def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
         "reason": _trim_text(pending.get("reason", ""), limit=180),
         "summary": _trim_text(pending.get("summary", ""), limit=180),
         "step": _trim_text(pending.get("step", ""), limit=120),
+        "tool": _trim_text(pending.get("tool", ""), limit=120),
+        "target": _trim_text(pending.get("target", ""), limit=180),
+        "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
+        "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
     }
 
 
@@ -85,7 +89,13 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
         "checkpoint_tool": _trim_text(desktop.get("checkpoint_tool", ""), limit=80),
         "checkpoint_reason": _trim_text(desktop.get("checkpoint_reason", ""), limit=180),
         "checkpoint_target": _trim_text(desktop.get("checkpoint_target", ""), limit=180),
+        "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
         "screenshot_path": _trim_text(desktop.get("screenshot_path", ""), limit=220),
+        "evidence_id": _trim_text(desktop.get("evidence_id", ""), limit=80),
+        "evidence_summary": _trim_text(desktop.get("evidence_summary", ""), limit=220),
+        "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
+        "evidence_reason": _trim_text(desktop.get("evidence_reason", ""), limit=80),
+        "evidence_timestamp": _trim_text(desktop.get("evidence_timestamp", ""), limit=40),
     }
 
 

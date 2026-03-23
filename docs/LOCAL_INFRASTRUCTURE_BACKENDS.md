@@ -76,6 +76,22 @@ Current non-goals:
 - no broad interaction engine
 - no unrestricted desktop automation
 
+## Desktop evidence layer
+
+These backends now feed a bounded read-only desktop evidence layer.
+
+Current role:
+
+- combine active-window metadata, visible-window observations, screenshot metadata, and optional UI probes
+- retain bounded evidence artifacts and bundle metadata under `data/desktop_evidence/`
+- expose compact recent evidence references through the local API and operator state
+
+Current non-goals:
+
+- no OCR-heavy interpretation
+- no model-facing planning changes
+- no new desktop action expansion
+
 ## Fallback behavior
 
 All new backends are optional.
@@ -96,6 +112,7 @@ Current local deterministic coverage checks:
 - file-watch event normalization and fallback behavior
 - desktop backend status and screenshot capture plumbing
 - read-only UI evidence envelope shape
+- desktop evidence bundle assembly, retention, and API exposure
 
 ## Current configuration keys
 
@@ -106,3 +123,5 @@ Defined in `config/settings.yaml`:
 - `desktop_window_backend`
 - `desktop_screenshot_backend`
 - `ui_evidence_backend`
+- `desktop_evidence_root`
+- `max_desktop_evidence_entries`

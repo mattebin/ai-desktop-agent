@@ -14,6 +14,7 @@ This project is now a serious local operator framework with:
 - Playwright-only browser operations
 - bounded desktop-control primitives
 - optional local infrastructure backends for scheduling, file watching, desktop observation, and future UI evidence
+- a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
 - live eval coverage for core and realistic workflows
 
 ## Current architecture
@@ -69,6 +70,29 @@ These integrations are intentionally narrow:
 - they do not add broad new control loops
 - they do not change model-facing behavior by themselves
 - they do not widen the current bounded desktop action scope
+
+## Read-only desktop evidence layer
+
+This project now includes a bounded read-only desktop evidence layer that assembles:
+
+- active-window metadata
+- visible-window observations
+- bounded screenshot artifact references
+- optional read-only UI evidence probes
+
+Current role:
+
+- provide a normalized, serialization-friendly desktop evidence bundle
+- retain bounded evidence artifacts under `data/desktop_evidence/`
+- expose recent evidence references through the authoritative local API
+- support future approval grounding without adding new action capability in this pass
+
+Current non-goals:
+
+- no OCR-heavy desktop interpretation
+- no broad UI automation
+- no new desktop actions beyond the existing bounded set
+- no model-facing behavior change by itself
 
 ## Project philosophy
 

@@ -23,6 +23,7 @@ from core.local_api_events import (
     DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
     LocalApiEventStream,
 )
+from core.desktop_evidence import get_desktop_evidence_store
 
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -127,6 +128,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "tool": _trim_text(pending.get("tool", ""), limit=120),
             "target": _trim_text(pending.get("target", ""), limit=180),
             "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
+            "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
         },
         "active_task": snapshot.get("active_task", {}),
         "browser": {
@@ -148,6 +150,10 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_tool": _trim_text(desktop.get("checkpoint_tool", ""), limit=80),
             "checkpoint_reason": _trim_text(desktop.get("checkpoint_reason", ""), limit=180),
             "screenshot_path": _trim_text(desktop.get("screenshot_path", ""), limit=220),
+            "evidence_id": _trim_text(desktop.get("evidence_id", ""), limit=80),
+            "evidence_summary": _trim_text(desktop.get("evidence_summary", ""), limit=220),
+            "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
+            "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
         },
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
@@ -198,6 +204,14 @@ def _watch_payload(watch_state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "counts": watch_state.get("counts", {}),
         "tasks": watch_state.get("tasks", []),
+    }
+
+
+def _desktop_evidence_payload(limit: int = 8) -> Dict[str, Any]:
+    store = get_desktop_evidence_store()
+    return {
+        "recent": store.recent_refs(limit=limit),
+        "status": store.status_snapshot(),
     }
 
 
@@ -484,6 +498,21 @@ class LocalOperatorApiServer:
 
                 if path == "/watches":
                     self._respond_ok(_watch_payload(server_ref.controller.get_watch_state()))
+                    return
+
+                if path == "/desktop/evidence":
+                    limit = self._query_limit(parsed, default=8, maximum=24)
+                    self._respond_ok(_desktop_evidence_payload(limit=limit))
+                    return
+
+                evidence_segments = self._path_segments(path)
+                if len(evidence_segments) == 3 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence":
+                    evidence_id = unquote(evidence_segments[2])
+                    bundle = get_desktop_evidence_store().load_bundle(evidence_id)
+                    if not bundle:
+                        self._respond_error(404, f"Desktop evidence not found: {evidence_id}")
+                        return
+                    self._respond_ok({"bundle": bundle})
                     return
 
                 self._respond_error(404, f"Unknown endpoint: {path}")

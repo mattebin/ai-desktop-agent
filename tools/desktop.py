@@ -7,6 +7,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from core.desktop_evidence import (
+    build_desktop_evidence_bundle,
+    collect_display_metadata,
+    get_desktop_evidence_store,
+)
 from tools.desktop_backends import (
     create_screenshot_backend,
     create_ui_evidence_backend,
@@ -458,15 +463,71 @@ def _get_ui_evidence_backend():
 
 
 def get_desktop_backend_status() -> Dict[str, Any]:
-    return describe_backends(
+    status = describe_backends(
         window_backend=_get_window_backend(),
         screenshot_backend=_get_screenshot_backend(),
         ui_evidence_backend=_get_ui_evidence_backend(),
     )
+    try:
+        status["evidence_store"] = get_desktop_evidence_store().status_snapshot()
+    except Exception:
+        status["evidence_store"] = {"bundle_count": 0, "root": "", "latest": {}}
+    return status
 
 
 def probe_ui_evidence(*, target: str = "active_window", limit: int = 8) -> Dict[str, Any]:
     return _get_ui_evidence_backend().probe(target=target, limit=limit)
+
+
+def _latest_evidence_ref_for_observation(token: str) -> Dict[str, Any]:
+    try:
+        return get_desktop_evidence_store().find_by_observation_token(token)
+    except Exception:
+        return {}
+
+
+def _record_desktop_evidence(
+    *,
+    source_action: str,
+    active_window: Dict[str, Any],
+    windows: List[Dict[str, Any]],
+    observation_token: str = "",
+    screenshot: Dict[str, Any] | None = None,
+    target_window: Dict[str, Any] | None = None,
+    include_ui_evidence: bool = False,
+    ui_limit: int = 8,
+    errors: List[str] | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ui_result: Dict[str, Any] = {}
+    collected_errors = list(errors or [])
+    if include_ui_evidence:
+        probe_target = str(active_window.get("title", "") or "active_window").strip() or "active_window"
+        ui_result = probe_ui_evidence(target=probe_target, limit=ui_limit)
+        if not ui_result.get("ok", False) and ui_result.get("error"):
+            collected_errors.append(str(ui_result.get("error", "")).strip())
+
+    screen = collect_display_metadata(_virtual_screen_rect())
+    bundle = build_desktop_evidence_bundle(
+        source_action=source_action,
+        active_window=active_window,
+        windows=windows,
+        observation_token=observation_token,
+        screenshot=screenshot or {},
+        ui_evidence=(ui_result.get("data", {}) if isinstance(ui_result.get("data", {}), dict) else {}),
+        target_window=target_window or {},
+        screen=screen,
+        errors=collected_errors,
+    )
+    try:
+        evidence_ref = get_desktop_evidence_store().record_bundle(bundle)
+        bundle["bundle_path"] = evidence_ref.get("bundle_path", "")
+        bundle["artifacts"] = {
+            **(bundle.get("artifacts", {}) if isinstance(bundle.get("artifacts", {}), dict) else {}),
+            "bundle_path": evidence_ref.get("bundle_path", ""),
+        }
+        return bundle, evidence_ref
+    except Exception:
+        return bundle, {}
 
 
 def _enum_windows(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
@@ -606,8 +667,12 @@ def _desktop_result(
     workflow_resumed: bool = False,
     point: Dict[str, int] | None = None,
     typed_text_preview: str = "",
+    desktop_evidence: Dict[str, Any] | None = None,
+    desktop_evidence_ref: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     state = desktop_state if isinstance(desktop_state, dict) else {}
+    evidence = desktop_evidence if isinstance(desktop_evidence, dict) else {}
+    evidence_ref = desktop_evidence_ref if isinstance(desktop_evidence_ref, dict) else {}
     return {
         "ok": bool(ok),
         "action": action,
@@ -633,6 +698,10 @@ def _desktop_result(
         "last_desktop_action": _trim_text(summary, limit=220),
         "point": point if isinstance(point, dict) else {},
         "typed_text_preview": _trim_text(typed_text_preview, limit=80),
+        "desktop_evidence": evidence,
+        "desktop_evidence_ref": evidence_ref,
+        "evidence_id": _trim_text(evidence_ref.get("evidence_id", "") or evidence.get("evidence_id", ""), limit=80),
+        "evidence_summary": _trim_text(evidence_ref.get("summary", "") or evidence.get("summary", ""), limit=240),
     }
 
 
@@ -820,16 +889,22 @@ def _capture_with_backend(
     )
 
 
-def _capture_path(args: Dict[str, Any]) -> Path:
+def _capture_path(args: Dict[str, Any], *, evidence_id: str = "") -> Path:
+    if evidence_id:
+        extension = str(getattr(_get_screenshot_backend(), "file_extension", ".bmp") or ".bmp").strip()
+        if not extension.startswith("."):
+            extension = f".{extension}"
+        return get_desktop_evidence_store().artifact_path(evidence_id, extension=extension)
+
     name = str(args.get("name", "") or args.get("output_name", "")).strip()
     safe_name = "".join(ch for ch in name if ch.isalnum() or ch in {"-", "_"}).strip("._")
     if not safe_name:
         safe_name = f"desktop_capture_{int(time.time() * 1000)}"
-    root = Path.cwd() / "data" / "desktop_captures"
-    root.mkdir(parents=True, exist_ok=True)
     extension = str(getattr(_get_screenshot_backend(), "file_extension", ".bmp") or ".bmp").strip()
     if not extension.startswith("."):
         extension = f".{extension}"
+    root = Path.cwd() / "data" / "desktop_captures"
+    root.mkdir(parents=True, exist_ok=True)
     return root / f"{safe_name}{extension}"
 
 
@@ -838,6 +913,13 @@ def desktop_list_windows(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = _enum_windows(limit=limit)
     active_window = _active_window_info()
     observation = _register_observation(active_window=active_window, windows=windows)
+    evidence_bundle, evidence_ref = _record_desktop_evidence(
+        source_action="desktop_list_windows",
+        active_window=active_window,
+        windows=windows,
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        include_ui_evidence=False,
+    )
     titles = ", ".join(item.get("title", "") for item in windows[:4] if item.get("title"))
     summary = f"Found {len(windows)} visible window(s)."
     if active_window.get("title"):
@@ -849,6 +931,8 @@ def desktop_list_windows(args: Dict[str, Any]) -> Dict[str, Any]:
         action="desktop_list_windows",
         summary=summary,
         desktop_state=observation,
+        desktop_evidence=evidence_bundle,
+        desktop_evidence_ref=evidence_ref,
     )
 
 
@@ -856,6 +940,13 @@ def desktop_get_active_window(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = _enum_windows(limit=_coerce_int(args.get("limit", DESKTOP_DEFAULT_WINDOW_LIMIT), DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20))
     active_window = _active_window_info()
     observation = _register_observation(active_window=active_window, windows=windows)
+    evidence_bundle, evidence_ref = _record_desktop_evidence(
+        source_action="desktop_get_active_window",
+        active_window=active_window,
+        windows=windows,
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        include_ui_evidence=False,
+    )
     if not active_window:
         return _desktop_result(
             ok=False,
@@ -863,12 +954,16 @@ def desktop_get_active_window(args: Dict[str, Any]) -> Dict[str, Any]:
             summary="Could not determine the active window.",
             desktop_state=observation,
             error="Could not determine the active window.",
+            desktop_evidence=evidence_bundle,
+            desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
         action="desktop_get_active_window",
         summary=f"The active window is '{active_window.get('title', 'unknown window')}'.",
         desktop_state=observation,
+        desktop_evidence=evidence_bundle,
+        desktop_evidence_ref=evidence_ref,
     )
 
 
@@ -877,17 +972,37 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
     active_before = _active_window_info()
     if error:
         observation = _register_observation(active_window=active_before, windows=windows)
+        evidence_bundle, evidence_ref = _record_desktop_evidence(
+            source_action="desktop_focus_window",
+            active_window=active_before,
+            windows=windows,
+            observation_token=str(observation.get("observation_token", "")).strip(),
+            target_window=target_window,
+            include_ui_evidence=False,
+            errors=[error],
+        )
         return _desktop_result(
             ok=False,
             action="desktop_focus_window",
             summary=error,
             desktop_state=observation,
             error=error,
+            desktop_evidence=evidence_bundle,
+            desktop_evidence_ref=evidence_ref,
         )
 
     ok, focus_error = _focus_window_handle(_parse_hwnd(target_window.get("window_id", "")))
     active_after = _active_window_info()
     observation = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    evidence_bundle, evidence_ref = _record_desktop_evidence(
+        source_action="desktop_focus_window",
+        active_window=active_after,
+        windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT),
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        target_window=target_window,
+        include_ui_evidence=False,
+        errors=[focus_error] if focus_error and not ok else [],
+    )
     if not ok:
         return _desktop_result(
             ok=False,
@@ -895,12 +1010,16 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
             summary=f"Could not focus '{target_window.get('title', 'the requested window')}'.",
             desktop_state=observation,
             error=focus_error or f"Could not focus '{target_window.get('title', 'the requested window')}'.",
+            desktop_evidence=evidence_bundle,
+            desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
         action="desktop_focus_window",
         summary=f"Focused '{active_after.get('title', target_window.get('title', 'the requested window'))}'.",
         desktop_state=observation,
+        desktop_evidence=evidence_bundle,
+        desktop_evidence_ref=evidence_ref,
     )
 
 
@@ -908,6 +1027,7 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
     scope = str(args.get("scope", "active_window")).strip().lower()
     active_window = _active_window_info()
     windows = _enum_windows(limit=_coerce_int(args.get("limit", DESKTOP_DEFAULT_WINDOW_LIMIT), DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20))
+    evidence_id = get_desktop_evidence_store().next_evidence_id()
 
     if scope == "desktop":
         bounds = _virtual_screen_rect()
@@ -916,12 +1036,22 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
         scope = "active_window"
         if not active_window:
             observation = _register_observation(active_window=active_window, windows=windows)
+            evidence_bundle, evidence_ref = _record_desktop_evidence(
+                source_action="desktop_capture_screenshot",
+                active_window=active_window,
+                windows=windows,
+                observation_token=str(observation.get("observation_token", "")).strip(),
+                include_ui_evidence=False,
+                errors=["Could not capture the active window because no active window was detected."],
+            )
             return _desktop_result(
                 ok=False,
                 action="desktop_capture_screenshot",
                 summary="Could not capture the active window because no active window was detected.",
                 desktop_state=observation,
                 error="Could not capture the active window because no active window was detected.",
+                desktop_evidence=evidence_bundle,
+                desktop_evidence_ref=evidence_ref,
             )
         bounds = dict(active_window.get("rect", {}))
         capture_label = f"active window '{active_window.get('title', 'window')}'"
@@ -930,7 +1060,7 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
     height = min(max(1, int(bounds.get("height", 0) or 0)), DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT)
     capture_x = int(bounds.get("x", 0))
     capture_y = int(bounds.get("y", 0))
-    path = _capture_path(args)
+    path = _capture_path(args, evidence_id=evidence_id)
     capture_result = _capture_with_backend(
         path,
         x=capture_x,
@@ -950,6 +1080,23 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
         screenshot_path=captured_path if ok else "",
         screenshot_scope=scope,
     )
+    evidence_bundle, evidence_ref = _record_desktop_evidence(
+        source_action="desktop_capture_screenshot",
+        active_window=active_window,
+        windows=windows,
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        screenshot={
+            **capture_data,
+            "path": captured_path if ok else "",
+            "scope": scope,
+            "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
+            "active_window_title": str(active_window.get("title", "") or ""),
+        },
+        target_window=active_window if scope == "active_window" else {},
+        include_ui_evidence=True,
+        ui_limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=12),
+        errors=[error] if error else [],
+    )
     if not ok:
         return _desktop_result(
             ok=False,
@@ -957,12 +1104,16 @@ def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
             summary=f"Could not capture a screenshot of the {capture_label}.",
             desktop_state=observation,
             error=error,
+            desktop_evidence=evidence_bundle,
+            desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
         action="desktop_capture_screenshot",
         summary=f"Captured a screenshot of the {capture_label}.",
         desktop_state=observation,
+        desktop_evidence=evidence_bundle,
+        desktop_evidence_ref=evidence_ref,
     )
 
 
@@ -976,6 +1127,7 @@ def _pause_desktop_action(
     checkpoint_target: str,
     checkpoint_resume_args: Dict[str, Any],
     point: Dict[str, int] | None = None,
+    desktop_evidence_ref: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     observation = _register_observation(active_window=active_window, windows=windows)
     resume_args = dict(checkpoint_resume_args)
@@ -995,6 +1147,7 @@ def _pause_desktop_action(
         checkpoint_target=checkpoint_target,
         checkpoint_resume_args=resume_args,
         point=point,
+        desktop_evidence_ref=desktop_evidence_ref,
     )
 
 
@@ -1002,6 +1155,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
     x = _coerce_int(args.get("x", 0), 0, minimum=-20_000, maximum=20_000)
     y = _coerce_int(args.get("y", 0), 0, minimum=-20_000, maximum=20_000)
     token, observation, observation_error = _validate_fresh_observation(args)
+    evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
     if observation_error:
@@ -1013,6 +1167,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=observation_error,
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
     if not active_window or not _foreground_window_matches(observation, active_window):
         state = _register_observation(active_window=active_window, windows=windows)
@@ -1024,6 +1179,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=message,
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
 
     screen_rect = _virtual_screen_rect()
@@ -1037,6 +1193,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=message,
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
 
     active_rect = active_window.get("rect", {}) if isinstance(active_window.get("rect", {}), dict) else {}
@@ -1050,6 +1207,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=message,
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
 
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
@@ -1070,8 +1228,10 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
                 "observation_token": token,
                 "expected_window_id": active_window.get("window_id", ""),
                 "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
             },
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
 
     original_point = POINT()
@@ -1090,6 +1250,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             error="Could not move the cursor to the requested point.",
             approval_status="approved",
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
 
     inputs = (INPUT * 2)(
@@ -1112,6 +1273,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
             error="The desktop click did not complete.",
             approval_status="approved",
             point={"x": x, "y": y},
+            desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
@@ -1121,6 +1283,7 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
         approval_status="approved",
         workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
         point={"x": x, "y": y},
+        desktop_evidence_ref=evidence_ref,
     )
 
 
@@ -1190,6 +1353,7 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     token, observation, observation_error = _validate_fresh_observation(args)
+    evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
     if observation_error:
@@ -1201,6 +1365,7 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=observation_error,
             typed_text_preview=_trim_text(value, limit=60),
+            desktop_evidence_ref=evidence_ref,
         )
 
     if not active_window or not _foreground_window_matches(observation, active_window):
@@ -1213,6 +1378,7 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=message,
             typed_text_preview=_trim_text(value, limit=60),
+            desktop_evidence_ref=evidence_ref,
         )
 
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
@@ -1233,7 +1399,9 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
                 "observation_token": token,
                 "expected_window_id": active_window.get("window_id", ""),
                 "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
             },
+            desktop_evidence_ref=evidence_ref,
         )
 
     ok = _send_text(value)
@@ -1248,6 +1416,7 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             error=f"Could not type into '{field_label}' in '{active_window.get('title', 'the active window')}'.",
             approval_status="approved",
             typed_text_preview=_trim_text(value, limit=60),
+            desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
@@ -1257,6 +1426,7 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
         approval_status="approved",
         workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
         typed_text_preview=_trim_text(value, limit=60),
+        desktop_evidence_ref=evidence_ref,
     )
 
 

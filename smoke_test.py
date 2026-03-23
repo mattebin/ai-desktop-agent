@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -16,6 +17,7 @@ mods = [
     "core.browser_tasks",
     "core.chat_sessions",
     "core.config",
+    "core.desktop_evidence",
     "core.execution_manager",
     "core.file_watch_backend",
     "core.local_api",
@@ -53,6 +55,8 @@ if failed:
     raise SystemExit(1)
 
 from core.alerts import AlertStore
+import core.desktop_evidence as desktop_evidence_module
+from core.desktop_evidence import DesktopEvidenceStore, build_desktop_evidence_bundle
 from core.chat_sessions import ChatSessionManager
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
@@ -231,6 +235,10 @@ if ui_evidence_probe.get("kind") != "ui_evidence_observation":
     raise SystemExit("probe_ui_evidence() did not return the expected normalized evidence envelope.")
 if not isinstance(ui_evidence_probe.get("data", {}).get("controls", []), list):
     raise SystemExit("probe_ui_evidence() did not return normalized control evidence.")
+if not desktop_capture.get("desktop_evidence_ref", {}).get("evidence_id"):
+    raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence reference.")
+if not isinstance(desktop_capture.get("desktop_evidence", {}), dict):
+    raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence bundle.")
 print("[OK] desktop tools")
 
 client = LocalOperatorApiClient("http://127.0.0.1:8765/")
@@ -262,6 +270,166 @@ with urlopen(f"http://127.0.0.1:{cors_server.port}/health", timeout=5) as health
         raise SystemExit("Local API health did not expose the expected management ownership metadata.")
 cors_server.shutdown()
 print("[OK] local api cors")
+
+temp_evidence_root = Path("data/desktop_evidence_smoke")
+if temp_evidence_root.exists():
+    shutil.rmtree(temp_evidence_root, ignore_errors=True)
+temp_evidence_store = DesktopEvidenceStore(temp_evidence_root, max_items=2)
+
+first_capture_path = temp_evidence_store.artifact_path("desk-smoke-1", extension=".png")
+first_capture_path.write_bytes(b"desktop evidence smoke 1")
+first_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_capture_screenshot",
+    active_window={
+        "window_id": "0x00123456",
+        "title": "Evidence Smoke Window",
+        "process_name": "python.exe",
+        "rect": {"x": 10, "y": 20, "width": 640, "height": 480},
+        "is_active": True,
+        "is_visible": True,
+        "backend": "pywinctl",
+    },
+    windows=[
+        {
+            "window_id": "0x00123456",
+            "title": "Evidence Smoke Window",
+            "process_name": "python.exe",
+            "rect": {"x": 10, "y": 20, "width": 640, "height": 480},
+            "is_active": True,
+            "is_visible": True,
+            "backend": "pywinctl",
+        }
+    ],
+    observation_token="desktop-evidence-smoke-1",
+    screenshot={
+        "backend": "mss",
+        "path": str(first_capture_path),
+        "scope": "active_window",
+        "bounds": {"x": 10, "y": 20, "width": 640, "height": 480},
+        "metadata": {"format": "png"},
+    },
+    ui_evidence={
+        "backend": "pywinauto",
+        "target": "Evidence Smoke Window",
+        "controls": [{"name": "Search", "control_type": "Edit", "automation_id": "SearchBox", "text": ""}],
+    },
+    target_window={
+        "window_id": "0x00123456",
+        "title": "Evidence Smoke Window",
+        "process_name": "python.exe",
+        "rect": {"x": 10, "y": 20, "width": 640, "height": 480},
+        "is_active": True,
+        "is_visible": True,
+        "backend": "pywinctl",
+    },
+    screen={
+        "virtual_screen": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+        "monitors": [{"left": 0, "top": 0, "width": 1920, "height": 1080}],
+        "backend": "mss",
+    },
+)
+first_bundle["evidence_id"] = "desk-smoke-1"
+first_ref = temp_evidence_store.record_bundle(first_bundle)
+loaded_first_bundle = temp_evidence_store.load_bundle("desk-smoke-1")
+if loaded_first_bundle.get("evidence_id") != "desk-smoke-1":
+    raise SystemExit("DesktopEvidenceStore did not persist the expected evidence bundle.")
+if loaded_first_bundle.get("reason") != "collected":
+    raise SystemExit("Desktop evidence bundle did not preserve the collected reason.")
+if json.loads(json.dumps(loaded_first_bundle)).get("evidence_id") != "desk-smoke-1":
+    raise SystemExit("Desktop evidence bundle was not serialization-friendly.")
+
+second_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_get_active_window",
+    active_window={"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"},
+    windows=[{"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"}],
+    observation_token="desktop-evidence-smoke-2",
+    screenshot={},
+    ui_evidence={"backend": "pywinauto", "target": "Evidence Smoke Window", "controls": []},
+    errors=["screenshot backend unavailable"],
+)
+second_bundle["evidence_id"] = "desk-smoke-2"
+second_ref = temp_evidence_store.record_bundle(second_bundle)
+loaded_second_bundle = temp_evidence_store.load_bundle("desk-smoke-2")
+if loaded_second_bundle.get("reason") != "partial":
+    raise SystemExit("Desktop evidence bundle did not mark partial evidence correctly.")
+
+third_capture_path = temp_evidence_store.artifact_path("desk-smoke-3", extension=".png")
+third_capture_path.write_bytes(b"desktop evidence smoke 3")
+third_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_capture_screenshot",
+    active_window={"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"},
+    windows=[{"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"}],
+    observation_token="desktop-evidence-smoke-3",
+    screenshot={
+        "backend": "mss",
+        "path": str(third_capture_path),
+        "scope": "desktop",
+        "bounds": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+    },
+)
+third_bundle["evidence_id"] = "desk-smoke-3"
+third_ref = temp_evidence_store.record_bundle(third_bundle)
+if temp_evidence_store.load_bundle("desk-smoke-1"):
+    raise SystemExit("DesktopEvidenceStore did not prune an older bundle when retention was exceeded.")
+if first_capture_path.exists():
+    raise SystemExit("DesktopEvidenceStore did not prune an older screenshot artifact when retention was exceeded.")
+if len(temp_evidence_store.recent_refs(limit=8)) != 2:
+    raise SystemExit("DesktopEvidenceStore did not enforce bounded recent evidence retention.")
+if temp_evidence_store.find_by_observation_token("desktop-evidence-smoke-3").get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("DesktopEvidenceStore did not resolve an evidence ref by observation token.")
+if temp_evidence_store.status_snapshot().get("latest", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("DesktopEvidenceStore did not expose the latest evidence status correctly.")
+
+desktop_state = TaskState("desktop evidence smoke")
+desktop_state.update_memory_from_tool(
+    "desktop_capture_screenshot",
+    {
+        "ok": True,
+        "summary": "Captured a screenshot of the active window.",
+        "screenshot_path": third_ref.get("screenshot_path", ""),
+        "desktop_state": {
+            "active_window": {
+                "title": "Evidence Smoke Window",
+                "window_id": "0x00123456",
+                "process_name": "python.exe",
+            },
+            "windows": [{"title": "Evidence Smoke Window"}],
+            "observation_token": "desktop-evidence-smoke-3",
+            "observed_at": "2026-03-23T10:00:00",
+        },
+        "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
+        "desktop_evidence_ref": third_ref,
+    },
+)
+desktop_evidence_snapshot = desktop_state.get_control_snapshot()
+if desktop_evidence_snapshot.get("desktop", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("TaskState did not surface desktop evidence in the authoritative control snapshot.")
+if desktop_evidence_snapshot.get("desktop", {}).get("evidence_bundle_path", "") != third_ref.get("bundle_path", ""):
+    raise SystemExit("TaskState did not preserve the desktop evidence bundle path.")
+
+original_evidence_store = getattr(desktop_evidence_module, "_STORE", None)
+desktop_evidence_module._STORE = temp_evidence_store
+evidence_server = LocalOperatorApiServer(port=0)
+evidence_server.start_in_thread()
+try:
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence", timeout=5) as evidence_response:
+        parsed_evidence = json.loads(evidence_response.read().decode("utf-8"))
+        recent_items = parsed_evidence.get("data", {}).get("recent", [])
+        if not recent_items or recent_items[-1].get("evidence_id") != "desk-smoke-3":
+            raise SystemExit("Local API did not expose recent desktop evidence references.")
+        if parsed_evidence.get("data", {}).get("status", {}).get("root", "") != str(temp_evidence_root):
+            raise SystemExit("Local API did not expose the desktop evidence store status.")
+
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3", timeout=5) as bundle_response:
+        parsed_bundle = json.loads(bundle_response.read().decode("utf-8"))
+        if parsed_bundle.get("data", {}).get("bundle", {}).get("evidence_id") != "desk-smoke-3":
+            raise SystemExit("Local API did not expose the requested desktop evidence bundle.")
+finally:
+    evidence_server.shutdown()
+    desktop_evidence_module._STORE = original_evidence_store
+    shutil.rmtree(temp_evidence_root, ignore_errors=True)
+
+print("[OK] desktop evidence layer")
 
 project_venv_python = _project_venv_python(Path.cwd())
 if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):

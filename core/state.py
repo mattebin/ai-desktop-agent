@@ -122,6 +122,11 @@ class TaskState:
         self.desktop_active_window_process: str = ""
         self.desktop_last_screenshot_path: str = ""
         self.desktop_last_screenshot_scope: str = ""
+        self.desktop_last_evidence_id: str = ""
+        self.desktop_last_evidence_summary: str = ""
+        self.desktop_last_evidence_bundle_path: str = ""
+        self.desktop_last_evidence_reason: str = ""
+        self.desktop_last_evidence_timestamp: str = ""
         self.desktop_observation_token: str = ""
         self.desktop_observed_at: str = ""
         self.desktop_recent_actions: List[str] = []
@@ -133,6 +138,7 @@ class TaskState:
         self.desktop_checkpoint_reason: str = ""
         self.desktop_checkpoint_tool: str = ""
         self.desktop_checkpoint_target: str = ""
+        self.desktop_checkpoint_evidence_id: str = ""
         self.desktop_checkpoint_approval_status: str = ""
         self.desktop_checkpoint_resume_args: Dict[str, Any] = {}
         if isinstance(session_state, dict):
@@ -254,6 +260,11 @@ class TaskState:
         self.desktop_active_window_process = str(session_state.get("desktop_active_window_process", "")).strip()[:120]
         self.desktop_last_screenshot_path = str(session_state.get("desktop_last_screenshot_path", "")).strip()[:260]
         self.desktop_last_screenshot_scope = str(session_state.get("desktop_last_screenshot_scope", "")).strip()[:40]
+        self.desktop_last_evidence_id = str(session_state.get("desktop_last_evidence_id", "")).strip()[:80]
+        self.desktop_last_evidence_summary = str(session_state.get("desktop_last_evidence_summary", "")).strip()[:240]
+        self.desktop_last_evidence_bundle_path = str(session_state.get("desktop_last_evidence_bundle_path", "")).strip()[:320]
+        self.desktop_last_evidence_reason = str(session_state.get("desktop_last_evidence_reason", "")).strip()[:40]
+        self.desktop_last_evidence_timestamp = str(session_state.get("desktop_last_evidence_timestamp", "")).strip()[:40]
         self.desktop_observation_token = str(session_state.get("desktop_observation_token", "")).strip()[:120]
         self.desktop_observed_at = str(session_state.get("desktop_observed_at", "")).strip()[:40]
         self.desktop_recent_actions = self._normalize_values(session_state.get("desktop_recent_actions", []), limit=8, text_limit=220)
@@ -265,6 +276,7 @@ class TaskState:
         self.desktop_checkpoint_reason = str(session_state.get("desktop_checkpoint_reason", "")).strip()[:180]
         self.desktop_checkpoint_tool = str(session_state.get("desktop_checkpoint_tool", "")).strip()[:80]
         self.desktop_checkpoint_target = str(session_state.get("desktop_checkpoint_target", "")).strip()[:180]
+        self.desktop_checkpoint_evidence_id = str(session_state.get("desktop_checkpoint_evidence_id", "")).strip()[:80]
         self.desktop_checkpoint_approval_status = str(session_state.get("desktop_checkpoint_approval_status", "")).strip()[:40]
         self.desktop_checkpoint_resume_args = self._normalize_checkpoint_args(session_state.get("desktop_checkpoint_resume_args", {}))
 
@@ -334,6 +346,11 @@ class TaskState:
             "desktop_active_window_process": self.desktop_active_window_process[:120],
             "desktop_last_screenshot_path": self.desktop_last_screenshot_path[:260],
             "desktop_last_screenshot_scope": self.desktop_last_screenshot_scope[:40],
+            "desktop_last_evidence_id": self.desktop_last_evidence_id[:80],
+            "desktop_last_evidence_summary": self.desktop_last_evidence_summary[:240],
+            "desktop_last_evidence_bundle_path": self.desktop_last_evidence_bundle_path[:320],
+            "desktop_last_evidence_reason": self.desktop_last_evidence_reason[:40],
+            "desktop_last_evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "desktop_observation_token": self.desktop_observation_token[:120],
             "desktop_observed_at": self.desktop_observed_at[:40],
             "desktop_recent_actions": self._normalize_values(self.desktop_recent_actions, limit=8, text_limit=220),
@@ -345,6 +362,7 @@ class TaskState:
             "desktop_checkpoint_reason": self.desktop_checkpoint_reason[:180],
             "desktop_checkpoint_tool": self.desktop_checkpoint_tool[:80],
             "desktop_checkpoint_target": self.desktop_checkpoint_target[:180],
+            "desktop_checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "desktop_checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "desktop_checkpoint_resume_args": self._normalize_checkpoint_args(self.desktop_checkpoint_resume_args),
         }
@@ -422,6 +440,7 @@ class TaskState:
         self.desktop_checkpoint_reason = ""
         self.desktop_checkpoint_tool = ""
         self.desktop_checkpoint_target = ""
+        self.desktop_checkpoint_evidence_id = ""
         self.desktop_checkpoint_approval_status = ""
         self.desktop_checkpoint_resume_args = {}
 
@@ -459,6 +478,7 @@ class TaskState:
         reason: str,
         tool: str,
         target: str = "",
+        evidence_id: str = "",
         approval_status: str = "not approved",
         resume_args: Dict[str, Any] | None = None,
     ):
@@ -466,6 +486,7 @@ class TaskState:
         self.desktop_checkpoint_reason = str(reason).strip()[:180]
         self.desktop_checkpoint_tool = str(tool).strip()[:80]
         self.desktop_checkpoint_target = str(target).strip()[:180]
+        self.desktop_checkpoint_evidence_id = str(evidence_id).strip()[:80]
         self.desktop_checkpoint_approval_status = str(approval_status).strip()[:40] or "not approved"
         self.desktop_checkpoint_resume_args = self._normalize_checkpoint_args(resume_args or {})
 
@@ -827,6 +848,24 @@ class TaskState:
             self.desktop_last_screenshot_path = screenshot_path[:260]
         if screenshot_scope:
             self.desktop_last_screenshot_scope = screenshot_scope[:40]
+
+        evidence_ref = result.get("desktop_evidence_ref", {}) if isinstance(result.get("desktop_evidence_ref", {}), dict) else {}
+        evidence_bundle = result.get("desktop_evidence", {}) if isinstance(result.get("desktop_evidence", {}), dict) else {}
+        evidence_id = str(evidence_ref.get("evidence_id", "") or evidence_bundle.get("evidence_id", "")).strip()
+        evidence_summary = str(evidence_ref.get("summary", "") or evidence_bundle.get("summary", "")).strip()
+        evidence_bundle_path = str(evidence_ref.get("bundle_path", "") or evidence_bundle.get("bundle_path", "")).strip()
+        evidence_reason = str(evidence_ref.get("reason", "") or evidence_bundle.get("reason", "")).strip()
+        evidence_timestamp = str(evidence_ref.get("timestamp", "") or evidence_bundle.get("timestamp", "")).strip()
+        if evidence_id:
+            self.desktop_last_evidence_id = evidence_id[:80]
+        if evidence_summary:
+            self.desktop_last_evidence_summary = evidence_summary[:240]
+        if evidence_bundle_path:
+            self.desktop_last_evidence_bundle_path = evidence_bundle_path[:320]
+        if evidence_reason:
+            self.desktop_last_evidence_reason = evidence_reason[:40]
+        if evidence_timestamp:
+            self.desktop_last_evidence_timestamp = evidence_timestamp[:40]
         if observation_token:
             self.desktop_observation_token = observation_token[:120]
         if observed_at:
@@ -868,6 +907,7 @@ class TaskState:
                 reason=checkpoint_reason or summary or result.get("error", "desktop approval required"),
                 tool=checkpoint_tool or tool_name,
                 target=checkpoint_target,
+                evidence_id=evidence_id,
                 approval_status=approval_status or "not approved",
                 resume_args=checkpoint_resume_args,
             )
@@ -905,10 +945,16 @@ class TaskState:
             "observed_at": self.desktop_observed_at[:40],
             "screenshot_path": self.desktop_last_screenshot_path[:260],
             "screenshot_scope": self.desktop_last_screenshot_scope[:40],
+            "evidence_id": self.desktop_last_evidence_id[:80],
+            "evidence_summary": self.desktop_last_evidence_summary[:240],
+            "evidence_bundle_path": self.desktop_last_evidence_bundle_path[:320],
+            "evidence_reason": self.desktop_last_evidence_reason[:40],
+            "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
             "checkpoint_tool": self.desktop_checkpoint_tool[:80],
             "checkpoint_target": self.desktop_checkpoint_target[:180],
+            "checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
             "uncertainties": uncertainties,
@@ -2060,6 +2106,7 @@ class TaskState:
             "target": "",
             "summary": "",
             "approval_status": "",
+            "evidence_id": "",
             "target_files": [],
         }
         if browser_activity.get("checkpoint_pending"):
@@ -2071,6 +2118,7 @@ class TaskState:
                 "target": str(browser_activity.get("checkpoint_target", "")).strip(),
                 "summary": str(browser_activity.get("expected_state", "")).strip(),
                 "approval_status": str(browser_activity.get("checkpoint_approval_status", "not approved")).strip() or "not approved",
+                "evidence_id": "",
                 "target_files": [],
             }
         elif desktop_activity.get("checkpoint_pending"):
@@ -2085,6 +2133,7 @@ class TaskState:
                 "target": str(desktop_activity.get("checkpoint_target", "")).strip(),
                 "summary": str(desktop_activity.get("last_action", "") or desktop_activity.get("checkpoint_target", "")).strip(),
                 "approval_status": str(desktop_activity.get("checkpoint_approval_status", "not approved")).strip() or "not approved",
+                "evidence_id": str(desktop_activity.get("checkpoint_evidence_id", "")).strip(),
                 "target_files": [],
             }
         elif (
@@ -2101,6 +2150,7 @@ class TaskState:
                 "target": "",
                 "summary": str(review_bundle.get("summary", "")).strip(),
                 "approval_status": "not approved",
+                "evidence_id": "",
                 "target_files": [item.get("display", "") for item in review_bundle.get("items", []) if item.get("display")],
             }
 
@@ -2232,6 +2282,10 @@ class TaskState:
                     lines.append(f"- Screenshot: {desktop_activity.get('screenshot_path', '')} ({scope})")
                 else:
                     lines.append(f"- Screenshot: {desktop_activity.get('screenshot_path', '')}")
+            if desktop_activity.get("evidence_id"):
+                lines.append(f"- Evidence bundle: {desktop_activity.get('evidence_id', '')}")
+            if desktop_activity.get("evidence_summary"):
+                lines.append(f"- Evidence summary: {desktop_activity.get('evidence_summary', '')}")
             if desktop_activity.get("observed_at"):
                 lines.append(f"- Desktop observed at: {desktop_activity.get('observed_at', '')}")
             if desktop_activity.get("actions"):
