@@ -22,7 +22,20 @@ _DESKTOP_TYPE_VALUE_PATTERNS = (
 )
 _DESKTOP_FIELD_LABEL_PATTERN = re.compile(r"field label(?:ed|led)? ['\"]([^'\"]{1,120})['\"]", re.IGNORECASE)
 _DESKTOP_WINDOW_TITLE_PATTERN = re.compile(r"window titled ['\"]([^'\"]{1,180})['\"]", re.IGNORECASE)
-_DESKTOP_INSPECT_TOOLS = {"desktop_list_windows", "desktop_get_active_window", "desktop_capture_screenshot"}
+_DESKTOP_INSPECT_TOOLS = {
+    "desktop_list_windows",
+    "desktop_get_active_window",
+    "desktop_capture_screenshot",
+    "desktop_inspect_window_state",
+    "desktop_recover_window",
+    "desktop_wait_for_window_ready",
+}
+_DESKTOP_RECOVERY_TOOLS = {
+    "desktop_focus_window",
+    "desktop_inspect_window_state",
+    "desktop_recover_window",
+    "desktop_wait_for_window_ready",
+}
 
 
 def _persist_session_state(session_store, task_state):
@@ -275,6 +288,89 @@ def _has_completed_or_paused_tool_step(task_state, tool_name: str) -> bool:
     return False
 
 
+def _latest_tool_result(task_state, tool_names, *, allowed_statuses=None):
+    if isinstance(tool_names, str):
+        tool_name_set = {tool_names}
+    else:
+        tool_name_set = {str(name).strip() for name in list(tool_names or []) if str(name).strip()}
+    if not tool_name_set:
+        return None
+
+    statuses = set(allowed_statuses or {"completed", "failed", "paused"})
+    for step in reversed(task_state.steps):
+        if step.get("type") != "tool":
+            continue
+        if str(step.get("tool", "")).strip() not in tool_name_set:
+            continue
+        if str(step.get("status", "")).strip() not in statuses:
+            continue
+        result = step.get("result", {})
+        if isinstance(result, dict):
+            return result
+    return None
+
+
+def _desktop_has_completed_focus_context(task_state) -> bool:
+    return _has_completed_tool(task_state, "desktop_focus_window") or _has_completed_tool(task_state, "desktop_recover_window")
+
+
+def _desktop_target_seed_args(task_state, planner_goal: str) -> dict:
+    target_title = _goal_desktop_window_title(planner_goal)
+    checkpoint_args = getattr(task_state, "desktop_checkpoint_resume_args", {})
+    if not target_title and isinstance(checkpoint_args, dict):
+        target_title = str(checkpoint_args.get("expected_window_title", "")).strip()
+    if not target_title:
+        target_title = str(getattr(task_state, "desktop_last_target_window", "")).strip()
+
+    seed_args = {
+        "limit": 20,
+        "ui_limit": 8,
+        "wait_seconds": 2.2,
+        "poll_interval_seconds": 0.16,
+        "stability_samples": 3,
+        "stability_interval_ms": 120,
+        "max_attempts": 2,
+    }
+    if target_title:
+        seed_args["title"] = target_title
+        seed_args["expected_window_title"] = target_title
+        seed_args["exact"] = True
+    elif getattr(task_state, "desktop_active_window_title", ""):
+        active_title = str(getattr(task_state, "desktop_active_window_title", "")).strip()
+        seed_args["title"] = active_title
+        seed_args["expected_window_title"] = active_title
+        seed_args["exact"] = False
+
+    if isinstance(checkpoint_args, dict):
+        expected_window_id = str(checkpoint_args.get("expected_window_id", "")).strip()
+        expected_window_title = str(checkpoint_args.get("expected_window_title", "")).strip()
+        if expected_window_id:
+            seed_args.setdefault("window_id", expected_window_id)
+            seed_args.setdefault("expected_window_id", expected_window_id)
+        if expected_window_title:
+            seed_args.setdefault("expected_window_title", expected_window_title)
+            seed_args.setdefault("title", expected_window_title)
+            seed_args.setdefault("exact", True)
+
+    return seed_args
+
+
+def _desktop_latest_recovery(task_state) -> dict:
+    result = _latest_tool_result(task_state, _DESKTOP_RECOVERY_TOOLS)
+    if not isinstance(result, dict):
+        return {}
+    recovery = result.get("recovery", {})
+    return recovery if isinstance(recovery, dict) else {}
+
+
+def _execute_desktop_tool_step(tool_runtime, task_state, tool_name: str, seed_args: dict, planner_goal: str, *, session_store=None):
+    args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
+    result = tool_runtime.execute(tool_name, args)
+    _record_tool_result(task_state, tool_name, args, result)
+    _persist_session_state(session_store, task_state)
+    return args, result
+
+
 def _goal_mentions_desktop_focus(goal: str) -> bool:
     return "focus" in str(goal or "").strip().lower()
 
@@ -322,6 +418,23 @@ def _desktop_has_inspection_context(task_state) -> bool:
 
 
 def _desktop_target_window_ready(task_state, planner_goal: str) -> bool:
+    latest_recovery = _desktop_latest_recovery(task_state)
+    latest_state = str(latest_recovery.get("state", "")).strip().lower()
+    if latest_state == "ready":
+        expected_title = _goal_desktop_window_title(planner_goal).lower()
+        if not expected_title:
+            return True
+        target_window = latest_recovery.get("target_window", {}) if isinstance(latest_recovery.get("target_window", {}), dict) else {}
+        active_window = latest_recovery.get("active_window", {}) if isinstance(latest_recovery.get("active_window", {}), dict) else {}
+        candidate_titles = {
+            str(target_window.get("title", "")).strip().lower(),
+            str(active_window.get("title", "")).strip().lower(),
+            str(getattr(task_state, "desktop_active_window_title", "")).strip().lower(),
+        }
+        return any(title and (expected_title in title or title in expected_title) for title in candidate_titles)
+    if latest_state in {"needs_recovery", "waiting", "missing"}:
+        return False
+
     active_title = str(getattr(task_state, "desktop_active_window_title", "")).strip()
     if not active_title:
         return False
@@ -378,6 +491,89 @@ def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) 
     if require_screenshot and not str(getattr(task_state, "desktop_last_screenshot_path", "")).strip():
         return False
     return True
+
+
+def _maybe_prepare_desktop_recovery_context(
+    llm,
+    tool_runtime,
+    task_state,
+    planner_goal: str,
+    *,
+    require_screenshot: bool = False,
+    session_store=None,
+):
+    seed_args = _desktop_target_seed_args(task_state, planner_goal)
+    if not seed_args.get("title") and not seed_args.get("window_id"):
+        return None
+
+    latest_recovery = _desktop_latest_recovery(task_state)
+    recovery_state = str(latest_recovery.get("state", "")).strip().lower()
+    executed_any = False
+
+    if recovery_state not in {"ready", "needs_recovery", "waiting", "missing"}:
+        _, inspect_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            "desktop_inspect_window_state",
+            seed_args,
+            planner_goal,
+            session_store=session_store,
+        )
+        executed_any = True
+        latest_recovery = inspect_result.get("recovery", {}) if isinstance(inspect_result.get("recovery", {}), dict) else {}
+        recovery_state = str(latest_recovery.get("state", "")).strip().lower()
+
+    if recovery_state == "needs_recovery":
+        _, recover_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            "desktop_recover_window",
+            seed_args,
+            planner_goal,
+            session_store=session_store,
+        )
+        executed_any = True
+        latest_recovery = recover_result.get("recovery", {}) if isinstance(recover_result.get("recovery", {}), dict) else {}
+        recovery_state = str(latest_recovery.get("state", "")).strip().lower()
+
+    if recovery_state == "waiting":
+        _, waited_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            "desktop_wait_for_window_ready",
+            seed_args,
+            planner_goal,
+            session_store=session_store,
+        )
+        executed_any = True
+        latest_recovery = waited_result.get("recovery", {}) if isinstance(waited_result.get("recovery", {}), dict) else {}
+        recovery_state = str(latest_recovery.get("state", "")).strip().lower()
+
+    if recovery_state != "ready":
+        return None
+
+    selected_assessment = _desktop_evidence_assessment(
+        task_state,
+        purpose="desktop_action_prepare",
+        target_window_title=_goal_desktop_window_title(planner_goal),
+        require_screenshot=require_screenshot,
+    )
+    if not selected_assessment.get("sufficient", False):
+        _, capture_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            "desktop_capture_screenshot",
+            {"scope": "active_window"},
+            planner_goal,
+            session_store=session_store,
+        )
+        executed_any = True
+        if not capture_result.get("ok", False):
+            return None
+
+    if executed_any:
+        return {"continue_loop": True}
+    return None
 
 
 def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=None):
@@ -600,14 +796,50 @@ def _maybe_pause_for_browser_checkpoint(llm, tool_runtime, task_state, planner_g
     }
 
 
-def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal: str, session_store=None):
+def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal: str, session_store=None, *, allow_recovery: bool = True):
     if getattr(task_state, "desktop_checkpoint_pending", False):
         return None
     if tool_runtime.goal_has_explicit_desktop_approval(planner_goal):
         return None
     if not getattr(task_state, "desktop_observation_token", ""):
         return None
-    if _goal_mentions_desktop_focus(planner_goal) and not _has_completed_tool(task_state, "desktop_focus_window"):
+
+    click_point = _goal_desktop_click_point(planner_goal)
+    type_request = _goal_desktop_type_request(planner_goal)
+    if click_point is None and type_request is None:
+        return None
+
+    latest_recovery_state = str(_desktop_latest_recovery(task_state).get("state", "")).strip().lower()
+    should_attempt_recovery = (not _desktop_target_window_ready(task_state, planner_goal)) or latest_recovery_state in {
+        "needs_recovery",
+        "waiting",
+        "missing",
+    }
+    if (
+        allow_recovery
+        and should_attempt_recovery
+        and callable(getattr(tool_runtime, "prepare_args", None))
+        and callable(getattr(tool_runtime, "execute", None))
+    ):
+        recovery_prepared = _maybe_prepare_desktop_recovery_context(
+            llm,
+            tool_runtime,
+            task_state,
+            planner_goal,
+            require_screenshot=bool(click_point),
+            session_store=session_store,
+        )
+        if recovery_prepared is not None and recovery_prepared.get("continue_loop", False):
+            return _maybe_pause_for_desktop_action(
+                llm,
+                tool_runtime,
+                task_state,
+                planner_goal,
+                session_store=session_store,
+                allow_recovery=False,
+            )
+
+    if _goal_mentions_desktop_focus(planner_goal) and not _desktop_has_completed_focus_context(task_state):
         return None
     if _goal_mentions_desktop_screenshot(planner_goal) and not _has_completed_tool(task_state, "desktop_capture_screenshot"):
         return None
@@ -616,7 +848,6 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
     if not _desktop_target_window_ready(task_state, planner_goal):
         return None
 
-    click_point = _goal_desktop_click_point(planner_goal)
     if click_point and not _has_completed_or_paused_tool_step(task_state, "desktop_click_point"):
         desktop_activity = task_state._collect_desktop_activity(limit=4)
         selected_assessment = _desktop_evidence_assessment(
@@ -657,7 +888,6 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             session_store=session_store,
         )
 
-    type_request = _goal_desktop_type_request(planner_goal)
     if type_request and not _has_completed_or_paused_tool_step(task_state, "desktop_type_text"):
         desktop_activity = task_state._collect_desktop_activity(limit=4)
         selected_assessment = _desktop_evidence_assessment(
@@ -702,7 +932,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
 
 
 def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner_goal: str, tool_name: str, result, session_store=None):
-    if tool_name not in {"desktop_click_point", "desktop_type_text"}:
+    if tool_name not in {"desktop_focus_window", "desktop_click_point", "desktop_type_text"}:
         return None
     if not isinstance(result, dict) or result.get("ok", False) or result.get("paused", False):
         return None
@@ -712,6 +942,8 @@ def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner
         for key in ("error", "summary", "message")
         if str(result.get(key, "")).strip()
     )
+    recovery_view = result.get("recovery", {}) if isinstance(result.get("recovery", {}), dict) else {}
+    recovery_state = str(recovery_view.get("state", "")).strip().lower()
     refresh_needed = any(
         phrase in detail_text
         for phrase in (
@@ -719,27 +951,38 @@ def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner
             "missing or expired",
             "capture a screenshot again",
             "inspect windows or capture a screenshot first",
+            "focus the window and inspect desktop state again",
+            "no longer active",
+            "foreground",
+            "not ready",
+            "loading",
+            "hidden",
+            "minimized",
         )
     )
-    if not refresh_needed:
+    recovery_needed = refresh_needed or recovery_state in {"needs_recovery", "waiting", "missing"}
+    if not recovery_needed:
         return None
 
-    refresh_tool = "desktop_capture_screenshot" if tool_name == "desktop_click_point" else "desktop_get_active_window"
-    refresh_seed_args = {"scope": "active_window"} if refresh_tool == "desktop_capture_screenshot" else {}
-    refresh_args = tool_runtime.prepare_args(refresh_tool, refresh_seed_args, task_state, planning_goal=planner_goal)
-    refresh_result = tool_runtime.execute(refresh_tool, refresh_args)
-    _record_tool_result(task_state, refresh_tool, refresh_args, refresh_result)
-    _persist_session_state(session_store, task_state)
-
-    if refresh_result.get("paused", False):
-        task_state.status = "paused"
+    recovery_progress = _maybe_prepare_desktop_recovery_context(
+        llm,
+        tool_runtime,
+        task_state,
+        planner_goal,
+        require_screenshot=tool_name == "desktop_click_point",
+        session_store=session_store,
+    )
+    if recovery_progress is None and refresh_needed:
+        refresh_tool = "desktop_capture_screenshot" if tool_name == "desktop_click_point" else "desktop_get_active_window"
+        refresh_seed_args = {"scope": "active_window"} if refresh_tool == "desktop_capture_screenshot" else {}
+        refresh_args = tool_runtime.prepare_args(refresh_tool, refresh_seed_args, task_state, planning_goal=planner_goal)
+        refresh_result = tool_runtime.execute(refresh_tool, refresh_args)
+        _record_tool_result(task_state, refresh_tool, refresh_args, refresh_result)
         _persist_session_state(session_store, task_state)
-        return {
-            "ok": False,
-            "status": "paused",
-            "message": _finalize_message(llm, task_state),
-            "steps": task_state.steps,
-        }
+        if refresh_result.get("ok", False):
+            recovery_progress = {"continue_loop": True}
+    if recovery_progress is None:
+        return None
 
     synthesized_desktop_pause = _maybe_pause_for_desktop_action(
         llm,
@@ -747,11 +990,12 @@ def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner
         task_state,
         planner_goal,
         session_store=session_store,
+        allow_recovery=False,
     )
     if synthesized_desktop_pause is not None:
         return synthesized_desktop_pause
 
-    if refresh_result.get("ok", False):
+    if recovery_progress.get("continue_loop", False):
         return {"continue_loop": True}
     return None
 

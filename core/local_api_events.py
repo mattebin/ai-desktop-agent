@@ -130,6 +130,22 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "sufficient": bool(desktop.get("checkpoint_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(desktop.get("checkpoint_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
         },
+        "latest_recovery": {
+            "state": _trim_text(desktop.get("latest_recovery", {}).get("state", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_recovery", {}).get("reason", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_recovery", {}).get("summary", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=220),
+            "strategy": _trim_text(desktop.get("latest_recovery", {}).get("strategy", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=60),
+        },
+        "latest_window_readiness": {
+            "state": _trim_text(desktop.get("latest_window_readiness", {}).get("state", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_window_readiness", {}).get("reason", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_window_readiness", {}).get("summary", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=220),
+        },
+        "latest_visual_stability": {
+            "state": _trim_text(desktop.get("latest_visual_stability", {}).get("state", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_visual_stability", {}).get("reason", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_visual_stability", {}).get("summary", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=220),
+        },
     }
 
 

@@ -67,6 +67,24 @@ The system should prefer one bounded recovery pass and then a clear report over 
 - run `python smoke_test.py`
 - inspect the desktop tool registry and recovery reason coverage
 - verify missing/minimized/loading classifications in local deterministic tests
+- run `python live_agent_eval.py --scenario desktop_recovery_grounding --report-path data/evals/live_agent_eval_desktop_recovery_grounding_report.json`
+
+## Current integration status
+
+The recovery layer now participates in the real bounded desktop flow:
+
+- planner guidance can choose `desktop_inspect_window_state`, `desktop_recover_window`, and `desktop_wait_for_window_ready`
+- the desktop loop can use recovery/readiness before approval-gated click/type checkpoints
+- grouped desktop failure recovery can re-inspect, recover, wait briefly, and then refresh evidence once when needed
+- compact recovery/readiness diagnostics are exposed through state and local API snapshots
+
+## Current live-validation boundary
+
+Recent focused live validation confirmed the improved minimized / wrong-foreground recovery path and evidence-backed screenshot capture path.
+
+The main remaining live boundary is fully withdrawn or tray-like hidden windows. In that state, the current bounded stack may still classify the target as `tray_or_background_state` / `target_not_found` and stop with a clear report instead of recovering it.
+
+That limitation is explicit and currently preferred over guessing or widening control.
 
 ## What this prepares
 

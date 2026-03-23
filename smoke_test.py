@@ -804,6 +804,51 @@ desktop_retry_pause = _maybe_pause_for_desktop_action(
 if not isinstance(desktop_retry_pause, dict) or desktop_retry_pause.get("status") != "paused":
     raise SystemExit("Desktop approval synthesis still treated a failed desktop click step as blocking the later evidence-backed paused checkpoint.")
 
+desktop_recovery_summary_state = TaskState("desktop recovery summary smoke")
+desktop_recovery_summary_result = {
+    "ok": True,
+    "summary": "Recovered the target window and confirmed foreground focus.",
+    "desktop_state": {
+        "active_window": {"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+        "windows": [{"title": "Approval Target Window"}],
+        "observation_token": "desktop-recovery-smoke-1",
+        "observed_at": "2026-03-23T10:03:00",
+    },
+    "desktop_evidence_ref": third_ref,
+    "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
+    "recovery": {
+        "state": "ready",
+        "reason": "recovery_succeeded",
+        "summary": "Approval Target Window is present, foreground, and ready.",
+        "strategy": "restore_then_focus",
+    },
+    "window_readiness": {
+        "state": "ready",
+        "reason": "ready",
+        "summary": "Approval Target Window looks visible and ready.",
+    },
+    "visual_stability": {
+        "state": "stable",
+        "reason": "inspected",
+        "summary": "Visual state looked stable across bounded samples.",
+    },
+}
+desktop_recovery_summary_state.add_step(
+    {
+        "type": "tool",
+        "status": "completed",
+        "tool": "desktop_recover_window",
+        "args": {"title": "Approval Target Window"},
+        "result": desktop_recovery_summary_result,
+    }
+)
+desktop_recovery_summary_state.update_memory_from_tool("desktop_recover_window", desktop_recovery_summary_result)
+desktop_recovery_snapshot = desktop_recovery_summary_state.get_control_snapshot().get("desktop", {})
+if desktop_recovery_snapshot.get("latest_recovery", {}).get("state") != "ready":
+    raise SystemExit("TaskState did not surface the latest desktop recovery state in the authoritative desktop snapshot.")
+if "Desktop recovery state: ready" not in desktop_recovery_summary_state.get_observation():
+    raise SystemExit("TaskState.get_observation() did not surface the latest desktop recovery state for model-facing desktop context.")
+
 
 class _DesktopRecoveryRuntime(_DesktopApprovalStubRuntime):
     def __init__(self, refresh_result):
@@ -834,8 +879,11 @@ desktop_recovery_result = _maybe_recover_desktop_action_failure(
 )
 if not isinstance(desktop_recovery_result, dict) or desktop_recovery_result.get("status") != "paused":
     raise SystemExit("Desktop action recovery did not refresh observation and synthesize a paused approval checkpoint after the fresh-observation failure.")
-if [call[1] for call in desktop_recovery_runtime.calls if call[0] == "execute"] != ["desktop_capture_screenshot"]:
-    raise SystemExit("Desktop action recovery did not use the expected bounded screenshot refresh tool.")
+executed_recovery_tools = [call[1] for call in desktop_recovery_runtime.calls if call[0] == "execute"]
+if "desktop_capture_screenshot" not in executed_recovery_tools:
+    raise SystemExit("Desktop action recovery did not include the expected bounded screenshot refresh tool after the grouped recovery step.")
+if any(tool not in {"desktop_inspect_window_state", "desktop_recover_window", "desktop_wait_for_window_ready", "desktop_capture_screenshot"} for tool in executed_recovery_tools):
+    raise SystemExit(f"Desktop action recovery used unexpected grouped recovery tools: {executed_recovery_tools}")
 
 evidence_server = LocalOperatorApiServer(port=0)
 evidence_server.start_in_thread()
@@ -904,12 +952,14 @@ if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):
     raise SystemExit("live_agent_eval did not resolve the expected project venv Python path.")
 if not _interpreter_has_playwright(project_venv_python):
     raise SystemExit("live_agent_eval did not detect Playwright in the project venv runtime.")
-for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding"}:
+for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding", "desktop_recovery_grounding"}:
     if expected_scenario not in SCENARIO_NAMES:
         raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
 live_eval_source = Path("live_agent_eval.py").read_text(encoding="utf-8")
 if "focus_request_path" not in live_eval_source or "def request_focus(" not in live_eval_source or "def _focus_main():" not in live_eval_source:
     raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
+if "command_request_path" not in live_eval_source or "def request_command(" not in live_eval_source or "def _handle_command(" not in live_eval_source:
+    raise SystemExit("live_agent_eval is missing the expected desktop fixture recovery command harness support.")
 if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
     raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
 no_run_checks = _golden_final_answer_checks(

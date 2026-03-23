@@ -36,6 +36,7 @@ SCENARIO_NAMES = (
     "brief_answer_quality",
     "desktop_control",
     "desktop_evidence_grounding",
+    "desktop_recovery_grounding",
 )
 TERMINAL_EVAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "superseded", "deferred"}
 AUTHORITATIVE_MESSAGE_KINDS = {"final", "result", "error"}
@@ -724,12 +725,22 @@ state_path = Path(sys.argv[1])
 main_title = sys.argv[2]
 sidecar_title = sys.argv[3]
 focus_request_path = Path(sys.argv[4])
+command_request_path = Path(sys.argv[5])
 
 runtime = {
     "click_count": 0,
     "alive": True,
     "last_focus_request": "",
     "last_focus_handled": "",
+    "last_command_request": "",
+    "last_command_handled": "",
+    "main_hidden": False,
+    "main_minimized": False,
+    "loading": False,
+    "unstable": False,
+    "unstable_tick": 0,
+    "arm_loading_on_focus": False,
+    "arm_unstable_on_focus": False,
 }
 
 
@@ -773,6 +784,14 @@ def _persist_state():
         "sidecar_title": sidecar_title,
         "last_focus_request": runtime.get("last_focus_request", ""),
         "last_focus_handled": runtime.get("last_focus_handled", ""),
+        "last_command_request": runtime.get("last_command_request", ""),
+        "last_command_handled": runtime.get("last_command_handled", ""),
+        "main_hidden": runtime.get("main_hidden", False),
+        "main_minimized": runtime.get("main_minimized", False),
+        "loading": runtime.get("loading", False),
+        "unstable": runtime.get("unstable", False),
+        "arm_loading_on_focus": runtime.get("arm_loading_on_focus", False),
+        "arm_unstable_on_focus": runtime.get("arm_unstable_on_focus", False),
         "entry_field_label": "Desktop notes",
         "entry_value": value_var.get(),
         "click_count": runtime["click_count"],
@@ -793,6 +812,13 @@ def _clear_focus_request():
         pass
 
 
+def _clear_command_request():
+    try:
+        command_request_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _focus_entry(_event=None):
     try:
         notes_entry.focus_force()
@@ -803,6 +829,8 @@ def _focus_entry(_event=None):
 def _focus_window(window, handled: str):
     try:
         window.deiconify()
+        runtime["main_hidden"] = False if handled == "main" else runtime.get("main_hidden", False)
+        runtime["main_minimized"] = False if handled == "main" else runtime.get("main_minimized", False)
         window.attributes("-topmost", True)
         window.update_idletasks()
         window.lift()
@@ -820,6 +848,150 @@ def _focus_sidecar():
 def _focus_main():
     _focus_window(root, "main")
     _focus_entry()
+    if runtime.get("arm_loading_on_focus", False):
+        runtime["arm_loading_on_focus"] = False
+        _pulse_loading()
+    if runtime.get("arm_unstable_on_focus", False):
+        runtime["arm_unstable_on_focus"] = False
+        _pulse_unstable()
+
+
+def _set_loading(enabled):
+    value = bool(enabled)
+    runtime["loading"] = value
+    try:
+        root.attributes("-disabled", value)
+    except Exception:
+        pass
+    try:
+        notes_entry.configure(state="disabled" if value else "normal")
+    except Exception:
+        pass
+    try:
+        click_button.configure(state="disabled" if value else "normal")
+    except Exception:
+        pass
+    if value:
+        status_var.set("Loading desktop fixture...")
+    else:
+        status_var.set(f"Clicked {runtime['click_count']} time(s)" if runtime["click_count"] else "Ready for bounded desktop eval")
+
+
+def _apply_unstable_frame():
+    tick = int(runtime.get("unstable_tick", 0) or 0)
+    phase = tick % 2
+    runtime["unstable_tick"] = tick + 1
+    bg = "#eef3fb" if phase else "#f5f7fb"
+    accent = "#dce7fb" if phase else "#eef3fb"
+    button_text = "Apply single click..." if phase else "Apply single click"
+    status_text = "Desktop surface settling..." if phase else "Desktop surface stabilizing..."
+    try:
+        root.configure(bg=bg)
+        frame.configure(bg=bg)
+        title_label.configure(bg=bg)
+        helper_label.configure(bg=bg)
+        status_label.configure(bg=bg)
+        click_button.configure(text=button_text, bg=accent)
+    except Exception:
+        pass
+    status_var.set(status_text)
+
+
+def _set_unstable(enabled):
+    value = bool(enabled)
+    if value and not runtime.get("unstable", False):
+        runtime["unstable"] = True
+        _animate_unstable()
+        return
+    runtime["unstable"] = value
+    if not value:
+        runtime["unstable_tick"] = 0
+        try:
+            root.configure(bg="#f5f7fb")
+            frame.configure(bg="#f5f7fb")
+            title_label.configure(bg="#f5f7fb")
+            helper_label.configure(bg="#f5f7fb")
+            status_label.configure(bg="#f5f7fb")
+            click_button.configure(text="Apply single click", bg="#f0f0f0")
+        except Exception:
+            pass
+        if not runtime.get("loading", False):
+            status_var.set(f"Clicked {runtime['click_count']} time(s)" if runtime["click_count"] else "Ready for bounded desktop eval")
+
+
+def _animate_unstable():
+    if not runtime.get("unstable", False):
+        return
+    _apply_unstable_frame()
+    if runtime["alive"]:
+        root.after(120, _animate_unstable)
+
+
+def _pulse_loading():
+    _set_loading(True)
+    root.after(900, lambda: _set_loading(False))
+
+
+def _pulse_unstable():
+    _set_unstable(True)
+    root.after(900, lambda: _set_unstable(False))
+
+
+def _handle_command(command):
+    normalized = str(command or "").strip().lower()
+    if not normalized:
+        return
+    runtime["last_command_request"] = normalized
+    if normalized == "focus_main":
+        _focus_main()
+    elif normalized == "focus_sidecar":
+        _focus_sidecar()
+    elif normalized == "main_minimize":
+        try:
+            root.iconify()
+        except Exception:
+            pass
+        runtime["main_minimized"] = True
+        runtime["main_hidden"] = False
+    elif normalized == "main_restore":
+        try:
+            root.deiconify()
+        except Exception:
+            pass
+        runtime["main_minimized"] = False
+        runtime["main_hidden"] = False
+        _focus_main()
+    elif normalized == "main_hide":
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        runtime["main_hidden"] = True
+        runtime["main_minimized"] = False
+    elif normalized == "main_show":
+        try:
+            root.deiconify()
+        except Exception:
+            pass
+        runtime["main_hidden"] = False
+        runtime["main_minimized"] = False
+    elif normalized == "loading_on":
+        _set_loading(True)
+    elif normalized == "loading_off":
+        _set_loading(False)
+    elif normalized == "loading_pulse":
+        _pulse_loading()
+    elif normalized == "arm_loading_pulse":
+        runtime["arm_loading_on_focus"] = True
+    elif normalized == "unstable_on":
+        _set_unstable(True)
+    elif normalized == "unstable_off":
+        _set_unstable(False)
+    elif normalized == "unstable_pulse":
+        _pulse_unstable()
+    elif normalized == "arm_unstable_pulse":
+        runtime["arm_unstable_on_focus"] = True
+    runtime["last_command_handled"] = normalized
 
 
 def _poll_focus_requests():
@@ -838,6 +1010,18 @@ def _poll_focus_requests():
         root.after(120, _poll_focus_requests)
 
 
+def _poll_commands():
+    try:
+        requested = command_request_path.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        requested = ""
+    if requested:
+        _handle_command(requested)
+        _clear_command_request()
+    if runtime["alive"]:
+        root.after(120, _poll_commands)
+
+
 def _on_click():
     runtime["click_count"] += 1
     status_var.set(f"Clicked {runtime['click_count']} time(s)")
@@ -852,6 +1036,7 @@ def _on_close():
     except Exception:
         pass
     _clear_focus_request()
+    _clear_command_request()
     root.destroy()
 
 
@@ -905,6 +1090,7 @@ root.after(250, _focus_sidecar)
 root.after(950, _focus_sidecar)
 root.after(1800, _focus_sidecar)
 root.after(80, _poll_focus_requests)
+root.after(90, _poll_commands)
 root.after(120, _persist_state)
 root.mainloop()
 """.strip()
@@ -920,6 +1106,7 @@ class DesktopFixtureHarness:
         self.state_path = scenario_dir / "desktop_fixture_state.json"
         self.script_path = scenario_dir / "desktop_fixture_app.py"
         self.focus_request_path = scenario_dir / "desktop_fixture_focus_request.txt"
+        self.command_request_path = scenario_dir / "desktop_fixture_command_request.txt"
         self.proc: subprocess.Popen[str] | None = None
 
     def _python_binary(self) -> str:
@@ -934,6 +1121,10 @@ class DesktopFixtureHarness:
             self.focus_request_path.unlink(missing_ok=True)
         except Exception:
             pass
+        try:
+            self.command_request_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.script_path.write_text(_desktop_fixture_script(), encoding="utf-8")
         self.proc = subprocess.Popen(
             [
@@ -943,6 +1134,7 @@ class DesktopFixtureHarness:
                 self.main_title,
                 self.sidecar_title,
                 str(self.focus_request_path),
+                str(self.command_request_path),
             ],
             cwd=str(self.scenario_dir),
         )
@@ -964,6 +1156,10 @@ class DesktopFixtureHarness:
                     pass
         try:
             self.focus_request_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            self.command_request_path.unlink(missing_ok=True)
         except Exception:
             pass
         self.proc = None
@@ -1005,6 +1201,63 @@ class DesktopFixtureHarness:
             self.focus_request_path.write_text(normalized, encoding="utf-8")
         except Exception:
             pass
+
+    def request_command(self, command: str):
+        normalized = str(command or "").strip().lower()
+        if not normalized:
+            return
+        try:
+            self.command_request_path.write_text(normalized, encoding="utf-8")
+        except Exception:
+            pass
+
+    def set_main_minimized(self, enabled: bool = True, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("main_minimize" if enabled else "main_restore")
+        return self.wait_for_state(
+            lambda state: bool(state.get("main_minimized", False)) == bool(enabled),
+            timeout=timeout,
+            description=f"desktop fixture main minimized={enabled}",
+        )
+
+    def set_main_hidden(self, enabled: bool = True, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("main_hide" if enabled else "main_show")
+        return self.wait_for_state(
+            lambda state: bool(state.get("main_hidden", False)) == bool(enabled),
+            timeout=timeout,
+            description=f"desktop fixture main hidden={enabled}",
+        )
+
+    def pulse_loading(self, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("loading_pulse")
+        return self.wait_for_state(
+            lambda state: bool(state.get("loading", False)),
+            timeout=timeout,
+            description="desktop fixture loading pulse",
+        )
+
+    def pulse_unstable(self, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("unstable_pulse")
+        return self.wait_for_state(
+            lambda state: bool(state.get("unstable", False)),
+            timeout=timeout,
+            description="desktop fixture unstable pulse",
+        )
+
+    def arm_loading_on_focus(self, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("arm_loading_pulse")
+        return self.wait_for_state(
+            lambda state: bool(state.get("arm_loading_on_focus", False)),
+            timeout=timeout,
+            description="desktop fixture arm loading pulse",
+        )
+
+    def arm_unstable_on_focus(self, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("arm_unstable_pulse")
+        return self.wait_for_state(
+            lambda state: bool(state.get("arm_unstable_on_focus", False)),
+            timeout=timeout,
+            description="desktop fixture arm unstable pulse",
+        )
 
     def _fixture_focus_target(self, title: str) -> str:
         normalized = str(title or "").strip().lower()
@@ -3390,6 +3643,366 @@ def run_desktop_evidence_grounding_scenario(context: EvalContext) -> Dict[str, A
     }
 
 
+def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, Any]:
+    name = "desktop_recovery_grounding"
+    scenario_dir, settings = _scenario_settings(context, name)
+    clear_inspect_project_cache()
+    phases: List[Dict[str, Any]] = []
+
+    with DesktopFixtureHarness(context, scenario_dir) as fixture, LocalApiHarness(settings) as api:
+        def _reject_paused_session(session_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+            api.reject(session_id=session_id)
+            return api.wait_for_status(session_id, {"blocked"}, timeout=timeout)
+
+        fixture.wait_for_state(
+            lambda state: bool(state.get("button_center")) and bool(state.get("entry_center")),
+            timeout=12.0,
+            description="desktop fixture coordinates",
+        )
+        button_center = fixture.read_state().get("button_center", {})
+        button_x = int(button_center.get("x", 0) or 0) if isinstance(button_center, dict) else 0
+        button_y = int(button_center.get("y", 0) or 0) if isinstance(button_center, dict) else 0
+        if button_x <= 0 or button_y <= 0:
+            raise RuntimeError(f"Desktop fixture button coordinates were invalid: {fixture.read_state()}")
+
+        minimized_state = fixture.set_main_minimized(True)
+        if not minimized_state.get("main_minimized", False):
+            raise RuntimeError(f"Desktop fixture did not minimize the main window: {minimized_state}")
+        fixture.ensure_active(fixture.sidecar_title, timeout=6.0)
+
+        minimized_session = api.create_session(title="Desktop recovery minimized eval").get("session", {}).get("session_id", "")
+        minimized_runs_before = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_goal = (
+            f"Inspect the current state of the desktop window titled '{fixture.main_title}'. "
+            "If it is minimized or not the foreground window, recover it in a bounded way, capture a screenshot of the active recovered window, "
+            "and summarize in one or two direct sentences what you inspected."
+        )
+        minimized_started = time.time()
+        minimized_dispatch = api.send_message(minimized_session, minimized_goal)
+        minimized_status = api.wait_for_status(minimized_session, {"completed"})
+        minimized_detail = api.session_detail(minimized_session)
+        minimized_runs_after = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_run = _latest_new_run(minimized_runs_before, minimized_runs_after)
+        minimized_message = _authoritative_reply(minimized_detail)
+        minimized_tools = _tool_names_from_run(minimized_run)
+        minimized_desktop = minimized_status.get("desktop", {}) if isinstance(minimized_status.get("desktop", {}), dict) else {}
+        minimized_selected = minimized_desktop.get("selected_evidence", {}) if isinstance(minimized_desktop.get("selected_evidence", {}), dict) else {}
+        minimized_assessment = minimized_desktop.get("selected_evidence_assessment", {}) if isinstance(minimized_desktop.get("selected_evidence_assessment", {}), dict) else {}
+        minimized_checks = [
+            _build_check(
+                "minimized_completed",
+                "execution",
+                minimized_status.get("status") == "completed",
+                f"Status={minimized_status.get('status')}",
+            ),
+            _build_check(
+                "minimized_used_recovery_tools",
+                "tool_choice",
+                "desktop_inspect_window_state" in minimized_tools
+                and any(tool in minimized_tools for tool in {"desktop_recover_window", "desktop_focus_window"}),
+                f"Tools={minimized_tools}",
+            ),
+            _build_check(
+                "minimized_capture_after_recovery",
+                "tool_choice",
+                "desktop_capture_screenshot" in minimized_tools,
+                f"Tools={minimized_tools}",
+            ),
+            _build_check(
+                "minimized_selected_evidence_sufficient",
+                "desktop",
+                bool(minimized_assessment.get("sufficient", False)) and bool(minimized_selected.get("has_screenshot", False)),
+                f"Assessment={minimized_assessment} Selected={minimized_selected}",
+            ),
+            _build_check(
+                "minimized_main_no_longer_minimized",
+                "desktop",
+                not bool(fixture.read_state().get("main_minimized", True)),
+                f"Fixture state={fixture.read_state()}",
+            ),
+        ]
+        minimized_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=minimized_message,
+                session_payload=minimized_detail,
+                run=minimized_run,
+                expected_terms={fixture.main_title, "screenshot"},
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_minimized_recovery",
+                goal=minimized_goal,
+                checks=minimized_checks,
+                started_at=minimized_started,
+                status=minimized_status.get("status", ""),
+                reply_mode=str(minimized_dispatch.get("reply_mode", "")).strip(),
+                final_message=minimized_message,
+                run=minimized_run,
+                snapshot=minimized_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        minimized_follow_runs_before = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_follow_goal = (
+            "Using the current bounded desktop evidence if it is already sufficient, answer briefly which desktop window is active right now. "
+            "Refresh desktop observation only if the current evidence is stale or insufficient."
+        )
+        minimized_follow_started = time.time()
+        minimized_follow_dispatch = api.send_message(minimized_session, minimized_follow_goal)
+        minimized_follow_status = api.wait_for_status(minimized_session, {"completed"})
+        minimized_follow_detail = api.session_detail(minimized_session)
+        minimized_follow_runs_after = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_follow_run = _latest_new_run(minimized_follow_runs_before, minimized_follow_runs_after)
+        minimized_follow_message = _authoritative_reply(minimized_follow_detail)
+        minimized_follow_tools = _tool_names_from_run(minimized_follow_run)
+        minimized_follow_checks = [
+            _build_check(
+                "minimized_follow_completed",
+                "execution",
+                minimized_follow_status.get("status") == "completed",
+                f"Status={minimized_follow_status.get('status')}",
+            ),
+            _build_check(
+                "minimized_follow_reused_evidence",
+                "desktop",
+                not any(
+                    tool in minimized_follow_tools
+                    for tool in {
+                        "desktop_inspect_window_state",
+                        "desktop_recover_window",
+                        "desktop_wait_for_window_ready",
+                        "desktop_capture_screenshot",
+                    }
+                ),
+                f"Tools={minimized_follow_tools}",
+            ),
+            _build_check(
+                "minimized_follow_answer_grounded",
+                "final_answer",
+                _contains(minimized_follow_message, fixture.main_title),
+                f"Final message={minimized_follow_message}",
+            ),
+        ]
+        minimized_follow_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=minimized_follow_message,
+                session_payload=minimized_follow_detail,
+                run=minimized_follow_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=70,
+                forbidden_terms={"approval", "workflow execution"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_reuse_recovered_evidence",
+                goal=minimized_follow_goal,
+                checks=minimized_follow_checks,
+                started_at=minimized_follow_started,
+                status=minimized_follow_status.get("status", ""),
+                reply_mode=str(minimized_follow_dispatch.get("reply_mode", "")).strip(),
+                final_message=minimized_follow_message,
+                run=minimized_follow_run,
+                snapshot=minimized_follow_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        hidden_state = fixture.set_main_hidden(True)
+        if not hidden_state.get("main_hidden", False):
+            raise RuntimeError(f"Desktop fixture did not hide the main window: {hidden_state}")
+        fixture.ensure_active(fixture.sidecar_title, timeout=6.0)
+
+        hidden_session = api.create_session(title="Desktop recovery hidden eval").get("session", {}).get("session_id", "")
+        hidden_runs_before = _session_runs(Path(settings["run_history_path"]), hidden_session)
+        hidden_goal = (
+            f"Inspect the desktop window titled '{fixture.main_title}'. If it is hidden, in the background, or not visibly present, "
+            "recover it in a bounded way, capture a screenshot of the active recovered window, and answer in one or two direct sentences what you found."
+        )
+        hidden_started = time.time()
+        hidden_dispatch = api.send_message(hidden_session, hidden_goal)
+        hidden_status = api.wait_for_status(hidden_session, {"completed"})
+        hidden_detail = api.session_detail(hidden_session)
+        hidden_runs_after = _session_runs(Path(settings["run_history_path"]), hidden_session)
+        hidden_run = _latest_new_run(hidden_runs_before, hidden_runs_after)
+        hidden_message = _authoritative_reply(hidden_detail)
+        hidden_tools = _tool_names_from_run(hidden_run)
+        hidden_desktop = hidden_status.get("desktop", {}) if isinstance(hidden_status.get("desktop", {}), dict) else {}
+        hidden_assessment = hidden_desktop.get("selected_evidence_assessment", {}) if isinstance(hidden_desktop.get("selected_evidence_assessment", {}), dict) else {}
+        hidden_checks = [
+            _build_check(
+                "hidden_completed",
+                "execution",
+                hidden_status.get("status") == "completed",
+                f"Status={hidden_status.get('status')}",
+            ),
+            _build_check(
+                "hidden_used_recovery_tools",
+                "tool_choice",
+                "desktop_inspect_window_state" in hidden_tools
+                and any(tool in hidden_tools for tool in {"desktop_recover_window", "desktop_focus_window"}),
+                f"Tools={hidden_tools}",
+            ),
+            _build_check(
+                "hidden_capture_after_recovery",
+                "tool_choice",
+                "desktop_capture_screenshot" in hidden_tools,
+                f"Tools={hidden_tools}",
+            ),
+            _build_check(
+                "hidden_selected_evidence_sufficient",
+                "desktop",
+                bool(hidden_assessment.get("sufficient", False)),
+                f"Assessment={hidden_assessment}",
+            ),
+            _build_check(
+                "hidden_main_visible_again",
+                "desktop",
+                not bool(fixture.read_state().get("main_hidden", True)),
+                f"Fixture state={fixture.read_state()}",
+            ),
+        ]
+        hidden_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=hidden_message,
+                session_payload=hidden_detail,
+                run=hidden_run,
+                expected_terms={fixture.main_title},
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_hidden_recovery",
+                goal=hidden_goal,
+                checks=hidden_checks,
+                started_at=hidden_started,
+                status=hidden_status.get("status", ""),
+                reply_mode=str(hidden_dispatch.get("reply_mode", "")).strip(),
+                final_message=hidden_message,
+                run=hidden_run,
+                snapshot=hidden_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        fixture.set_main_hidden(False)
+        fixture.set_main_minimized(True)
+        fixture.ensure_active(fixture.sidecar_title, timeout=6.0)
+        fixture.arm_loading_on_focus()
+        fixture.arm_unstable_on_focus()
+
+        readiness_session = api.create_session(title="Desktop recovery readiness eval").get("session", {}).get("session_id", "")
+        readiness_runs_before = _session_runs(Path(settings["run_history_path"]), readiness_session)
+        readiness_goal = (
+            f"Inspect the desktop window titled '{fixture.main_title}'. If it is minimized, not foreground, loading, or visually unstable, "
+            "recover it in a bounded way and wait until it is ready. Then capture a screenshot of the active window and click the known visible button center "
+            f"at ({button_x}, {button_y}). Ask for approval right before clicking and do not click until approval is granted."
+        )
+        readiness_started = time.time()
+        readiness_dispatch = api.send_message(readiness_session, readiness_goal)
+        readiness_status = api.wait_for_status(readiness_session, {"paused"})
+        readiness_detail = api.session_detail(readiness_session)
+        readiness_runs_after = _session_runs(Path(settings["run_history_path"]), readiness_session)
+        readiness_run = _latest_new_run(readiness_runs_before, readiness_runs_after)
+        readiness_message = _authoritative_reply(readiness_detail) or _last_assistant_message(readiness_detail)
+        readiness_tools = _tool_names_from_run(readiness_run)
+        readiness_pending = readiness_status.get("pending_approval", {}) if isinstance(readiness_status.get("pending_approval", {}), dict) else {}
+        readiness_desktop = readiness_status.get("desktop", {}) if isinstance(readiness_status.get("desktop", {}), dict) else {}
+        readiness_checks = [
+            _build_check(
+                "readiness_paused",
+                "approval",
+                readiness_status.get("status") == "paused",
+                f"Status={readiness_status.get('status')}",
+            ),
+            _build_check(
+                "readiness_used_recovery_and_wait_tools",
+                "tool_choice",
+                "desktop_inspect_window_state" in readiness_tools
+                and any(tool in readiness_tools for tool in {"desktop_recover_window", "desktop_focus_window"})
+                and "desktop_wait_for_window_ready" in readiness_tools,
+                f"Tools={readiness_tools}",
+            ),
+            _build_check(
+                "readiness_capture_before_pause",
+                "tool_choice",
+                "desktop_capture_screenshot" in readiness_tools and "desktop_click_point" in readiness_tools,
+                f"Tools={readiness_tools}",
+            ),
+            _build_check(
+                "readiness_checkpoint_grounded",
+                "desktop",
+                bool(str(readiness_pending.get("evidence_id", "")).strip())
+                and bool(readiness_pending.get("evidence_assessment", {}).get("sufficient", False))
+                and readiness_pending.get("tool") == "desktop_click_point",
+                f"Pending approval={readiness_pending}",
+            ),
+            _build_check(
+                "readiness_fixture_pulses_cleared",
+                "desktop",
+                not bool(fixture.read_state().get("loading", False)) and not bool(fixture.read_state().get("unstable", False)),
+                f"Fixture state={fixture.read_state()}",
+            ),
+            _build_check(
+                "readiness_click_not_executed",
+                "desktop",
+                int(fixture.read_state().get("click_count", 0) or 0) == 0,
+                f"Fixture state={fixture.read_state()}",
+            ),
+            _build_check(
+                "readiness_checkpoint_id_propagated",
+                "desktop",
+                bool(str(readiness_desktop.get("checkpoint_evidence_id", "")).strip()),
+                f"Desktop snapshot={readiness_desktop}",
+            ),
+        ]
+        readiness_checks.extend(
+            _golden_final_answer_checks(
+                status="paused",
+                message=readiness_message,
+                session_payload=readiness_detail,
+                run=readiness_run,
+                expected_terms={"approval", "click", fixture.main_title},
+                require_next_step=True,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_loading_unstable_pause",
+                goal=readiness_goal,
+                checks=readiness_checks,
+                started_at=readiness_started,
+                status=readiness_status.get("status", ""),
+                reply_mode=str(readiness_dispatch.get("reply_mode", "")).strip(),
+                final_message=readiness_message,
+                run=readiness_run,
+                snapshot=readiness_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        readiness_rejected = _reject_paused_session(readiness_session)
+        if readiness_rejected.get("status") != "blocked":
+            raise RuntimeError(f"Desktop recovery eval could not clear the paused checkpoint: {readiness_rejected}")
+
+    combined_failures = [failure for phase in phases for failure in phase.get("prompt_failures", [])]
+    return {
+        "name": name,
+        "passed": not combined_failures,
+        "prompt_failures": combined_failures,
+        "phases": phases,
+        "scenario_dir": str(scenario_dir),
+    }
+
+
 SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "outcome_style_corpus": run_outcome_style_corpus_scenario,
     "chat_routing": run_chat_routing_scenario,
@@ -3402,6 +4015,7 @@ SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "brief_answer_quality": run_brief_answer_quality_scenario,
     "desktop_control": run_desktop_control_scenario,
     "desktop_evidence_grounding": run_desktop_evidence_grounding_scenario,
+    "desktop_recovery_grounding": run_desktop_recovery_grounding_scenario,
 }
 
 

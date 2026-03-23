@@ -948,19 +948,50 @@ class TaskState:
     def _collect_desktop_activity(self, limit: int = 4) -> Dict[str, Any]:
         actions = self._normalize_values(self.desktop_recent_actions[-limit:], limit=limit, text_limit=220)
         uncertainties: List[str] = []
+        latest_recovery: Dict[str, Any] = {}
+        latest_window_readiness: Dict[str, Any] = {}
+        latest_visual_stability: Dict[str, Any] = {}
         for step in reversed(self.steps):
             tool_name = str(step.get("tool", "")).strip()
             if not tool_name.startswith("desktop_"):
                 continue
-            if step.get("status") not in {"failed", "paused"}:
-                continue
             result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+            if not latest_recovery:
+                recovery = result.get("recovery", {}) if isinstance(result.get("recovery", {}), dict) else {}
+                if recovery:
+                    latest_recovery = {
+                        "state": str(recovery.get("state", "")).strip()[:40],
+                        "reason": str(recovery.get("reason", "")).strip()[:60],
+                        "summary": str(recovery.get("summary", "")).strip()[:220],
+                        "strategy": str(recovery.get("strategy", "")).strip()[:60],
+                    }
+            if not latest_window_readiness:
+                readiness = result.get("window_readiness", {}) if isinstance(result.get("window_readiness", {}), dict) else {}
+                if readiness:
+                    latest_window_readiness = {
+                        "state": str(readiness.get("state", "")).strip()[:40],
+                        "reason": str(readiness.get("reason", "")).strip()[:60],
+                        "summary": str(readiness.get("summary", "")).strip()[:220],
+                    }
+            if not latest_visual_stability:
+                stability = result.get("visual_stability", {}) if isinstance(result.get("visual_stability", {}), dict) else {}
+                if stability:
+                    latest_visual_stability = {
+                        "state": str(stability.get("state", "")).strip()[:40],
+                        "reason": str(stability.get("reason", "")).strip()[:60],
+                        "summary": str(stability.get("summary", "")).strip()[:220],
+                    }
+            if step.get("status") not in {"failed", "paused"}:
+                if latest_recovery and latest_window_readiness and latest_visual_stability:
+                    break
+                continue
             text = str(result.get("summary", "") or result.get("error", "")).strip()
             if not text or text in uncertainties:
                 continue
             uncertainties.append(text[:220])
             if len(uncertainties) >= 2:
-                break
+                if latest_recovery and latest_window_readiness and latest_visual_stability:
+                    break
 
         selected_evidence: Dict[str, Any] = {}
         checkpoint_evidence: Dict[str, Any] = {}
@@ -1033,6 +1064,9 @@ class TaskState:
             "checkpoint_evidence_assessment": checkpoint_evidence_assessment,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
+            "latest_recovery": latest_recovery,
+            "latest_window_readiness": latest_window_readiness,
+            "latest_visual_stability": latest_visual_stability,
             "uncertainties": uncertainties,
         }
 
@@ -2404,6 +2438,26 @@ class TaskState:
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
             ):
                 lines.append(line)
+            latest_recovery = desktop_activity.get("latest_recovery", {}) if isinstance(desktop_activity.get("latest_recovery", {}), dict) else {}
+            if latest_recovery.get("state"):
+                recovery_line = f"- Desktop recovery state: {latest_recovery.get('state', '')}"
+                if latest_recovery.get("reason"):
+                    recovery_line += f" ({latest_recovery.get('reason', '')})"
+                lines.append(recovery_line)
+                if latest_recovery.get("summary"):
+                    lines.append(f"- Desktop recovery summary: {latest_recovery.get('summary', '')}")
+            latest_window_readiness = desktop_activity.get("latest_window_readiness", {}) if isinstance(desktop_activity.get("latest_window_readiness", {}), dict) else {}
+            if latest_window_readiness.get("state"):
+                readiness_line = f"- Desktop readiness: {latest_window_readiness.get('state', '')}"
+                if latest_window_readiness.get("reason"):
+                    readiness_line += f" ({latest_window_readiness.get('reason', '')})"
+                lines.append(readiness_line)
+            latest_visual_stability = desktop_activity.get("latest_visual_stability", {}) if isinstance(desktop_activity.get("latest_visual_stability", {}), dict) else {}
+            if latest_visual_stability.get("state"):
+                stability_line = f"- Desktop visual stability: {latest_visual_stability.get('state', '')}"
+                if latest_visual_stability.get("reason"):
+                    stability_line += f" ({latest_visual_stability.get('reason', '')})"
+                lines.append(stability_line)
             if desktop_activity.get("actions"):
                 lines.append("Recent desktop actions:")
                 for action in desktop_activity.get("actions", [])[:4]:

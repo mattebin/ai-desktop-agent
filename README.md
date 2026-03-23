@@ -123,6 +123,8 @@ The bounded desktop recovery layer now supports:
 
 See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.
 
+Recent integration work also wired those recovery tools into the real desktop loop and added a focused `desktop_recovery_grounding` live scenario for minimized, wrong-foreground, loading, and unstable states. The main remaining live validation limitation is fully withdrawn or tray-like hidden windows, which are still reported clearly as not visibly present instead of being force-recovered.
+
 ## Project philosophy
 
 - keep chat primary

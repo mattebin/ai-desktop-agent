@@ -288,18 +288,49 @@ class ToolRuntime:
     def _prepare_desktop_args(self, tool_name: str, task_state, args: Dict[str, Any], planning_goal: str | None = None):
         goal_text = planning_goal if isinstance(planning_goal, str) and planning_goal.strip() else getattr(task_state, "goal", "")
         goal_has_explicit_approval = self._goal_has_explicit_desktop_approval(goal_text)
+        targeted_window_tool = tool_name in {
+            "desktop_focus_window",
+            "desktop_inspect_window_state",
+            "desktop_recover_window",
+            "desktop_wait_for_window_ready",
+        }
+        has_explicit_window_target = any(
+            str(args.get(key, "")).strip()
+            for key in ("title", "match", "window_id", "expected_window_title", "expected_window_id")
+        )
 
         if getattr(task_state, "desktop_observation_token", ""):
             args.setdefault("observation_token", task_state.desktop_observation_token)
-        if getattr(task_state, "desktop_active_window_title", ""):
+        if getattr(task_state, "desktop_active_window_title", "") and not (targeted_window_tool and has_explicit_window_target):
             args.setdefault("expected_window_title", task_state.desktop_active_window_title)
-        if getattr(task_state, "desktop_active_window_id", ""):
+        if getattr(task_state, "desktop_active_window_id", "") and not (targeted_window_tool and has_explicit_window_target):
             args.setdefault("expected_window_id", task_state.desktop_active_window_id)
 
         if tool_name == "desktop_list_windows":
             args.setdefault("limit", 12)
         elif tool_name == "desktop_get_active_window":
             args.setdefault("limit", 12)
+        elif tool_name == "desktop_inspect_window_state":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("check_visual_stability", True)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
+        elif tool_name == "desktop_recover_window":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("max_attempts", 2)
+            args.setdefault("wait_seconds", 2.2)
+            args.setdefault("poll_interval_seconds", 0.16)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
+        elif tool_name == "desktop_wait_for_window_ready":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("wait_seconds", 2.2)
+            args.setdefault("poll_interval_seconds", 0.16)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
         elif tool_name == "desktop_capture_screenshot":
             args.setdefault("scope", "active_window")
             args.setdefault("limit", 12)
@@ -336,7 +367,15 @@ class ToolRuntime:
                     args["checkpoint_required"] = False
                 else:
                     args.setdefault("checkpoint_required", True)
-            elif tool_name in {"desktop_focus_window", "desktop_capture_screenshot", "desktop_get_active_window", "desktop_list_windows"}:
+            elif tool_name in {
+                "desktop_focus_window",
+                "desktop_inspect_window_state",
+                "desktop_recover_window",
+                "desktop_wait_for_window_ready",
+                "desktop_capture_screenshot",
+                "desktop_get_active_window",
+                "desktop_list_windows",
+            }:
                 if checkpoint_target:
                     args.setdefault("target_window", checkpoint_target)
 
