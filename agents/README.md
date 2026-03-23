@@ -55,3 +55,8 @@ Use descriptive names such as:
 - `browser_researcher.md`
 - `final_answer_reviewer.md`
 - `recommendation_evaluator.md`
+
+Current repo-local desktop roles now also include:
+
+- `desktop_inspector.md`
+- `desktop_recovery_planner.md`

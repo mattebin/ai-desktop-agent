@@ -19,6 +19,13 @@ It also includes an on-demand artifact-viewer path so retained screenshots can b
 
 The operator now uses the same compact selected/checkpoint desktop evidence as model-facing grounding for bounded desktop investigations and desktop approval preparation.
 
+Desktop recovery and readiness now sit alongside the evidence layer so the operator can tell the difference between:
+
+- evidence is present but the window is minimized
+- evidence is present but the target is not foreground
+- the target exists but is hidden or cloaked
+- the target exists but still looks loading or visually unstable
+
 ## Current evidence sources
 
 - bounded window observation via the desktop window backend
@@ -98,3 +105,5 @@ Current deterministic local coverage checks:
 - compact summary generation and selection heuristics
 - evidence sufficiency / refresh assessment
 - checkpoint and selected evidence grounding in state/API
+- desktop recovery classification and strategy selection
+- bounded readiness / visual-stability diagnostics

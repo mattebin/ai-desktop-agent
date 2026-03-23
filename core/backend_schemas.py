@@ -42,6 +42,23 @@ BACKEND_REASON_CODES = {
     "target_window_mismatch",
     "missing_screenshot",
     "missing_artifact",
+    "ready",
+    "waiting",
+    "recovery_succeeded",
+    "recovery_failed",
+    "recovery_skipped",
+    "target_not_found",
+    "target_minimized",
+    "target_hidden",
+    "foreground_not_confirmed",
+    "target_not_ready",
+    "target_loading",
+    "target_mismatch",
+    "tray_or_background_state",
+    "visual_state_unstable",
+    "restored",
+    "shown",
+    "retrying",
     "error",
 }
 
@@ -224,6 +241,8 @@ def normalize_window_descriptor(window: Dict[str, Any], *, backend: str, reason:
         "is_active": _coerce_bool(window.get("is_active", False), False),
         "is_visible": _coerce_bool(window.get("is_visible", False), False),
         "is_minimized": _coerce_bool(window.get("is_minimized", False), False),
+        "is_maximized": _coerce_bool(window.get("is_maximized", False), False),
+        "is_cloaked": _coerce_bool(window.get("is_cloaked", False), False),
         "backend": _trim_text(backend, limit=60),
         "reason": _normalize_reason(reason, default="inspected"),
     }
@@ -416,4 +435,75 @@ def normalize_desktop_evidence_artifact(value: Dict[str, Any] | None) -> Dict[st
         "content_path": _trim_text(value.get("content_path", ""), limit=240),
         "bundle_path": _trim_text(value.get("bundle_path", ""), limit=320),
         "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_window_readiness(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    state = _trim_text(value.get("state", ""), limit=40).lower() or "missing"
+    if state not in {"ready", "not_ready", "loading", "missing", "unsupported"}:
+        state = "missing"
+    return {
+        "state": state,
+        "ready": _coerce_bool(value.get("ready", False), False),
+        "loading": _coerce_bool(value.get("loading", False), False),
+        "visible": _coerce_bool(value.get("visible", False), False),
+        "enabled": _coerce_bool(value.get("enabled", False), False),
+        "focused": _coerce_bool(value.get("focused", False), False),
+        "interactable": _coerce_bool(value.get("interactable", False), False),
+        "target": _trim_text(value.get("target", ""), limit=180),
+        "target_window_id": _trim_text(value.get("target_window_id", ""), limit=40),
+        "window_title": _trim_text(value.get("window_title", ""), limit=180),
+        "control_count": _coerce_int(value.get("control_count", 0), 0, minimum=0, maximum=256),
+        "backend": _trim_text(value.get("backend", ""), limit=60),
+        "reason": _normalize_reason(value.get("reason", state), default=state),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_visual_stability(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    state = _trim_text(value.get("state", ""), limit=40).lower() or "missing"
+    if state not in {"stable", "unstable", "unsupported", "missing"}:
+        state = "missing"
+    return {
+        "state": state,
+        "stable": _coerce_bool(value.get("stable", False), False),
+        "sample_count": _coerce_int(value.get("sample_count", 0), 0, minimum=0, maximum=64),
+        "distinct_sample_count": _coerce_int(value.get("distinct_sample_count", 0), 0, minimum=0, maximum=64),
+        "changed": _coerce_bool(value.get("changed", False), False),
+        "backend": _trim_text(value.get("backend", ""), limit=60),
+        "reason": _normalize_reason(value.get("reason", state), default=state),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_recovery_outcome(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    state = _trim_text(value.get("state", ""), limit=40).lower() or "missing"
+    if state not in {"ready", "needs_recovery", "recovered", "failed", "skipped", "waiting", "missing"}:
+        state = "missing"
+    return {
+        "state": state,
+        "reason": _normalize_reason(value.get("reason", state), default=state),
+        "strategy": _trim_text(value.get("strategy", ""), limit=80),
+        "requested_title": _trim_text(value.get("requested_title", ""), limit=180),
+        "requested_window_id": _trim_text(value.get("requested_window_id", ""), limit=40),
+        "target_present": _coerce_bool(value.get("target_present", False), False),
+        "foreground_confirmed": _coerce_bool(value.get("foreground_confirmed", False), False),
+        "target_visible": _coerce_bool(value.get("target_visible", False), False),
+        "target_minimized": _coerce_bool(value.get("target_minimized", False), False),
+        "target_hidden": _coerce_bool(value.get("target_hidden", False), False),
+        "target_loading": _coerce_bool(value.get("target_loading", False), False),
+        "target_ready": _coerce_bool(value.get("target_ready", False), False),
+        "target_match": _coerce_bool(value.get("target_match", False), False),
+        "attempt_count": _coerce_int(value.get("attempt_count", 0), 0, minimum=0, maximum=16),
+        "max_attempts": _coerce_int(value.get("max_attempts", 0), 0, minimum=0, maximum=16),
+        "candidate_count": _coerce_int(value.get("candidate_count", 0), 0, minimum=0, maximum=64),
+        "backend": _trim_text(value.get("backend", ""), limit=60),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "target_window": normalize_window_descriptor(value.get("target_window", {}), backend=_trim_text(value.get("backend", ""), limit=60), reason=value.get("reason", "inspected")),
+        "active_window": normalize_window_descriptor(value.get("active_window", {}), backend=_trim_text(value.get("backend", ""), limit=60), reason="inspected"),
+        "readiness": normalize_desktop_window_readiness(value.get("readiness", {})),
+        "visual_stability": normalize_desktop_visual_stability(value.get("visual_stability", {})),
     }

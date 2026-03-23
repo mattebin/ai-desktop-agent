@@ -17,6 +17,7 @@ This project is now a serious local operator framework with:
 - a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
 - a compact desktop evidence summary/selection layer for recent evidence lookup
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
+- a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
 - live eval coverage for core and realistic workflows
 - a tighter live-eval client/harness wait path for desktop-grounding validation
 
@@ -92,6 +93,8 @@ Current role:
 
 The evidence layer now also exposes compact recent summaries, deterministic selection helpers, and bounded evidence sufficiency assessment for the most relevant recent desktop evidence bundle.
 
+The desktop stack now also includes bounded recovery/readiness helpers so desktop tasks can diagnose and recover from messy window states without relying on one fragile foreground-only path.
+
 Those summaries now feed compact UI/client presentation too:
 
 - desktop approvals show linked evidence context
@@ -107,6 +110,18 @@ Current non-goals:
 - no broad UI automation
 - no new desktop actions beyond the existing bounded set
 - no broad autonomous desktop navigation or OCR-heavy desktop reasoning
+
+## Desktop recovery layer
+
+The bounded desktop recovery layer now supports:
+
+- richer window-state inspection
+- minimized / hidden / tray-background classification
+- foreground confirmation checks
+- bounded restore/show/focus recovery
+- bounded readiness and visual-stability checks
+
+See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.
 
 ## Project philosophy
 

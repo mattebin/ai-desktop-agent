@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 from core.backend_schemas import (
     backend_status,
+    normalize_desktop_visual_stability,
+    normalize_desktop_window_readiness,
     normalize_screenshot_observation,
     normalize_ui_evidence_observation,
     normalize_window_descriptor,
     result_envelope,
 )
 from core.config import load_settings
+from core.desktop_recovery import assess_visual_sample_signatures
 
 try:
     import pywinctl
@@ -91,6 +96,13 @@ def _window_title_matches(title: str, requested_title: str, *, exact: bool) -> b
     if exact:
         return normalized_title == requested
     return requested in normalized_title
+
+
+def _hex_hwnd(value: Any) -> str:
+    try:
+        return f"0x{int(value or 0):08X}"
+    except Exception:
+        return ""
 
 
 class NativeWindowBackend:
@@ -187,6 +199,7 @@ class PyWinCtlWindowBackend(NativeWindowBackend):
                 "is_active": handle == active_handle and handle > 0,
                 "is_visible": bool(getattr(window, "isVisible", True)),
                 "is_minimized": bool(getattr(window, "isMinimized", False)),
+                "is_maximized": bool(getattr(window, "isMaximized", False)),
             },
             backend=self.name,
         )
@@ -307,7 +320,7 @@ class PyWinCtlWindowBackend(NativeWindowBackend):
             available=True,
             reason="active",
             message="Using PyWinCtl for desktop window enumeration and focus metadata.",
-            metadata={},
+            metadata={"supports_restore": True, "supports_activate": True},
         )
 
 
@@ -532,6 +545,275 @@ class PyWinAutoEvidenceBackend(StubUiEvidenceBackend):
         )
 
 
+def _pywinauto_target_window(*, target: str = "active_window", window_id: str = "") -> Any:
+    if PyWinAutoDesktop is None:
+        return None
+
+    desktop = PyWinAutoDesktop(backend="uia")
+    windows = list(desktop.windows() or [])
+    normalized_window_id = str(window_id or "").strip().lower()
+    if normalized_window_id:
+        for window in windows:
+            try:
+                handle = getattr(window.element_info, "handle", 0)
+            except Exception:
+                handle = 0
+            if _hex_hwnd(handle).lower() == normalized_window_id:
+                return window
+
+    if target == "active_window":
+        for window in windows:
+            try:
+                if window.has_keyboard_focus():
+                    return window
+            except Exception:
+                continue
+        return windows[0] if windows else None
+
+    normalized_target = str(target or "").strip()
+    if not normalized_target:
+        return windows[0] if windows else None
+
+    for window in windows:
+        try:
+            title = str(window.window_text() or "").strip()
+        except Exception:
+            title = ""
+        if _window_title_matches(title, normalized_target, exact=False):
+            return window
+    return None
+
+
+def probe_window_readiness(*, target: str = "active_window", window_id: str = "", limit: int = 8) -> Dict[str, Any]:
+    if PyWinAutoDesktop is None:
+        readiness = normalize_desktop_window_readiness(
+            {
+                "state": "unsupported",
+                "ready": False,
+                "target": target,
+                "target_window_id": window_id,
+                "backend": "stub",
+                "reason": "unsupported",
+                "summary": "Read-only readiness probing is not available because pywinauto is not active.",
+            }
+        )
+        return result_envelope(
+            "desktop_window_readiness",
+            ok=False,
+            backend="stub",
+            reason="unsupported",
+            message=readiness.get("summary", ""),
+            error="pywinauto is not available.",
+            data=readiness,
+        )
+
+    try:
+        target_window = _pywinauto_target_window(target=target, window_id=window_id)
+        if target_window is None:
+            readiness = normalize_desktop_window_readiness(
+                {
+                    "state": "missing",
+                    "ready": False,
+                    "target": target,
+                    "target_window_id": window_id,
+                    "backend": "pywinauto",
+                    "reason": "target_not_found",
+                    "summary": "The requested window was not available for read-only readiness probing.",
+                }
+            )
+            return result_envelope(
+                "desktop_window_readiness",
+                ok=False,
+                backend="pywinauto",
+                reason="target_not_found",
+                message=readiness.get("summary", ""),
+                error="Requested window not found for readiness probing.",
+                data=readiness,
+            )
+
+        try:
+            target_title = _trim_text(target_window.window_text(), limit=180)
+        except Exception:
+            target_title = _trim_text(target, limit=180)
+        try:
+            handle = getattr(target_window.element_info, "handle", 0)
+        except Exception:
+            handle = 0
+        try:
+            visible = bool(target_window.is_visible())
+        except Exception:
+            visible = False
+        try:
+            enabled = bool(target_window.is_enabled())
+        except Exception:
+            enabled = False
+        try:
+            focused = bool(target_window.has_keyboard_focus())
+        except Exception:
+            focused = False
+
+        control_count = 0
+        try:
+            control_count = len(list(target_window.descendants())[: max(1, int(limit or 8))])
+        except Exception:
+            control_count = 0
+
+        if not visible:
+            state = "not_ready"
+            reason = "target_hidden"
+            summary = f"'{target_title or 'The target window'}' is present but not visible to pywinauto yet."
+        elif not enabled:
+            state = "not_ready"
+            reason = "target_not_ready"
+            summary = f"'{target_title or 'The target window'}' is visible but not interactable yet."
+        elif control_count <= 0:
+            state = "loading"
+            reason = "target_loading"
+            summary = f"'{target_title or 'The target window'}' is visible, but its control tree still looks empty."
+        else:
+            state = "ready"
+            reason = "ready"
+            summary = f"'{target_title or 'The target window'}' looks visible and ready for bounded desktop work."
+
+        readiness = normalize_desktop_window_readiness(
+            {
+                "state": state,
+                "ready": state == "ready",
+                "loading": state == "loading",
+                "visible": visible,
+                "enabled": enabled,
+                "focused": focused,
+                "interactable": visible and enabled,
+                "target": target,
+                "target_window_id": _hex_hwnd(handle),
+                "window_title": target_title,
+                "control_count": control_count,
+                "backend": "pywinauto",
+                "reason": reason,
+                "summary": summary,
+            }
+        )
+        return result_envelope(
+            "desktop_window_readiness",
+            ok=state == "ready",
+            backend="pywinauto",
+            reason=reason,
+            message=summary,
+            data=readiness,
+        )
+    except Exception as exc:
+        readiness = normalize_desktop_window_readiness(
+            {
+                "state": "missing",
+                "ready": False,
+                "target": target,
+                "target_window_id": window_id,
+                "backend": "pywinauto",
+                "reason": "error",
+                "summary": "Could not collect read-only readiness evidence.",
+            }
+        )
+        return result_envelope(
+            "desktop_window_readiness",
+            ok=False,
+            backend="pywinauto",
+            reason="error",
+            message="Could not collect read-only readiness evidence.",
+            error=_trim_text(exc, limit=240),
+            data=readiness,
+        )
+
+
+def probe_visual_stability(*, x: int, y: int, width: int, height: int, samples: int = 3, interval_ms: int = 120) -> Dict[str, Any]:
+    if mss is None:
+        stability = normalize_desktop_visual_stability(
+            {
+                "state": "unsupported",
+                "stable": False,
+                "sample_count": 0,
+                "distinct_sample_count": 0,
+                "changed": False,
+                "backend": "stub",
+                "reason": "unsupported",
+                "summary": "Visual stability checks are not available because mss is not active.",
+            }
+        )
+        return result_envelope(
+            "desktop_visual_stability",
+            ok=False,
+            backend="stub",
+            reason="unsupported",
+            message=stability.get("summary", ""),
+            error="mss is not available.",
+            data=stability,
+        )
+
+    if int(width or 0) <= 0 or int(height or 0) <= 0:
+        stability = normalize_desktop_visual_stability(
+            {
+                "state": "missing",
+                "stable": False,
+                "sample_count": 0,
+                "distinct_sample_count": 0,
+                "changed": False,
+                "backend": "mss",
+                "reason": "invalid_input",
+                "summary": "Visual stability checks need positive bounds.",
+            }
+        )
+        return result_envelope(
+            "desktop_visual_stability",
+            ok=False,
+            backend="mss",
+            reason="invalid_input",
+            message=stability.get("summary", ""),
+            error="Visual stability checks need positive bounds.",
+            data=stability,
+        )
+
+    signatures: List[str] = []
+    sample_total = max(2, min(4, int(samples or 3)))
+    interval_seconds = max(0.03, min(0.4, int(interval_ms or 120) / 1000.0))
+    try:
+        with mss.mss() as capture:
+            for index in range(sample_total):
+                shot = capture.grab({"left": int(x), "top": int(y), "width": int(width), "height": int(height)})
+                signatures.append(hashlib.sha1(bytes(shot.rgb)).hexdigest()[:20])
+                if index < sample_total - 1:
+                    time.sleep(interval_seconds)
+        stability = assess_visual_sample_signatures(signatures, backend="mss")
+        return result_envelope(
+            "desktop_visual_stability",
+            ok=bool(stability.get("stable", False)),
+            backend="mss",
+            reason=stability.get("reason", "inspected"),
+            message=stability.get("summary", ""),
+            data=stability,
+        )
+    except Exception as exc:
+        stability = normalize_desktop_visual_stability(
+            {
+                "state": "missing",
+                "stable": False,
+                "sample_count": len(signatures),
+                "distinct_sample_count": len(set(signatures)),
+                "changed": False,
+                "backend": "mss",
+                "reason": "error",
+                "summary": "Could not collect bounded visual stability samples.",
+            }
+        )
+        return result_envelope(
+            "desktop_visual_stability",
+            ok=False,
+            backend="mss",
+            reason="error",
+            message="Could not collect bounded visual stability samples.",
+            error=_trim_text(exc, limit=240),
+            data=stability,
+        )
+
+
 def _load_backend_preferences() -> Dict[str, str]:
     settings = load_settings()
     return {
@@ -587,4 +869,9 @@ def describe_backends(
         "window": window_backend.status_snapshot(preferences["desktop_window_backend"]),
         "screenshot": screenshot_backend.status_snapshot(preferences["desktop_screenshot_backend"]),
         "ui_evidence": ui_evidence_backend.status_snapshot(preferences["ui_evidence_backend"]),
+        "recovery": {
+            "window_strategies": ["restore_then_focus", "show_then_focus", "focus_then_verify", "wait_for_readiness"],
+            "readiness_backend": "pywinauto" if PyWinAutoDesktop is not None else "stub",
+            "visual_stability_backend": "mss" if mss is not None else "stub",
+        },
     }

@@ -12,11 +12,14 @@ from core.desktop_evidence import (
     collect_display_metadata,
     get_desktop_evidence_store,
 )
+from core.desktop_recovery import classify_window_recovery_state, select_window_recovery_strategy
 from tools.desktop_backends import (
     create_screenshot_backend,
     create_ui_evidence_backend,
     create_window_backend,
     describe_backends,
+    probe_visual_stability,
+    probe_window_readiness,
 )
 
 
@@ -31,6 +34,9 @@ DESKTOP_TOOL_NAMES = {
     "desktop_get_active_window",
     "desktop_focus_window",
     "desktop_capture_screenshot",
+    "desktop_inspect_window_state",
+    "desktop_recover_window",
+    "desktop_wait_for_window_ready",
     "desktop_click_point",
     "desktop_type_text",
 }
@@ -56,6 +62,7 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 SW_RESTORE = 9
+SW_SHOW = 5
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 BI_RGB = 0
@@ -181,6 +188,8 @@ user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
 user32.IsWindowVisible.restype = ctypes.c_bool
 user32.IsIconic.argtypes = [ctypes.c_void_p]
 user32.IsIconic.restype = ctypes.c_bool
+user32.IsZoomed.argtypes = [ctypes.c_void_p]
+user32.IsZoomed.restype = ctypes.c_bool
 user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
 user32.GetWindowTextLengthW.restype = ctypes.c_int
 user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
@@ -391,16 +400,20 @@ def _window_info(hwnd: int) -> Dict[str, Any]:
         "is_active": handle == active_hwnd,
         "is_visible": bool(user32.IsWindowVisible(ctypes.c_void_p(handle))),
         "is_minimized": bool(user32.IsIconic(ctypes.c_void_p(handle))),
+        "is_maximized": bool(user32.IsZoomed(ctypes.c_void_p(handle))),
+        "is_cloaked": _is_window_cloaked(handle),
     }
 
 
-def _window_is_listable(hwnd: int, *, include_minimized: bool) -> bool:
+def _window_is_listable(hwnd: int, *, include_minimized: bool, include_hidden: bool = False) -> bool:
     handle = int(hwnd or 0)
     if handle <= 0:
         return False
-    if not user32.IsWindowVisible(ctypes.c_void_p(handle)):
+    visible = bool(user32.IsWindowVisible(ctypes.c_void_p(handle)))
+    cloaked = _is_window_cloaked(handle)
+    if not include_hidden and not visible:
         return False
-    if _is_window_cloaked(handle):
+    if not include_hidden and cloaked:
         return False
     if not include_minimized and user32.IsIconic(ctypes.c_void_p(handle)):
         return False
@@ -411,14 +424,19 @@ def _window_is_listable(hwnd: int, *, include_minimized: bool) -> bool:
     return rect["width"] >= 40 and rect["height"] >= 30
 
 
-def _enum_windows_native(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
+def _enum_windows_native(
+    *,
+    include_minimized: bool = False,
+    include_hidden: bool = False,
+    limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
+) -> List[Dict[str, Any]]:
     windows: List[Dict[str, Any]] = []
 
     @EnumWindowsProc
     def callback(hwnd, _lparam):
         if len(windows) >= limit:
             return False
-        if _window_is_listable(int(hwnd), include_minimized=include_minimized):
+        if _window_is_listable(int(hwnd), include_minimized=include_minimized, include_hidden=include_hidden):
             info = _window_info(int(hwnd))
             if info:
                 windows.append(info)
@@ -483,6 +501,113 @@ def probe_ui_evidence(*, target: str = "active_window", limit: int = 8) -> Dict[
     return _get_ui_evidence_backend().probe(target=target, limit=limit)
 
 
+def _window_probe_target(window: Dict[str, Any], fallback: str = "active_window") -> str:
+    if not isinstance(window, dict):
+        return fallback
+    title = str(window.get("title", "")).strip()
+    return title or fallback
+
+
+def _readiness_probe_for_window(window: Dict[str, Any], *, limit: int = 8) -> Dict[str, Any]:
+    if not isinstance(window, dict) or not window.get("window_id"):
+        return {}
+    result = probe_window_readiness(
+        target=_window_probe_target(window),
+        window_id=str(window.get("window_id", "")).strip(),
+        limit=max(1, min(12, int(limit or 8))),
+    )
+    return result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+
+
+def _visual_stability_for_window(window: Dict[str, Any], *, samples: int = 3, interval_ms: int = 120) -> Dict[str, Any]:
+    if not isinstance(window, dict):
+        return {}
+    rect = window.get("rect", {}) if isinstance(window.get("rect", {}), dict) else {}
+    width = max(0, int(rect.get("width", 0) or 0))
+    height = max(0, int(rect.get("height", 0) or 0))
+    if width <= 0 or height <= 0:
+        return {}
+    result = probe_visual_stability(
+        x=int(rect.get("x", 0) or 0),
+        y=int(rect.get("y", 0) or 0),
+        width=min(width, DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH),
+        height=min(height, DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT),
+        samples=max(2, min(4, int(samples or 3))),
+        interval_ms=max(40, min(400, int(interval_ms or 120))),
+    )
+    return result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+
+
+def _inspect_window_state_internal(
+    args: Dict[str, Any],
+    *,
+    source_action: str,
+    include_ui_evidence: bool = True,
+    include_visual_stability: bool = True,
+) -> Dict[str, Any]:
+    limit = max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30))
+    target_window, candidates, lookup_error = _find_window(args)
+    visible_windows = _enum_windows(limit=min(limit, DESKTOP_DEFAULT_WINDOW_LIMIT))
+    active_window = _active_window_info()
+    readiness = _readiness_probe_for_window(
+        target_window or active_window,
+        limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=16),
+    )
+    visual_stability = (
+        _visual_stability_for_window(
+            target_window or active_window,
+            samples=_coerce_int(args.get("stability_samples", 3), 3, minimum=2, maximum=4),
+            interval_ms=_coerce_int(args.get("stability_interval_ms", 120), 120, minimum=40, maximum=400),
+        )
+        if include_visual_stability
+        else {}
+    )
+    observation = _register_observation(active_window=active_window, windows=visible_windows)
+    errors = [lookup_error] if lookup_error else []
+    evidence_bundle, evidence_ref = _record_desktop_evidence(
+        source_action=source_action,
+        active_window=active_window,
+        windows=visible_windows,
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        target_window=target_window,
+        include_ui_evidence=include_ui_evidence,
+        ui_limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=16),
+        errors=errors,
+    )
+    recovery = classify_window_recovery_state(
+        requested_title=str(args.get("title", "") or args.get("match", "")).strip(),
+        requested_window_id=str(args.get("window_id", "")).strip(),
+        target_window=target_window,
+        active_window=active_window,
+        candidate_count=len(candidates),
+        readiness=readiness,
+        visual_stability=visual_stability,
+        expected_window_id=str(args.get("expected_window_id", "")).strip(),
+        expected_window_title=str(args.get("expected_window_title", "")).strip(),
+        backend=str(get_desktop_backend_status().get("window", {}).get("active", "desktop") or "desktop"),
+    )
+    recovery_strategy = select_window_recovery_strategy(
+        recovery,
+        attempt_count=_coerce_int(args.get("attempt_count", 0), 0, minimum=0, maximum=8),
+        max_attempts=_coerce_int(args.get("max_attempts", 2), 2, minimum=0, maximum=4),
+    )
+    recovery_view = dict(recovery)
+    recovery_view.update(recovery_strategy)
+    return {
+        "target_window": target_window,
+        "candidates": candidates,
+        "lookup_error": lookup_error,
+        "active_window": active_window,
+        "windows": visible_windows,
+        "observation": observation,
+        "evidence_bundle": evidence_bundle,
+        "evidence_ref": evidence_ref,
+        "readiness": readiness,
+        "visual_stability": visual_stability,
+        "recovery": recovery_view,
+    }
+
+
 def _latest_evidence_ref_for_observation(token: str) -> Dict[str, Any]:
     try:
         return get_desktop_evidence_store().find_by_observation_token(token)
@@ -534,11 +659,28 @@ def _record_desktop_evidence(
         return bundle, {}
 
 
-def _enum_windows(*, include_minimized: bool = False, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> List[Dict[str, Any]]:
+def _enum_windows(
+    *,
+    include_minimized: bool = False,
+    include_hidden: bool = False,
+    limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
+) -> List[Dict[str, Any]]:
     result = _get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
     data = result.get("data", {}) if isinstance(result, dict) else {}
     windows = data.get("windows", []) if isinstance(data, dict) else []
-    return windows if isinstance(windows, list) else []
+    if isinstance(windows, list) and windows:
+        filtered: List[Dict[str, Any]] = []
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            if not include_hidden and not bool(item.get("is_visible", False)):
+                continue
+            if not include_hidden and bool(item.get("is_cloaked", False)):
+                continue
+            filtered.append(item)
+        if filtered or not include_hidden:
+            return filtered
+    return _enum_windows_native(include_minimized=include_minimized, include_hidden=include_hidden, limit=limit)
 
 
 def _active_window_info() -> Dict[str, Any]:
@@ -552,7 +694,11 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
     window_id = _parse_hwnd(args.get("window_id", ""))
     requested_title = str(args.get("title", "") or args.get("match", "")).strip()
     exact = _coerce_bool(args.get("exact", False), False)
-    candidates = _enum_windows(include_minimized=True, limit=max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)))
+    candidates = _enum_windows(
+        include_minimized=True,
+        include_hidden=True,
+        limit=max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)),
+    )
 
     if window_id:
         for item in candidates:
@@ -579,6 +725,18 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
     if len(matches) == 1:
         return matches[0], candidates, ""
     if len(matches) > 1:
+        matches.sort(
+            key=lambda item: (
+                not bool(item.get("is_active", False)),
+                not bool(item.get("is_visible", False)),
+                bool(item.get("is_minimized", False)),
+                item.get("title", "").lower(),
+            )
+        )
+        top = matches[0]
+        strong_match = bool(top.get("is_active", False)) or bool(top.get("is_visible", False))
+        if strong_match and len(matches) <= 3:
+            return top, candidates, ""
         labels = ", ".join(item.get("title", "") for item in matches[:4] if item.get("title"))
         return {}, candidates, f"Multiple windows matched '{requested_title}': {labels}"
     return {}, candidates, f"Could not find a visible window matching '{requested_title}'."
@@ -673,10 +831,19 @@ def _desktop_result(
     typed_text_preview: str = "",
     desktop_evidence: Dict[str, Any] | None = None,
     desktop_evidence_ref: Dict[str, Any] | None = None,
+    target_window: Dict[str, Any] | None = None,
+    recovery: Dict[str, Any] | None = None,
+    recovery_attempts: List[Dict[str, Any]] | None = None,
+    window_readiness: Dict[str, Any] | None = None,
+    visual_stability: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     state = desktop_state if isinstance(desktop_state, dict) else {}
     evidence = desktop_evidence if isinstance(desktop_evidence, dict) else {}
     evidence_ref = desktop_evidence_ref if isinstance(desktop_evidence_ref, dict) else {}
+    target = target_window if isinstance(target_window, dict) else {}
+    recovery_view = recovery if isinstance(recovery, dict) else {}
+    readiness = window_readiness if isinstance(window_readiness, dict) else {}
+    stability = visual_stability if isinstance(visual_stability, dict) else {}
     return {
         "ok": bool(ok),
         "action": action,
@@ -706,6 +873,11 @@ def _desktop_result(
         "desktop_evidence_ref": evidence_ref,
         "evidence_id": _trim_text(evidence_ref.get("evidence_id", "") or evidence.get("evidence_id", ""), limit=80),
         "evidence_summary": _trim_text(evidence_ref.get("summary", "") or evidence.get("summary", ""), limit=240),
+        "target_window": target,
+        "window_readiness": readiness,
+        "visual_stability": stability,
+        "recovery": recovery_view,
+        "recovery_attempts": [dict(item) for item in list(recovery_attempts or [])[:6] if isinstance(item, dict)],
     }
 
 
@@ -784,6 +956,30 @@ def _focus_window_handle_native(hwnd: int) -> Tuple[bool, str]:
     if str(active.get("window_id", "")).strip() == _hex_hwnd(handle):
         return True, ""
     return False, "Windows did not grant foreground focus to the requested window."
+
+
+def _restore_window_handle_native(hwnd: int) -> Tuple[bool, str]:
+    handle = int(hwnd or 0)
+    if handle <= 0 or not user32.IsWindow(ctypes.c_void_p(handle)):
+        return False, "The requested window no longer exists."
+    try:
+        user32.ShowWindow(ctypes.c_void_p(handle), SW_RESTORE)
+        time.sleep(0.08)
+        return True, ""
+    except Exception as exc:
+        return False, _trim_text(exc, limit=220)
+
+
+def _show_window_handle_native(hwnd: int) -> Tuple[bool, str]:
+    handle = int(hwnd or 0)
+    if handle <= 0 or not user32.IsWindow(ctypes.c_void_p(handle)):
+        return False, "The requested window no longer exists."
+    try:
+        user32.ShowWindow(ctypes.c_void_p(handle), SW_SHOW)
+        time.sleep(0.08)
+        return True, ""
+    except Exception as exc:
+        return False, _trim_text(exc, limit=220)
 
 
 def _capture_bitmap_native(path: Path, *, x: int, y: int, width: int, height: int) -> Tuple[bool, str]:
@@ -870,6 +1066,111 @@ def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
     if not isinstance(result, dict):
         return False, "Could not focus the requested window."
     return bool(result.get("ok", False)), str(result.get("error", "") or "")
+
+
+def _wait_for_window_ready(
+    args: Dict[str, Any],
+    *,
+    action_name: str,
+    attempt_count: int = 0,
+) -> Dict[str, Any]:
+    wait_seconds = max(0.2, min(3.0, float(args.get("wait_seconds", 1.2) or 1.2)))
+    interval_seconds = max(0.08, min(0.4, float(args.get("poll_interval_seconds", 0.16) or 0.16)))
+    deadline = time.time() + wait_seconds
+    last_view: Dict[str, Any] = {}
+
+    while time.time() < deadline:
+        current_args = dict(args)
+        current_args["attempt_count"] = attempt_count
+        inspected = _inspect_window_state_internal(
+            current_args,
+            source_action=action_name,
+            include_ui_evidence=True,
+            include_visual_stability=True,
+        )
+        last_view = inspected
+        recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
+        if recovery.get("state") == "ready":
+            return inspected
+        if recovery.get("reason") in {"target_not_found", "tray_or_background_state", "target_mismatch"}:
+            return inspected
+        time.sleep(interval_seconds)
+
+    return last_view
+
+
+def _execute_window_recovery(args: Dict[str, Any], *, action_name: str) -> Dict[str, Any]:
+    inspected = _inspect_window_state_internal(
+        args,
+        source_action=action_name,
+        include_ui_evidence=True,
+        include_visual_stability=True,
+    )
+    recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
+    target_window = inspected.get("target_window", {}) if isinstance(inspected.get("target_window", {}), dict) else {}
+    max_attempts = _coerce_int(args.get("max_attempts", 2), 2, minimum=0, maximum=4)
+    attempts: List[Dict[str, Any]] = []
+    current = dict(recovery)
+
+    for attempt_index in range(max_attempts):
+        strategy = select_window_recovery_strategy(current, attempt_count=attempt_index, max_attempts=max_attempts)
+        attempts.append(
+            {
+                "attempt": attempt_index + 1,
+                "strategy": strategy.get("strategy", ""),
+                "reason": current.get("reason", ""),
+                "summary": strategy.get("summary", ""),
+            }
+        )
+        current["strategy"] = strategy.get("strategy", "")
+        current["attempt_count"] = attempt_index + 1
+        current["max_attempts"] = max_attempts
+
+        if strategy.get("strategy") in {"no_action", "report_missing_target", "stop_and_report", "inspect_only"}:
+            break
+
+        handle = _parse_hwnd(target_window.get("window_id", ""))
+        if handle <= 0:
+            break
+
+        if strategy.get("strategy") == "restore_then_focus":
+            _restore_window_handle_native(handle)
+            _focus_window_handle(handle)
+        elif strategy.get("strategy") == "show_then_focus":
+            _show_window_handle_native(handle)
+            _focus_window_handle(handle)
+        elif strategy.get("strategy") == "focus_then_verify":
+            _focus_window_handle(handle)
+        elif strategy.get("strategy") == "wait_for_readiness":
+            waited_args = dict(args)
+            waited_args["window_id"] = target_window.get("window_id", "")
+            waited_args["attempt_count"] = attempt_index + 1
+            waited = _wait_for_window_ready(waited_args, action_name=action_name, attempt_count=attempt_index + 1)
+            current = waited.get("recovery", {}) if isinstance(waited.get("recovery", {}), dict) else current
+            inspected = waited
+            if current.get("state") == "ready":
+                break
+            continue
+
+        refreshed_args = dict(args)
+        refreshed_args["window_id"] = target_window.get("window_id", "")
+        refreshed_args["attempt_count"] = attempt_index + 1
+        inspected = _inspect_window_state_internal(
+            refreshed_args,
+            source_action=action_name,
+            include_ui_evidence=True,
+            include_visual_stability=True,
+        )
+        target_window = inspected.get("target_window", {}) if isinstance(inspected.get("target_window", {}), dict) else target_window
+        current = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else current
+        if current.get("state") == "ready":
+            break
+
+    return {
+        **inspected,
+        "recovery": current,
+        "recovery_attempts": attempts,
+    }
 
 
 def _capture_with_backend(
@@ -971,59 +1272,99 @@ def desktop_get_active_window(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
-    target_window, windows, error = _find_window(args)
-    active_before = _active_window_info()
-    if error:
-        observation = _register_observation(active_window=active_before, windows=windows)
-        evidence_bundle, evidence_ref = _record_desktop_evidence(
-            source_action="desktop_focus_window",
-            active_window=active_before,
-            windows=windows,
-            observation_token=str(observation.get("observation_token", "")).strip(),
-            target_window=target_window,
-            include_ui_evidence=False,
-            errors=[error],
-        )
-        return _desktop_result(
-            ok=False,
-            action="desktop_focus_window",
-            summary=error,
-            desktop_state=observation,
-            error=error,
-            desktop_evidence=evidence_bundle,
-            desktop_evidence_ref=evidence_ref,
-        )
-
-    ok, focus_error = _focus_window_handle(_parse_hwnd(target_window.get("window_id", "")))
-    active_after = _active_window_info()
-    observation = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
-    evidence_bundle, evidence_ref = _record_desktop_evidence(
-        source_action="desktop_focus_window",
-        active_window=active_after,
-        windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT),
-        observation_token=str(observation.get("observation_token", "")).strip(),
-        target_window=target_window,
-        include_ui_evidence=False,
-        errors=[focus_error] if focus_error and not ok else [],
+def desktop_inspect_window_state(args: Dict[str, Any]) -> Dict[str, Any]:
+    inspected = _inspect_window_state_internal(
+        args,
+        source_action="desktop_inspect_window_state",
+        include_ui_evidence=True,
+        include_visual_stability=_coerce_bool(args.get("check_visual_stability", True), True),
     )
-    if not ok:
-        return _desktop_result(
-            ok=False,
-            action="desktop_focus_window",
-            summary=f"Could not focus '{target_window.get('title', 'the requested window')}'.",
-            desktop_state=observation,
-            error=focus_error or f"Could not focus '{target_window.get('title', 'the requested window')}'.",
-            desktop_evidence=evidence_bundle,
-            desktop_evidence_ref=evidence_ref,
-        )
+    recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
+    summary = str(recovery.get("summary", "") or "").strip() or "Inspected the current desktop window state."
+    ok = recovery.get("state") == "ready"
+    error = "" if ok else summary
     return _desktop_result(
-        ok=True,
+        ok=ok,
+        action="desktop_inspect_window_state",
+        summary=summary,
+        desktop_state=inspected.get("observation", {}),
+        error=error,
+        desktop_evidence=inspected.get("evidence_bundle", {}),
+        desktop_evidence_ref=inspected.get("evidence_ref", {}),
+        target_window=inspected.get("target_window", {}),
+        recovery=recovery,
+        window_readiness=inspected.get("readiness", {}),
+        visual_stability=inspected.get("visual_stability", {}),
+    )
+
+
+def desktop_wait_for_window_ready(args: Dict[str, Any]) -> Dict[str, Any]:
+    waited = _wait_for_window_ready(args, action_name="desktop_wait_for_window_ready")
+    recovery = waited.get("recovery", {}) if isinstance(waited.get("recovery", {}), dict) else {}
+    ok = recovery.get("state") == "ready"
+    summary = str(recovery.get("summary", "") or "").strip() or "Finished the bounded window readiness check."
+    error = "" if ok else summary
+    return _desktop_result(
+        ok=ok,
+        action="desktop_wait_for_window_ready",
+        summary=summary,
+        desktop_state=waited.get("observation", {}),
+        error=error,
+        desktop_evidence=waited.get("evidence_bundle", {}),
+        desktop_evidence_ref=waited.get("evidence_ref", {}),
+        target_window=waited.get("target_window", {}),
+        recovery=recovery,
+        window_readiness=waited.get("readiness", {}),
+        visual_stability=waited.get("visual_stability", {}),
+    )
+
+
+def desktop_recover_window(args: Dict[str, Any]) -> Dict[str, Any]:
+    recovered = _execute_window_recovery(args, action_name="desktop_recover_window")
+    recovery = recovered.get("recovery", {}) if isinstance(recovered.get("recovery", {}), dict) else {}
+    ok = recovery.get("state") == "ready"
+    summary = str(recovery.get("summary", "") or "").strip() or "Completed the bounded desktop recovery attempt."
+    error = "" if ok else summary
+    return _desktop_result(
+        ok=ok,
+        action="desktop_recover_window",
+        summary=summary,
+        desktop_state=recovered.get("observation", {}),
+        error=error,
+        desktop_evidence=recovered.get("evidence_bundle", {}),
+        desktop_evidence_ref=recovered.get("evidence_ref", {}),
+        target_window=recovered.get("target_window", {}),
+        recovery=recovery,
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+    )
+
+
+def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
+    recovered = _execute_window_recovery(args, action_name="desktop_focus_window")
+    recovery = recovered.get("recovery", {}) if isinstance(recovered.get("recovery", {}), dict) else {}
+    ok = recovery.get("state") == "ready"
+    target_window = recovered.get("target_window", {}) if isinstance(recovered.get("target_window", {}), dict) else {}
+    if ok:
+        summary = f"Focused '{recovery.get('active_window', {}).get('title', '') or target_window.get('title', 'the requested window')}'."
+        error = ""
+    else:
+        summary = str(recovery.get("summary", "") or "").strip() or f"Could not focus '{target_window.get('title', 'the requested window')}'."
+        error = summary
+    return _desktop_result(
+        ok=ok,
         action="desktop_focus_window",
-        summary=f"Focused '{active_after.get('title', target_window.get('title', 'the requested window'))}'.",
-        desktop_state=observation,
-        desktop_evidence=evidence_bundle,
-        desktop_evidence_ref=evidence_ref,
+        summary=summary,
+        desktop_state=recovered.get("observation", {}),
+        error=error,
+        desktop_evidence=recovered.get("evidence_bundle", {}),
+        desktop_evidence_ref=recovered.get("evidence_ref", {}),
+        target_window=target_window,
+        recovery=recovery,
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
     )
 
 
@@ -1471,8 +1812,9 @@ DESKTOP_GET_ACTIVE_WINDOW_TOOL = {
 DESKTOP_FOCUS_WINDOW_TOOL = {
     "name": "desktop_focus_window",
     "description": (
-        "Bring a specific visible desktop window to the foreground by exact or partial title match, "
-        "or by window_id. This is bounded desktop focus only; it does not click or type."
+        "Bring a specific desktop window to the foreground by exact or partial title match, "
+        "or by window_id. This bounded tool can restore or show the window first when needed, "
+        "then verify whether Windows actually confirmed foreground focus."
     ),
     "input_schema": {
         "type": "object",
@@ -1486,6 +1828,92 @@ DESKTOP_FOCUS_WINDOW_TOOL = {
         "additionalProperties": False,
     },
     "func": desktop_focus_window,
+}
+
+
+DESKTOP_INSPECT_WINDOW_STATE_TOOL = {
+    "name": "desktop_inspect_window_state",
+    "description": (
+        "Inspect the current state of a target desktop window in a bounded, read-only way. "
+        "Use it to diagnose cases like minimized, hidden, tray/background, wrong foreground window, "
+        "loading/not-ready state, or visually unstable UI before taking any desktop action."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "expected_window_title": {"type": "string"},
+            "expected_window_id": {"type": "string"},
+            "exact": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 4, "maximum": 30},
+            "ui_limit": {"type": "integer", "minimum": 1, "maximum": 16},
+            "check_visual_stability": {"type": "boolean"},
+            "stability_samples": {"type": "integer", "minimum": 2, "maximum": 4},
+            "stability_interval_ms": {"type": "integer", "minimum": 40, "maximum": 400},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_inspect_window_state,
+}
+
+
+DESKTOP_RECOVER_WINDOW_TOOL = {
+    "name": "desktop_recover_window",
+    "description": (
+        "Attempt one bounded recovery path for a target desktop window. "
+        "This tool can inspect, restore, show, refocus, or briefly wait for readiness, "
+        "then report normalized recovery reasons and outcomes without clicking or typing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "expected_window_title": {"type": "string"},
+            "expected_window_id": {"type": "string"},
+            "exact": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 4, "maximum": 30},
+            "ui_limit": {"type": "integer", "minimum": 1, "maximum": 16},
+            "max_attempts": {"type": "integer", "minimum": 0, "maximum": 4},
+            "wait_seconds": {"type": "number", "minimum": 0.2, "maximum": 3.0},
+            "poll_interval_seconds": {"type": "number", "minimum": 0.08, "maximum": 0.4},
+            "stability_samples": {"type": "integer", "minimum": 2, "maximum": 4},
+            "stability_interval_ms": {"type": "integer", "minimum": 40, "maximum": 400},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_recover_window,
+}
+
+
+DESKTOP_WAIT_FOR_WINDOW_READY_TOOL = {
+    "name": "desktop_wait_for_window_ready",
+    "description": (
+        "Wait briefly and inspect whether a target desktop window becomes ready and visually stable "
+        "enough for bounded work. This is read-only and intended for loading or animated desktop states."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "expected_window_title": {"type": "string"},
+            "expected_window_id": {"type": "string"},
+            "exact": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 4, "maximum": 30},
+            "ui_limit": {"type": "integer", "minimum": 1, "maximum": 16},
+            "wait_seconds": {"type": "number", "minimum": 0.2, "maximum": 3.0},
+            "poll_interval_seconds": {"type": "number", "minimum": 0.08, "maximum": 0.4},
+            "stability_samples": {"type": "integer", "minimum": 2, "maximum": 4},
+            "stability_interval_ms": {"type": "integer", "minimum": 40, "maximum": 400},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_wait_for_window_ready,
 }
 
 
@@ -1513,7 +1941,8 @@ DESKTOP_CLICK_POINT_TOOL = {
     "description": (
         "Click one exact screen coordinate inside the currently active desktop window. "
         "Requires explicit approval_status=approved, a fresh observation_token from recent desktop inspection, "
-        "and exact visible coordinates. This tool performs one bounded click only."
+        "and exact visible coordinates. If the window state changed, inspect or recover the window first. "
+        "This tool performs one bounded click only."
     ),
     "input_schema": {
         "type": "object",
@@ -1537,7 +1966,8 @@ DESKTOP_TYPE_TEXT_TOOL = {
     "description": (
         "Type bounded plain text into the currently focused field in the active desktop window. "
         "Requires explicit approval_status=approved, a fresh observation_token from recent desktop inspection, "
-        "and a non-sensitive field_label. This tool does not send Enter or submit forms."
+        "and a non-sensitive field_label. If the target window is not ready, inspect or recover it first. "
+        "This tool does not send Enter or submit forms."
     ),
     "input_schema": {
         "type": "object",

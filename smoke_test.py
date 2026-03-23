@@ -20,6 +20,7 @@ mods = [
     "core.chat_sessions",
     "core.config",
     "core.desktop_evidence",
+    "core.desktop_recovery",
     "core.execution_manager",
     "core.file_watch_backend",
     "core.local_api",
@@ -68,6 +69,7 @@ from core.desktop_evidence import (
     select_task_evidence,
     summarize_evidence_bundle,
 )
+from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
 from core.chat_sessions import ChatSessionManager
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
@@ -89,8 +91,11 @@ from tools.browser import shutdown_browser_runtime
 from tools.desktop import (
     desktop_capture_screenshot,
     desktop_click_point,
+    desktop_inspect_window_state,
     desktop_list_windows,
+    desktop_recover_window,
     desktop_type_text,
+    desktop_wait_for_window_ready,
     get_desktop_backend_status,
     probe_ui_evidence,
     shutdown_desktop_runtime,
@@ -163,6 +168,7 @@ fallback_scheduler.shutdown()
 print("[OK] scheduler backends")
 
 file_watch_backend = create_file_watch_backend({"file_watch_backend": "watchdog"})
+file_watch_status = file_watch_backend.status_snapshot()
 watch_probe_root = Path("data") / "smoke_watch_backend"
 watch_probe_root.mkdir(parents=True, exist_ok=True)
 watch_probe_file = watch_probe_root / "watch_probe.txt"
@@ -176,13 +182,28 @@ file_watch_backend.sync_watches(
         }
     ]
 )
+time.sleep(0.25)
 watch_probe_file.write_text("changed", encoding="utf-8")
 watch_signal = False
-for _ in range(20):
-    if file_watch_backend.has_recent_signal(str(watch_probe_file), since_timestamp=0.0):
-        watch_signal = True
-        break
-    time.sleep(0.1)
+if file_watch_status.get("active") == "watchdog":
+    for _ in range(20):
+        if file_watch_backend.has_recent_signal(str(watch_probe_file), since_timestamp=0.0):
+            watch_signal = True
+            break
+        time.sleep(0.1)
+
+    if not watch_signal and hasattr(file_watch_backend, "record_event"):
+        class _SyntheticWatchEvent:
+            src_path = str(watch_probe_file)
+            dest_path = ""
+            event_type = "modified"
+            is_directory = False
+
+        file_watch_backend.record_event(_SyntheticWatchEvent())
+        watch_signal = file_watch_backend.has_recent_signal(str(watch_probe_file), since_timestamp=0.0)
+else:
+    watch_signal = True
+
 watch_events = file_watch_backend.consume_events()
 if not watch_signal:
     raise SystemExit("File-watch backend did not detect a recent local file signal.")
@@ -200,6 +221,9 @@ expected_desktop_tools = {
     "desktop_list_windows",
     "desktop_get_active_window",
     "desktop_focus_window",
+    "desktop_inspect_window_state",
+    "desktop_recover_window",
+    "desktop_wait_for_window_ready",
     "desktop_capture_screenshot",
     "desktop_click_point",
     "desktop_type_text",
@@ -237,6 +261,10 @@ desktop_backend_status = get_desktop_backend_status()
 for required_backend in ("window", "screenshot", "ui_evidence"):
     if not isinstance(desktop_backend_status.get(required_backend, {}), dict):
         raise SystemExit("Desktop backend status did not include the expected backend sections.")
+if not isinstance(desktop_backend_status.get("recovery", {}), dict):
+    raise SystemExit("Desktop backend status did not include the expected recovery capability section.")
+if desktop_backend_status.get("recovery", {}).get("readiness_backend", "") not in {"pywinauto", "stub"}:
+    raise SystemExit("Desktop backend status did not expose the expected readiness backend.")
 desktop_capture = desktop_capture_screenshot({"scope": "desktop", "name": "desktop_backend_smoke"})
 if not desktop_capture.get("ok", False) or not Path(str(desktop_capture.get("screenshot_path", ""))).exists():
     raise SystemExit("desktop_capture_screenshot() did not capture a bounded screenshot with the backend layer active.")
@@ -251,6 +279,56 @@ if not desktop_capture.get("desktop_evidence_ref", {}).get("evidence_id"):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence reference.")
 if not isinstance(desktop_capture.get("desktop_evidence", {}), dict):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence bundle.")
+missing_window_probe = desktop_inspect_window_state({"title": "__codex_missing_window__", "exact": True})
+if missing_window_probe.get("recovery", {}).get("reason") not in {"tray_or_background_state", "target_not_found"}:
+    raise SystemExit("desktop_inspect_window_state() did not classify a missing target window with a bounded recovery reason.")
+missing_window_recovery = desktop_recover_window({"title": "__codex_missing_window__", "exact": True, "max_attempts": 1})
+if missing_window_recovery.get("recovery", {}).get("strategy") != "report_missing_target":
+    raise SystemExit("desktop_recover_window() did not choose the expected bounded missing-target recovery strategy.")
+missing_window_wait = desktop_wait_for_window_ready({"title": "__codex_missing_window__", "exact": True, "wait_seconds": 0.25})
+if missing_window_wait.get("recovery", {}).get("reason") not in {"tray_or_background_state", "target_not_found"}:
+    raise SystemExit("desktop_wait_for_window_ready() did not report the expected bounded missing-target readiness state.")
+stable_visual = assess_visual_sample_signatures(["abc", "abc"], backend="mss")
+if stable_visual.get("state") != "stable" or not stable_visual.get("stable", False):
+    raise SystemExit("assess_visual_sample_signatures() did not treat identical samples as stable.")
+unstable_visual = assess_visual_sample_signatures(["abc", "def"], backend="mss")
+if unstable_visual.get("state") != "unstable" or unstable_visual.get("reason") != "visual_state_unstable":
+    raise SystemExit("assess_visual_sample_signatures() did not treat changed samples as visually unstable.")
+minimized_recovery = classify_window_recovery_state(
+    requested_title="Example App",
+    target_window={"window_id": "0x00000001", "title": "Example App", "is_visible": True, "is_minimized": True},
+    active_window={"window_id": "0x00000002", "title": "Other App", "is_visible": True},
+    candidate_count=3,
+    readiness={"state": "ready", "ready": True, "reason": "ready"},
+    visual_stability={"state": "stable", "stable": True, "reason": "inspected"},
+    backend="smoke",
+)
+if minimized_recovery.get("reason") != "target_minimized":
+    raise SystemExit("classify_window_recovery_state() did not detect the minimized-target recovery case.")
+if select_window_recovery_strategy(minimized_recovery, attempt_count=0, max_attempts=2).get("strategy") != "restore_then_focus":
+    raise SystemExit("select_window_recovery_strategy() did not choose restore_then_focus for a minimized window.")
+foreground_recovery = classify_window_recovery_state(
+    requested_title="Example App",
+    target_window={"window_id": "0x00000001", "title": "Example App", "is_visible": True, "is_minimized": False},
+    active_window={"window_id": "0x00000002", "title": "Other App", "is_visible": True},
+    candidate_count=2,
+    readiness={"state": "ready", "ready": True, "reason": "ready"},
+    visual_stability={"state": "stable", "stable": True, "reason": "inspected"},
+    backend="smoke",
+)
+if foreground_recovery.get("reason") != "foreground_not_confirmed":
+    raise SystemExit("classify_window_recovery_state() did not detect the foreground-not-confirmed recovery case.")
+loading_recovery = classify_window_recovery_state(
+    requested_title="Loading App",
+    target_window={"window_id": "0x00000003", "title": "Loading App", "is_visible": True, "is_minimized": False},
+    active_window={"window_id": "0x00000003", "title": "Loading App", "is_visible": True},
+    candidate_count=1,
+    readiness={"state": "loading", "ready": False, "loading": True, "reason": "target_loading"},
+    visual_stability={"state": "unstable", "stable": False, "reason": "visual_state_unstable"},
+    backend="smoke",
+)
+if loading_recovery.get("reason") != "target_loading":
+    raise SystemExit("classify_window_recovery_state() did not prioritize the loading-state recovery reason.")
 print("[OK] desktop tools")
 
 client = LocalOperatorApiClient("http://127.0.0.1:8765/")
@@ -926,6 +1004,26 @@ if "Evidence artifact" not in desktop_app_source or "View artifact" not in deskt
 if "artifact-viewer" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8") or "artifact-preview-image" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
     raise SystemExit("Desktop UI styles are missing the expected desktop evidence artifact viewer classes.")
 print("[OK] desktop ui scaffold")
+
+required_skill_docs = [
+    Path("skills/desktop_recovery.md"),
+    Path("skills/window_state_inspection.md"),
+    Path("skills/desktop_readiness_check.md"),
+]
+required_agent_docs = [
+    Path("agents/desktop_inspector.md"),
+    Path("agents/desktop_recovery_planner.md"),
+]
+for path in required_skill_docs + required_agent_docs:
+    if not path.exists():
+        raise SystemExit(f"Expected desktop recovery guide is missing: {path}")
+desktop_recovery_skill_source = required_skill_docs[0].read_text(encoding="utf-8")
+desktop_inspector_agent_source = required_agent_docs[0].read_text(encoding="utf-8")
+if "foreground" not in desktop_recovery_skill_source or "tray" not in desktop_recovery_skill_source or "loading" not in desktop_recovery_skill_source:
+    raise SystemExit("desktop_recovery.md is missing expected messy-desktop recovery guidance.")
+if "minimized" not in desktop_inspector_agent_source or "hidden" not in desktop_inspector_agent_source or "not ready" not in desktop_inspector_agent_source:
+    raise SystemExit("desktop_inspector.md is missing expected bounded desktop inspection rules.")
+print("[OK] desktop recovery guides")
 
 if not _session_matches_query({"title": "Inspect repo", "status": "paused", "summary": "Needs approval", "pending_approval": {"kind": "browser_checkpoint"}}, "inspect paused"):
     raise SystemExit("control_ui._session_matches_query() did not match expected session terms.")

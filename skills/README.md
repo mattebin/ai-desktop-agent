@@ -51,3 +51,9 @@ Use descriptive names such as:
 - `approval_gated_click.md`
 - `browser_research.md`
 - `final_answer_synthesis.md`
+
+Current repo-local desktop skills now also include:
+
+- `desktop_recovery.md`
+- `window_state_inspection.md`
+- `desktop_readiness_check.md`
