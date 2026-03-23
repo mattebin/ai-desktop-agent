@@ -723,10 +723,13 @@ from pathlib import Path
 state_path = Path(sys.argv[1])
 main_title = sys.argv[2]
 sidecar_title = sys.argv[3]
+focus_request_path = Path(sys.argv[4])
 
 runtime = {
     "click_count": 0,
     "alive": True,
+    "last_focus_request": "",
+    "last_focus_handled": "",
 }
 
 
@@ -768,6 +771,8 @@ def _persist_state():
         "alive": runtime["alive"],
         "main_title": main_title,
         "sidecar_title": sidecar_title,
+        "last_focus_request": runtime.get("last_focus_request", ""),
+        "last_focus_handled": runtime.get("last_focus_handled", ""),
         "entry_field_label": "Desktop notes",
         "entry_value": value_var.get(),
         "click_count": runtime["click_count"],
@@ -781,14 +786,9 @@ def _persist_state():
         root.after(140, _persist_state)
 
 
-def _focus_sidecar():
+def _clear_focus_request():
     try:
-        sidecar.deiconify()
-        sidecar.attributes("-topmost", True)
-        sidecar.update_idletasks()
-        sidecar.lift()
-        sidecar.focus_force()
-        sidecar.after(220, lambda: sidecar.attributes("-topmost", False))
+        focus_request_path.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -798,6 +798,44 @@ def _focus_entry(_event=None):
         notes_entry.focus_force()
     except Exception:
         pass
+
+
+def _focus_window(window, handled: str):
+    try:
+        window.deiconify()
+        window.attributes("-topmost", True)
+        window.update_idletasks()
+        window.lift()
+        window.focus_force()
+        runtime["last_focus_handled"] = handled
+        window.after(220, lambda win=window: win.attributes("-topmost", False))
+    except Exception:
+        pass
+
+
+def _focus_sidecar():
+    _focus_window(sidecar, "sidecar")
+
+
+def _focus_main():
+    _focus_window(root, "main")
+    _focus_entry()
+
+
+def _poll_focus_requests():
+    try:
+        requested = focus_request_path.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        requested = ""
+    if requested:
+        runtime["last_focus_request"] = requested
+        if requested == "main":
+            _focus_main()
+        elif requested == "sidecar":
+            _focus_sidecar()
+        _clear_focus_request()
+    if runtime["alive"]:
+        root.after(120, _poll_focus_requests)
 
 
 def _on_click():
@@ -813,6 +851,7 @@ def _on_close():
         sidecar.destroy()
     except Exception:
         pass
+    _clear_focus_request()
     root.destroy()
 
 
@@ -865,6 +904,7 @@ sidecar.protocol("WM_DELETE_WINDOW", _on_close)
 root.after(250, _focus_sidecar)
 root.after(950, _focus_sidecar)
 root.after(1800, _focus_sidecar)
+root.after(80, _poll_focus_requests)
 root.after(120, _persist_state)
 root.mainloop()
 """.strip()
@@ -879,6 +919,7 @@ class DesktopFixtureHarness:
         self.sidecar_title = f"Desktop Eval Sidecar {suffix}"
         self.state_path = scenario_dir / "desktop_fixture_state.json"
         self.script_path = scenario_dir / "desktop_fixture_app.py"
+        self.focus_request_path = scenario_dir / "desktop_fixture_focus_request.txt"
         self.proc: subprocess.Popen[str] | None = None
 
     def _python_binary(self) -> str:
@@ -889,9 +930,20 @@ class DesktopFixtureHarness:
         return str(runtime_python)
 
     def start(self):
+        try:
+            self.focus_request_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.script_path.write_text(_desktop_fixture_script(), encoding="utf-8")
         self.proc = subprocess.Popen(
-            [self._python_binary(), str(self.script_path), str(self.state_path), self.main_title, self.sidecar_title],
+            [
+                self._python_binary(),
+                str(self.script_path),
+                str(self.state_path),
+                self.main_title,
+                self.sidecar_title,
+                str(self.focus_request_path),
+            ],
             cwd=str(self.scenario_dir),
         )
         self.wait_for_state(lambda state: bool(state.get("ready", False)), timeout=12.0, description="desktop fixture ready state")
@@ -910,6 +962,10 @@ class DesktopFixtureHarness:
                     self.proc.wait(timeout=2.0)
                 except Exception:
                     pass
+        try:
+            self.focus_request_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.proc = None
 
     def __enter__(self):
@@ -941,10 +997,30 @@ class DesktopFixtureHarness:
             time.sleep(interval)
         raise TimeoutError(f"Timed out waiting for {description}. Last state={last_state}")
 
+    def request_focus(self, target: str):
+        normalized = str(target or "").strip().lower()
+        if normalized not in {"main", "sidecar"}:
+            return
+        try:
+            self.focus_request_path.write_text(normalized, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _fixture_focus_target(self, title: str) -> str:
+        normalized = str(title or "").strip().lower()
+        if normalized == self.main_title.lower():
+            return "main"
+        if normalized == self.sidecar_title.lower():
+            return "sidecar"
+        return ""
+
     def ensure_active(self, title: str, *, timeout: float = 5.0) -> bool:
         deadline = time.time() + timeout
         lowered = str(title).strip().lower()
+        requested_focus = self._fixture_focus_target(title)
         while time.time() < deadline:
+            if requested_focus:
+                self.request_focus(requested_focus)
             desktop_focus_window({"title": title, "exact": True, "limit": 20})
             desktop_focus_window({"title": title, "exact": False, "limit": 20})
             active_result = desktop_get_active_window({"limit": 20})

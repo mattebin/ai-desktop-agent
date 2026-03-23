@@ -829,6 +829,9 @@ if not _interpreter_has_playwright(project_venv_python):
 for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding"}:
     if expected_scenario not in SCENARIO_NAMES:
         raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
+live_eval_source = Path("live_agent_eval.py").read_text(encoding="utf-8")
+if "focus_request_path" not in live_eval_source or "def request_focus(" not in live_eval_source or "def _focus_main():" not in live_eval_source:
+    raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
 if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
     raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
 no_run_checks = _golden_final_answer_checks(
