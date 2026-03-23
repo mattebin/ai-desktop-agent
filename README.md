@@ -1,178 +1,89 @@
-\# AI Desktop Operator
-
-
+# AI Desktop Operator
 
 A local Windows 11 chat-first AI operator project focused on becoming a real controllable operator, not just a chatbot with tools.
 
-
-
-\## Current status
-
-
+## Current status
 
 This project is now a serious local operator framework with:
 
+- a strong chat-first desktop UI
+- a local API as the main control surface
+- explicit operator behavior and task lifecycle
+- stop / defer / resume / retry / replace / supersession control
+- approval-gated safety
+- Playwright-only browser operations
+- bounded desktop-control primitives
+- live eval coverage for core and realistic workflows
 
-
-\- a strong chat-first desktop UI
-
-\- a local API as the main control surface
-
-\- explicit operator behavior and task lifecycle
-
-\- stop / defer / resume / retry / replace / supersession control
-
-\- approval-gated safety
-
-\- Playwright-only browser operations
-
-\- bounded desktop-control primitives
-
-\- live eval coverage for core and realistic workflows
-
-
-
-\## Current architecture
-
-
+## Current architecture
 
 Main shape:
 
+- local API is the front door
+- thin API-backed UI
+- OperatorController / ExecutionManager / agent loop
+- ToolRuntime for tools/runtime orchestration
+- session-aware and task-aware state
+- approval-gated actions
+- browser scope is Playwright-only
+- desktop control is intentionally bounded
 
-
-\- local API is the front door
-
-\- thin API-backed UI
-
-\- OperatorController / ExecutionManager / agent loop
-
-\- ToolRuntime for tools/runtime orchestration
-
-\- session-aware and task-aware state
-
-\- approval-gated actions
-
-\- browser scope is Playwright-only
-
-\- desktop control is intentionally bounded
-
-
-
-\## Current desktop-control scope
-
-
+## Current desktop-control scope
 
 Implemented bounded desktop-control primitives:
 
-
-
-\- list visible windows
-
-\- get active window
-
-\- focus a specific window
-
-\- capture a bounded screenshot
-
-\- approval-gated single click
-
-\- approval-gated bounded text entry
-
-
+- list visible windows
+- get active window
+- focus a specific window
+- capture a bounded screenshot
+- approval-gated single click
+- approval-gated bounded text entry
 
 Not included:
 
+- drag/drop
+- arbitrary hotkeys
+- unrestricted keyboard/mouse control
+- autonomous desktop navigation loops
+- broad dangerous autonomy
 
+## Project philosophy
 
-\- drag/drop
+- keep chat primary
+- keep operator internals secondary
+- preserve the current architecture
+- do not widen dangerous autonomy casually
+- do not add desktop control too early or too broadly
+- do not turn the app into a dashboard
+- build toward a trustworthy operator, not a gimmick
 
-\- arbitrary hotkeys
-
-\- unrestricted keyboard/mouse control
-
-\- autonomous desktop navigation loops
-
-\- broad dangerous autonomy
-
-
-
-\## Project philosophy
-
-
-
-\- keep chat primary
-
-\- keep operator internals secondary
-
-\- preserve the current architecture
-
-\- do not widen dangerous autonomy casually
-
-\- do not add desktop control too early or too broadly
-
-\- do not turn the app into a dashboard
-
-\- build toward a trustworthy operator, not a gimmick
-
-
-
-\## Current priorities
-
-
+## Current priorities
 
 Highest current priorities:
 
+1. improve operator usefulness and judgment quality
+2. improve realistic scenario reliability
+3. improve final-answer quality and outcome clarity
+4. expand bounded desktop evidence and action grounding carefully
+5. preserve safety and controllability while adding capability
 
+## Repository structure
 
-1\. improve operator usefulness and judgment quality
+- `core/` - operator core logic
+- `tools/` - tool implementations
+- `desktop-ui/` - desktop UI
+- `docs/` - architecture notes, roadmap, handoff
+- `skills/` - reusable skill definitions/instructions
+- `agents/` - sub-agent role definitions
+- `prompts/` - canonical prompts and pass prompts
 
-2\. improve realistic scenario reliability
+## Branching approach
 
-3\. improve final-answer quality and outcome clarity
+- `main` = stable baseline
+- feature branches = current implementation work
 
-4\. expand bounded desktop evidence and action grounding carefully
+## Notes
 
-5\. preserve safety and controllability while adding capability
-
-
-
-\## Repository structure
-
-
-
-\- `core/` - operator core logic
-
-\- `tools/` - tool implementations
-
-\- `desktop-ui/` - desktop UI
-
-\- `docs/` - architecture notes, roadmap, handoff
-
-\- `skills/` - reusable skill definitions/instructions
-
-\- `agents/` - sub-agent role definitions
-
-\- `prompts/` - canonical prompts and pass prompts
-
-
-
-\## Branching approach
-
-
-
-\- `main` = stable baseline
-
-\- feature branches = current implementation work
-
-
-
-\## Notes
-
-
-
-\- do not commit build artifacts
-
-\- keep `.gitignore` clean
-
-\- use commits and branches for each meaningful pass
-
+- do not commit build artifacts
+- keep `.gitignore` clean
+- use commits and branches for each meaningful pass
