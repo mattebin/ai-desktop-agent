@@ -42,6 +42,7 @@ Current non-goals:
 - `target_not_found`
 - `target_minimized`
 - `target_hidden`
+- `target_withdrawn`
 - `foreground_not_confirmed`
 - `target_not_ready`
 - `target_loading`
@@ -82,7 +83,7 @@ The recovery layer now participates in the real bounded desktop flow:
 
 Recent focused live validation confirmed the improved minimized / wrong-foreground recovery path and evidence-backed screenshot capture path.
 
-The main remaining live boundary is fully withdrawn or tray-like hidden windows. In that state, the current bounded stack may still classify the target as `tray_or_background_state` / `target_not_found` and stop with a clear report instead of recovering it.
+The main remaining live boundary is fully withdrawn or tray-like hidden windows. In that state, the bounded stack now tries a stricter native exact-title lookup and relaxed hidden enumeration first. If Windows still only surfaces a withdrawn-like handle with no visible recoverable state, the recovery model now classifies that as `target_withdrawn` and stops with a clear tray/background-style report instead of guessing.
 
 That limitation is explicit and currently preferred over guessing or widening control.
 

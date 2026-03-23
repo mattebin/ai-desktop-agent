@@ -102,6 +102,12 @@ def classify_window_recovery_state(
     target_visible = bool(target.get("is_visible", False)) and not bool(target.get("is_cloaked", False))
     target_minimized = bool(target.get("is_minimized", False))
     target_hidden = bool(target_present and (not target_visible or bool(target.get("is_cloaked", False))))
+    target_rect = target.get("rect", {}) if isinstance(target.get("rect", {}), dict) else {}
+    target_withdrawn = bool(
+        target_hidden
+        and int(target_rect.get("width", 0) or 0) <= 4
+        and int(target_rect.get("height", 0) or 0) <= 4
+    )
     target_loading = readiness_view.get("state") == "loading"
     target_ready = bool(readiness_view.get("ready", False)) or readiness_view.get("state") == "ready"
 
@@ -130,6 +136,13 @@ def classify_window_recovery_state(
         reason = "target_minimized"
         state = "needs_recovery"
         summary = f"'{target.get('title', 'The target window')}' is minimized and should be restored before interaction."
+    elif target_withdrawn:
+        reason = "target_withdrawn"
+        state = "missing"
+        summary = (
+            f"'{target.get('title', 'The target window')}' still has a window handle, but it appears withdrawn or tray-like "
+            "and is not visibly recoverable through the bounded desktop path."
+        )
     elif target_hidden:
         reason = "target_hidden"
         state = "needs_recovery"
@@ -168,6 +181,7 @@ def classify_window_recovery_state(
             "target_visible": target_visible,
             "target_minimized": target_minimized,
             "target_hidden": target_hidden,
+            "target_withdrawn": target_withdrawn,
             "target_loading": target_loading,
             "target_ready": target_ready,
             "target_match": target_match,
@@ -206,6 +220,9 @@ def select_window_recovery_strategy(
     elif reason == "target_hidden":
         strategy = "show_then_focus"
         summary = "Show the hidden window if possible, then verify foreground focus."
+    elif reason == "target_withdrawn":
+        strategy = "report_missing_target"
+        summary = "Do not guess. Report that the target looks withdrawn or tray-like and is not visibly recoverable through the bounded desktop path."
     elif reason == "foreground_not_confirmed":
         strategy = "focus_then_verify"
         summary = "Retry a bounded focus request, then confirm the OS foreground window explicitly."

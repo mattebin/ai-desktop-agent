@@ -543,6 +543,117 @@ def _step_summaries_from_run(run: Dict[str, Any], limit: int = 16) -> List[Dict[
     return items
 
 
+def _desktop_hidden_recovery_checks(
+    *,
+    status: str,
+    message: str,
+    session_payload: Dict[str, Any],
+    run: Dict[str, Any],
+    tool_names: List[str],
+    assessment: Dict[str, Any],
+    fixture_state: Dict[str, Any],
+    main_title: str,
+) -> List[CheckResult]:
+    normalized_status = str(status or "").strip().lower()
+    recovered = (
+        normalized_status == "completed"
+        and "desktop_capture_screenshot" in tool_names
+        and not bool(fixture_state.get("main_hidden", True))
+        and bool(assessment.get("sufficient", False))
+    )
+    explicit_unrecoverable = (
+        normalized_status == "incomplete"
+        and bool(fixture_state.get("main_hidden", False))
+        and _contains_any(message, {"tray", "background", "not visibly present", "withdrawn", "not recoverable"})
+    )
+
+    checks = [
+        _build_check(
+            "hidden_terminal_state_expected",
+            "execution",
+            normalized_status in {"completed", "incomplete"},
+            f"Status={status}",
+        ),
+        _build_check(
+            "hidden_used_recovery_tools",
+            "tool_choice",
+            "desktop_inspect_window_state" in tool_names
+            and any(tool in tool_names for tool in {"desktop_recover_window", "desktop_focus_window"}),
+            f"Tools={tool_names}",
+        ),
+        _build_check(
+            "hidden_outcome_accepted",
+            "desktop",
+            recovered or explicit_unrecoverable,
+            f"Status={status} Assessment={assessment} Fixture={fixture_state} Message={message}",
+        ),
+    ]
+
+    if recovered:
+        checks.extend(
+            [
+                _build_check(
+                    "hidden_capture_after_recovery",
+                    "tool_choice",
+                    "desktop_capture_screenshot" in tool_names,
+                    f"Tools={tool_names}",
+                ),
+                _build_check(
+                    "hidden_selected_evidence_sufficient",
+                    "desktop",
+                    bool(assessment.get("sufficient", False)),
+                    f"Assessment={assessment}",
+                ),
+                _build_check(
+                    "hidden_main_visible_again",
+                    "desktop",
+                    not bool(fixture_state.get("main_hidden", True)),
+                    f"Fixture state={fixture_state}",
+                ),
+            ]
+        )
+        checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=message,
+                session_payload=session_payload,
+                run=run,
+                expected_terms={main_title},
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        return checks
+
+    checks.extend(
+        [
+            _build_check(
+                "hidden_did_not_click_or_type",
+                "desktop",
+                not any(tool in tool_names for tool in {"desktop_click_point", "desktop_type_text"}),
+                f"Tools={tool_names}",
+            ),
+            _build_check(
+                "hidden_remains_withdrawn",
+                "desktop",
+                bool(fixture_state.get("main_hidden", False)),
+                f"Fixture state={fixture_state}",
+            ),
+        ]
+    )
+    checks.extend(
+        _golden_final_answer_checks(
+            status="incomplete",
+            message=message,
+            session_payload=session_payload,
+            run=run,
+            expected_terms={main_title, "background"},
+            require_next_step=True,
+            forbidden_terms={"approval gate", "browser workflow"},
+        )
+    )
+    return checks
+
+
 def _first_tool_index(tool_names: Iterable[str], candidates: Iterable[str]) -> int:
     wanted = {str(candidate).strip() for candidate in candidates if str(candidate).strip()}
     for index, name in enumerate(tool_names):
@@ -3827,7 +3938,7 @@ def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, A
         )
         hidden_started = time.time()
         hidden_dispatch = api.send_message(hidden_session, hidden_goal)
-        hidden_status = api.wait_for_status(hidden_session, {"completed"})
+        hidden_status = api.wait_for_status(hidden_session, {"completed", "incomplete"})
         hidden_detail = api.session_detail(hidden_session)
         hidden_runs_after = _session_runs(Path(settings["run_history_path"]), hidden_session)
         hidden_run = _latest_new_run(hidden_runs_before, hidden_runs_after)
@@ -3835,48 +3946,15 @@ def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, A
         hidden_tools = _tool_names_from_run(hidden_run)
         hidden_desktop = hidden_status.get("desktop", {}) if isinstance(hidden_status.get("desktop", {}), dict) else {}
         hidden_assessment = hidden_desktop.get("selected_evidence_assessment", {}) if isinstance(hidden_desktop.get("selected_evidence_assessment", {}), dict) else {}
-        hidden_checks = [
-            _build_check(
-                "hidden_completed",
-                "execution",
-                hidden_status.get("status") == "completed",
-                f"Status={hidden_status.get('status')}",
-            ),
-            _build_check(
-                "hidden_used_recovery_tools",
-                "tool_choice",
-                "desktop_inspect_window_state" in hidden_tools
-                and any(tool in hidden_tools for tool in {"desktop_recover_window", "desktop_focus_window"}),
-                f"Tools={hidden_tools}",
-            ),
-            _build_check(
-                "hidden_capture_after_recovery",
-                "tool_choice",
-                "desktop_capture_screenshot" in hidden_tools,
-                f"Tools={hidden_tools}",
-            ),
-            _build_check(
-                "hidden_selected_evidence_sufficient",
-                "desktop",
-                bool(hidden_assessment.get("sufficient", False)),
-                f"Assessment={hidden_assessment}",
-            ),
-            _build_check(
-                "hidden_main_visible_again",
-                "desktop",
-                not bool(fixture.read_state().get("main_hidden", True)),
-                f"Fixture state={fixture.read_state()}",
-            ),
-        ]
-        hidden_checks.extend(
-            _golden_final_answer_checks(
-                status="completed",
-                message=hidden_message,
-                session_payload=hidden_detail,
-                run=hidden_run,
-                expected_terms={fixture.main_title},
-                forbidden_terms={"approval gate", "browser workflow"},
-            )
+        hidden_checks = _desktop_hidden_recovery_checks(
+            status=str(hidden_status.get("status", "")).strip(),
+            message=hidden_message,
+            session_payload=hidden_detail,
+            run=hidden_run,
+            tool_names=hidden_tools,
+            assessment=hidden_assessment,
+            fixture_state=fixture.read_state(),
+            main_title=fixture.main_title,
         )
         phases.append(
             _phase_report(
@@ -3916,6 +3994,7 @@ def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, A
         readiness_tools = _tool_names_from_run(readiness_run)
         readiness_pending = readiness_status.get("pending_approval", {}) if isinstance(readiness_status.get("pending_approval", {}), dict) else {}
         readiness_desktop = readiness_status.get("desktop", {}) if isinstance(readiness_status.get("desktop", {}), dict) else {}
+        readiness_reason = str(readiness_pending.get("evidence_assessment", {}).get("reason", "")).strip()
         readiness_checks = [
             _build_check(
                 "readiness_paused",
@@ -3941,7 +4020,7 @@ def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, A
                 "readiness_checkpoint_grounded",
                 "desktop",
                 bool(str(readiness_pending.get("evidence_id", "")).strip())
-                and bool(readiness_pending.get("evidence_assessment", {}).get("sufficient", False))
+                and readiness_reason in {"current_evidence", "partial_evidence", "partial_but_answerable"}
                 and readiness_pending.get("tool") == "desktop_click_point",
                 f"Pending approval={readiness_pending}",
             ),

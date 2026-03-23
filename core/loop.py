@@ -363,6 +363,45 @@ def _desktop_latest_recovery(task_state) -> dict:
     return recovery if isinstance(recovery, dict) else {}
 
 
+def _desktop_latest_window_readiness(task_state) -> dict:
+    result = _latest_tool_result(task_state, _DESKTOP_RECOVERY_TOOLS)
+    if not isinstance(result, dict):
+        return {}
+    readiness = result.get("window_readiness", {})
+    return readiness if isinstance(readiness, dict) else {}
+
+
+def _desktop_latest_visual_stability(task_state) -> dict:
+    result = _latest_tool_result(task_state, _DESKTOP_RECOVERY_TOOLS)
+    if not isinstance(result, dict):
+        return {}
+    stability = result.get("visual_stability", {})
+    return stability if isinstance(stability, dict) else {}
+
+
+def _desktop_partial_evidence_allows_checkpoint(task_state, planner_goal: str, *, require_screenshot: bool = False) -> bool:
+    desktop_activity = task_state._collect_desktop_activity(limit=4)
+    selected = desktop_activity.get("selected_evidence", {}) if isinstance(desktop_activity.get("selected_evidence", {}), dict) else {}
+    if require_screenshot and not bool(selected.get("has_screenshot", False)):
+        return False
+    if not _desktop_target_window_ready(task_state, planner_goal):
+        return False
+
+    recovery_state = str(_desktop_latest_recovery(task_state).get("state", "")).strip().lower()
+    if recovery_state != "ready":
+        return False
+
+    readiness_state = str(_desktop_latest_window_readiness(task_state).get("state", "")).strip().lower()
+    if readiness_state in {"missing", "not_ready", "loading"}:
+        return False
+
+    visual_state = str(_desktop_latest_visual_stability(task_state).get("state", "")).strip().lower()
+    if visual_state == "unstable":
+        return False
+
+    return True
+
+
 def _execute_desktop_tool_step(tool_runtime, task_state, tool_name: str, seed_args: dict, planner_goal: str, *, session_store=None):
     args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
     result = tool_runtime.execute(tool_name, args)
@@ -857,6 +896,24 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             require_screenshot=True,
         )
         if not selected_assessment.get("sufficient", False):
+            if not (
+                str(selected_assessment.get("reason", "")).strip().lower() == "partial_evidence"
+                and _desktop_partial_evidence_allows_checkpoint(
+                    task_state,
+                    planner_goal,
+                    require_screenshot=True,
+                )
+            ):
+                return None
+            selected_assessment = {
+                **selected_assessment,
+                "state": "partial",
+                "sufficient": True,
+                "needs_refresh": False,
+                "reason": "partial_but_answerable",
+                "summary": "Current desktop evidence is partial but approval-ready for a bounded desktop checkpoint.",
+            }
+        if not selected_assessment.get("sufficient", False):
             return None
         x, y = click_point
         evidence_summary = str(desktop_activity.get("selected_evidence", {}).get("summary", "")).strip()
@@ -896,6 +953,24 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             target_window_title=_goal_desktop_window_title(planner_goal),
             require_screenshot=False,
         )
+        if not selected_assessment.get("sufficient", False):
+            if not (
+                str(selected_assessment.get("reason", "")).strip().lower() == "partial_evidence"
+                and _desktop_partial_evidence_allows_checkpoint(
+                    task_state,
+                    planner_goal,
+                    require_screenshot=False,
+                )
+            ):
+                return None
+            selected_assessment = {
+                **selected_assessment,
+                "state": "partial",
+                "sufficient": True,
+                "needs_refresh": False,
+                "reason": "partial_but_answerable",
+                "summary": "Current desktop evidence is partial but approval-ready for a bounded desktop checkpoint.",
+            }
         if not selected_assessment.get("sufficient", False):
             return None
         value = str(type_request.get("value", "")).strip()

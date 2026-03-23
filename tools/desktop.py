@@ -193,6 +193,8 @@ user32.IsZoomed.restype = ctypes.c_bool
 user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
 user32.GetWindowTextLengthW.restype = ctypes.c_int
 user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+user32.FindWindowW.restype = ctypes.c_void_p
 user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
 user32.GetWindowRect.restype = ctypes.c_bool
@@ -421,6 +423,8 @@ def _window_is_listable(hwnd: int, *, include_minimized: bool, include_hidden: b
     if not title:
         return False
     rect = _window_rect(handle)
+    if include_hidden:
+        return True
     return rect["width"] >= 40 and rect["height"] >= 30
 
 
@@ -668,8 +672,8 @@ def _enum_windows(
     result = _get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
     data = result.get("data", {}) if isinstance(result, dict) else {}
     windows = data.get("windows", []) if isinstance(data, dict) else []
+    filtered: List[Dict[str, Any]] = []
     if isinstance(windows, list) and windows:
-        filtered: List[Dict[str, Any]] = []
         for item in windows:
             if not isinstance(item, dict):
                 continue
@@ -678,9 +682,49 @@ def _enum_windows(
             if not include_hidden and bool(item.get("is_cloaked", False)):
                 continue
             filtered.append(item)
-        if filtered or not include_hidden:
-            return filtered
-    return _enum_windows_native(include_minimized=include_minimized, include_hidden=include_hidden, limit=limit)
+
+    if include_hidden:
+        native_windows = _enum_windows_native(
+            include_minimized=include_minimized,
+            include_hidden=True,
+            limit=max(limit, len(filtered) + 6),
+        )
+        merged: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for source in (native_windows, filtered):
+            for item in source:
+                if not isinstance(item, dict):
+                    continue
+                window_id = str(item.get("window_id", "")).strip()
+                dedupe_key = window_id or f"{item.get('title', '')}|{item.get('pid', '')}"
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                merged.append(item)
+        merged.sort(
+            key=lambda item: (
+                not bool(item.get("is_active", False)),
+                not bool(item.get("is_visible", False)),
+                bool(item.get("is_minimized", False)),
+                item.get("title", "").lower(),
+            )
+        )
+        return merged[:limit]
+
+    if filtered:
+        return filtered[:limit]
+    return _enum_windows_native(include_minimized=include_minimized, include_hidden=False, limit=limit)
+
+
+def _find_window_by_exact_title_native(title: str) -> Dict[str, Any]:
+    requested = str(title or "").strip()
+    if not requested:
+        return {}
+    try:
+        hwnd = int(user32.FindWindowW(None, requested) or 0)
+    except Exception:
+        hwnd = 0
+    return _window_info(hwnd) if hwnd > 0 else {}
 
 
 def _active_window_info() -> Dict[str, Any]:
@@ -694,10 +738,11 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
     window_id = _parse_hwnd(args.get("window_id", ""))
     requested_title = str(args.get("title", "") or args.get("match", "")).strip()
     exact = _coerce_bool(args.get("exact", False), False)
+    requested_limit = _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)
     candidates = _enum_windows(
         include_minimized=True,
         include_hidden=True,
-        limit=max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)),
+        limit=max(12, min(64, requested_limit * 3)),
     )
 
     if window_id:
@@ -711,6 +756,12 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
 
     if not requested_title:
         return {}, candidates, "Provide a window title or window_id."
+
+    if exact:
+        direct_match = _find_window_by_exact_title_native(requested_title)
+        direct_id = str(direct_match.get("window_id", "")).strip()
+        if direct_id and not any(str(item.get("window_id", "")).strip() == direct_id for item in candidates):
+            candidates = [direct_match, *candidates]
 
     normalized_title = requested_title.lower()
     matches = [
@@ -739,7 +790,10 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
             return top, candidates, ""
         labels = ", ".join(item.get("title", "") for item in matches[:4] if item.get("title"))
         return {}, candidates, f"Multiple windows matched '{requested_title}': {labels}"
-    return {}, candidates, f"Could not find a visible window matching '{requested_title}'."
+    return {}, candidates, (
+        f"Could not find a surfaced window matching '{requested_title}'. "
+        "It may be withdrawn, tray-like, or not exposed as a visible top-level window."
+    )
 
 
 def _virtual_screen_rect() -> Dict[str, int]:

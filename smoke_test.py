@@ -6,6 +6,7 @@ import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -86,8 +87,16 @@ from core.state import TaskState
 from core.tool_runtime import ToolRuntime
 from core.watchers import WatchStore
 from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks, _session_matches_query, _timeline_entry_from_event
-from live_agent_eval import SCENARIO_NAMES, _golden_final_answer_checks, _interpreter_has_playwright, _latest_new_run, _project_venv_python
+from live_agent_eval import (
+    SCENARIO_NAMES,
+    _desktop_hidden_recovery_checks,
+    _golden_final_answer_checks,
+    _interpreter_has_playwright,
+    _latest_new_run,
+    _project_venv_python,
+)
 from tools.browser import shutdown_browser_runtime
+import tools.desktop as desktop_module
 from tools.desktop import (
     desktop_capture_screenshot,
     desktop_click_point,
@@ -288,6 +297,71 @@ if missing_window_recovery.get("recovery", {}).get("strategy") != "report_missin
 missing_window_wait = desktop_wait_for_window_ready({"title": "__codex_missing_window__", "exact": True, "wait_seconds": 0.25})
 if missing_window_wait.get("recovery", {}).get("reason") not in {"tray_or_background_state", "target_not_found"}:
     raise SystemExit("desktop_wait_for_window_ready() did not report the expected bounded missing-target readiness state.")
+original_window_backend = desktop_module._WINDOW_BACKEND
+original_enum_windows_native = desktop_module._enum_windows_native
+original_find_window_by_exact_title_native = desktop_module._find_window_by_exact_title_native
+try:
+    desktop_module._WINDOW_BACKEND = SimpleNamespace(
+        list_windows=lambda include_minimized=False, limit=12: {
+            "ok": True,
+            "data": {
+                "windows": [
+                    {
+                        "window_id": "0x00001001",
+                        "title": "Visible Window",
+                        "is_visible": True,
+                        "is_cloaked": False,
+                        "is_minimized": False,
+                        "is_active": True,
+                    }
+                ]
+            },
+        }
+    )
+    desktop_module._enum_windows_native = lambda include_minimized=False, include_hidden=False, limit=12: (
+        [
+            {
+                "window_id": "0x00001002",
+                "title": "Hidden Target Window",
+                "is_visible": False,
+                "is_cloaked": False,
+                "is_minimized": False,
+                "is_active": False,
+            }
+        ]
+        if include_hidden
+        else []
+    )
+    hidden_target, hidden_candidates, hidden_error = desktop_module._find_window({"title": "Hidden Target Window", "exact": True, "limit": 10})
+    if hidden_error or hidden_target.get("window_id") != "0x00001002":
+        raise SystemExit(
+            f"desktop hidden-window lookup did not merge native hidden candidates correctly: target={hidden_target} error={hidden_error} candidates={hidden_candidates}"
+        )
+    desktop_module._WINDOW_BACKEND = SimpleNamespace(list_windows=lambda include_minimized=False, limit=12: {"ok": True, "data": {"windows": []}})
+    desktop_module._enum_windows_native = lambda include_minimized=False, include_hidden=False, limit=12: []
+    desktop_module._find_window_by_exact_title_native = lambda title: (
+        {
+            "window_id": "0x00001003",
+            "title": "Withdrawn Target Window",
+            "is_visible": False,
+            "is_cloaked": False,
+            "is_minimized": False,
+            "rect": {"x": 0, "y": 0, "width": 0, "height": 0},
+        }
+        if title == "Withdrawn Target Window"
+        else {}
+    )
+    withdrawn_target, withdrawn_candidates, withdrawn_error = desktop_module._find_window(
+        {"title": "Withdrawn Target Window", "exact": True, "limit": 10}
+    )
+    if withdrawn_error or withdrawn_target.get("window_id") != "0x00001003":
+        raise SystemExit(
+            f"desktop exact-title withdrawn lookup did not use the native direct-title fallback correctly: target={withdrawn_target} error={withdrawn_error} candidates={withdrawn_candidates}"
+        )
+finally:
+    desktop_module._WINDOW_BACKEND = original_window_backend
+    desktop_module._enum_windows_native = original_enum_windows_native
+    desktop_module._find_window_by_exact_title_native = original_find_window_by_exact_title_native
 stable_visual = assess_visual_sample_signatures(["abc", "abc"], backend="mss")
 if stable_visual.get("state") != "stable" or not stable_visual.get("stable", False):
     raise SystemExit("assess_visual_sample_signatures() did not treat identical samples as stable.")
@@ -318,6 +392,26 @@ foreground_recovery = classify_window_recovery_state(
 )
 if foreground_recovery.get("reason") != "foreground_not_confirmed":
     raise SystemExit("classify_window_recovery_state() did not detect the foreground-not-confirmed recovery case.")
+withdrawn_recovery = classify_window_recovery_state(
+    requested_title="Withdrawn App",
+    target_window={
+        "window_id": "0x00000004",
+        "title": "Withdrawn App",
+        "is_visible": False,
+        "is_cloaked": False,
+        "is_minimized": False,
+        "rect": {"x": 0, "y": 0, "width": 0, "height": 0},
+    },
+    active_window={"window_id": "0x00000002", "title": "Other App", "is_visible": True},
+    candidate_count=1,
+    readiness={"state": "missing", "ready": False, "reason": "target_not_found"},
+    visual_stability={"state": "missing", "stable": False, "reason": "missing"},
+    backend="smoke",
+)
+if withdrawn_recovery.get("reason") != "target_withdrawn":
+    raise SystemExit("classify_window_recovery_state() did not detect the withdrawn hidden-window recovery case.")
+if select_window_recovery_strategy(withdrawn_recovery, attempt_count=0, max_attempts=2).get("strategy") != "report_missing_target":
+    raise SystemExit("select_window_recovery_strategy() did not treat a withdrawn hidden window as an explicit report-only outcome.")
 loading_recovery = classify_window_recovery_state(
     requested_title="Loading App",
     target_window={"window_id": "0x00000003", "title": "Loading App", "is_visible": True, "is_minimized": False},
@@ -777,6 +871,103 @@ if paused_snapshot.get("pending_approval", {}).get("evidence_preview", {}).get("
 if paused_snapshot.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Desktop approval synthesis did not retain checkpoint evidence sufficiency for the paused desktop checkpoint.")
 
+partial_checkpoint_root = Path("data") / "desktop_partial_checkpoint_smoke"
+shutil.rmtree(partial_checkpoint_root, ignore_errors=True)
+partial_checkpoint_store = DesktopEvidenceStore(partial_checkpoint_root, max_items=2)
+partial_capture_path = partial_checkpoint_store.artifact_path("desk-smoke-partial-checkpoint", extension=".png")
+partial_capture_path.parent.mkdir(parents=True, exist_ok=True)
+partial_capture_path.write_bytes(b"desktop partial checkpoint smoke")
+partial_checkpoint_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_capture_screenshot",
+    active_window={"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+    windows=[{"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"}],
+    observation_token="desktop-evidence-smoke-partial",
+    screenshot={
+        "backend": "mss",
+        "path": str(partial_capture_path),
+        "scope": "active_window",
+        "bounds": {"x": 128, "y": 151, "width": 460, "height": 240},
+    },
+    errors=["readiness probe unavailable"],
+)
+partial_checkpoint_bundle["evidence_id"] = "desk-smoke-partial-checkpoint"
+partial_checkpoint_bundle["timestamp"] = third_timestamp
+partial_checkpoint_ref = partial_checkpoint_store.record_bundle(partial_checkpoint_bundle)
+partial_checkpoint_summary = summarize_evidence_bundle(partial_checkpoint_store.load_bundle("desk-smoke-partial-checkpoint"))
+partial_checkpoint_assessment = partial_checkpoint_store.assess_summary(
+    summary=partial_checkpoint_summary,
+    purpose="desktop_action_prepare",
+    target_window_title="Approval Target Window",
+    require_screenshot=True,
+    max_age_seconds=86_400,
+)
+if partial_checkpoint_assessment.get("sufficient", False) or partial_checkpoint_assessment.get("reason") != "partial_evidence":
+    raise SystemExit("Partial screenshot-backed desktop evidence did not stay in the expected refresh-needed state before checkpoint synthesis.")
+original_partial_store = desktop_evidence_module._STORE
+desktop_evidence_module._STORE = partial_checkpoint_store
+try:
+    desktop_partial_ready_state = TaskState("Click (12, 18) in window titled 'Approval Target Window'")
+    desktop_partial_ready_result = {
+        "ok": True,
+        "summary": "Waited for the target window and confirmed bounded recovery.",
+        "desktop_state": {
+            "active_window": {"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+            "windows": [{"title": "Approval Target Window"}],
+            "observation_token": "desktop-evidence-smoke-partial",
+            "observed_at": "2026-03-23T10:02:30",
+        },
+        "recovery": {
+            "state": "ready",
+            "reason": "recovery_succeeded",
+            "target_window": {"title": "Approval Target Window", "window_id": "0x00123458"},
+            "active_window": {"title": "Approval Target Window", "window_id": "0x00123458"},
+        },
+        "window_readiness": {
+            "state": "unsupported",
+            "ready": False,
+            "reason": "unsupported",
+        },
+        "visual_stability": {
+            "state": "missing",
+            "stable": False,
+            "reason": "missing",
+        },
+    }
+    desktop_partial_ready_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_wait_for_window_ready", "args": {}, "result": desktop_partial_ready_result})
+    desktop_partial_ready_state.update_memory_from_tool("desktop_wait_for_window_ready", desktop_partial_ready_result)
+    desktop_partial_capture_result = {
+        "ok": True,
+        "summary": "Captured a screenshot of the active window.",
+        "desktop_state": {
+            "active_window": {"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+            "windows": [{"title": "Approval Target Window"}],
+            "observation_token": "desktop-evidence-smoke-partial",
+            "observed_at": "2026-03-23T10:02:31",
+            "screenshot_path": partial_checkpoint_ref.get("screenshot_path", ""),
+            "screenshot_scope": "active_window",
+        },
+        "desktop_evidence_ref": partial_checkpoint_ref,
+        "desktop_evidence": partial_checkpoint_store.load_bundle("desk-smoke-partial-checkpoint"),
+    }
+    desktop_partial_ready_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_capture_screenshot", "args": {}, "result": desktop_partial_capture_result})
+    desktop_partial_ready_state.update_memory_from_tool("desktop_capture_screenshot", desktop_partial_capture_result)
+    desktop_partial_pause = _maybe_pause_for_desktop_action(
+        _DesktopApprovalStubLLM(),
+        _DesktopApprovalStubRuntime(),
+        desktop_partial_ready_state,
+        "Click (12, 18) in window titled 'Approval Target Window'",
+    )
+    if not isinstance(desktop_partial_pause, dict) or desktop_partial_pause.get("status") != "paused":
+        raise SystemExit("Desktop approval synthesis did not allow a screenshot-backed partial recovery state to create a bounded paused checkpoint.")
+    partial_paused_snapshot = desktop_partial_ready_state.get_control_snapshot()
+    partial_pending = partial_paused_snapshot.get("pending_approval", {})
+    partial_reason = str(partial_pending.get("evidence_assessment", {}).get("reason", "")).strip()
+    if partial_pending.get("evidence_preview", {}).get("evidence_id") != "desk-smoke-partial-checkpoint" or partial_reason not in {"partial_evidence", "partial_but_answerable", "current_evidence"}:
+        raise SystemExit("Desktop approval synthesis did not preserve linked screenshot-backed evidence for the partial paused checkpoint.")
+finally:
+    desktop_evidence_module._STORE = original_partial_store
+    shutil.rmtree(partial_checkpoint_root, ignore_errors=True)
+
 desktop_retry_state = TaskState("Click (12, 18) in window titled 'Approval Target Window'")
 desktop_retry_failure = {
     "ok": False,
@@ -955,6 +1146,31 @@ if not _interpreter_has_playwright(project_venv_python):
 for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding", "desktop_recovery_grounding"}:
     if expected_scenario not in SCENARIO_NAMES:
         raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
+hidden_phase_checks = _desktop_hidden_recovery_checks(
+    status="incomplete",
+    message=(
+        "Desktop Eval Main remains in the background and looks tray-like, so I could not recover it through the bounded desktop path. "
+        "The next step is to bring it back visibly or reopen it."
+    ),
+    session_payload={
+        "session": {
+            "authoritative_reply": {
+                "content": (
+                    "Desktop Eval Main remains in the background and looks tray-like, so I could not recover it through the bounded desktop path. "
+                    "The next step is to bring it back visibly or reopen it."
+                )
+            }
+        }
+    },
+    run={"run_id": "run-hidden"},
+    tool_names=["desktop_inspect_window_state", "desktop_recover_window"],
+    assessment={"sufficient": False},
+    fixture_state={"main_hidden": True},
+    main_title="Desktop Eval Main",
+)
+if not all(check.passed for check in hidden_phase_checks):
+    failed_hidden_checks = [check.to_dict() for check in hidden_phase_checks if not check.passed]
+    raise SystemExit(f"live_agent_eval hidden-window acceptance checks did not pass for the explicit withdrawn/tray-like outcome: {failed_hidden_checks}")
 live_eval_source = Path("live_agent_eval.py").read_text(encoding="utf-8")
 if "focus_request_path" not in live_eval_source or "def request_focus(" not in live_eval_source or "def _focus_main():" not in live_eval_source:
     raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
