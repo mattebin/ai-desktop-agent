@@ -1,0 +1,824 @@
+from __future__ import annotations
+
+import importlib
+import json
+import time
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+mods = [
+    "main",
+    "control_ui",
+    "live_agent_eval",
+    "core.agent",
+    "core.alerts",
+    "core.browser_tasks",
+    "core.chat_sessions",
+    "core.config",
+    "core.execution_manager",
+    "core.local_api",
+    "core.local_api_client",
+    "core.local_api_events",
+    "core.loop",
+    "core.operator_behavior",
+    "core.operator_controller",
+    "core.run_history",
+    "core.session_store",
+    "core.state",
+    "core.safety",
+    "core.watchers",
+    "core.llm_client",
+    "core.tool_runtime",
+    "tools.registry",
+    "tools.browser",
+    "tools.desktop",
+    "tools.files",
+    "tools.shell",
+]
+
+failed = []
+for mod in mods:
+    try:
+        importlib.import_module(mod)
+        print(f"[OK] {mod}")
+    except Exception as e:
+        print(f"[FAIL] {mod}: {e}")
+        failed.append((mod, str(e)))
+
+if failed:
+    raise SystemExit(1)
+
+from core.alerts import AlertStore
+from core.chat_sessions import ChatSessionManager
+from core.execution_manager import ScheduledTaskStore, TaskQueueStore
+from core.llm_client import _goal_requests_brief_answer, _goal_requests_single_recommendation
+from core.local_api import LocalOperatorApiServer
+from core.local_api_client import LocalOperatorApiClient
+from core.operator_behavior import classify_chat_turn, looks_like_simple_conversation_turn
+from core.operator_controller import OperatorController
+from core.run_history import RunHistoryStore
+from core.session_store import DEFAULT_STATE_SCOPE_ID, SessionStore
+from core.state import TaskState
+from core.tool_runtime import ToolRuntime
+from core.watchers import WatchStore
+from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks, _session_matches_query, _timeline_entry_from_event
+from live_agent_eval import SCENARIO_NAMES, _interpreter_has_playwright, _project_venv_python
+from tools.browser import shutdown_browser_runtime
+from tools.desktop import (
+    desktop_click_point,
+    desktop_list_windows,
+    desktop_type_text,
+    shutdown_desktop_runtime,
+)
+from tools.registry import get_tools
+
+controller = OperatorController()
+snapshot = controller.get_snapshot()
+if not isinstance(snapshot, dict):
+    raise SystemExit("OperatorController.get_snapshot() did not return a dict.")
+if not isinstance(snapshot.get("recent_runs", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include a recent_runs list.")
+if not isinstance(snapshot.get("latest_run", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include a latest_run dict.")
+if not isinstance(snapshot.get("queue", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include a queue dict.")
+if not isinstance(snapshot.get("queued_tasks", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include a queued_tasks list.")
+if not isinstance(snapshot.get("active_task", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include an active_task dict.")
+if not isinstance(snapshot.get("scheduled", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include a scheduled dict.")
+if not isinstance(snapshot.get("scheduled_tasks", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include a scheduled_tasks list.")
+if not isinstance(snapshot.get("watches", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include a watches dict.")
+if not isinstance(snapshot.get("watch_items", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include a watch_items list.")
+if not isinstance(snapshot.get("alerts", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include an alerts dict.")
+if not isinstance(snapshot.get("alert_items", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include an alert_items list.")
+if not isinstance(snapshot.get("behavior", {}), dict) or not snapshot.get("behavior", {}).get("mode"):
+    raise SystemExit("OperatorController.get_snapshot() did not include an operator behavior contract.")
+if not isinstance(snapshot.get("human_control", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include human-control state.")
+if not isinstance(snapshot.get("task_control", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include task-control state.")
+runtime = snapshot.get("runtime", {})
+if runtime.get("active_model") != "gpt-5.4" or runtime.get("reasoning_effort") != "medium":
+    raise SystemExit("OperatorController.get_snapshot() did not expose the expected runtime model configuration.")
+print("[OK] operator controller snapshot")
+
+registered_tools = {tool.get("name", "") for tool in get_tools()}
+expected_desktop_tools = {
+    "desktop_list_windows",
+    "desktop_get_active_window",
+    "desktop_focus_window",
+    "desktop_capture_screenshot",
+    "desktop_click_point",
+    "desktop_type_text",
+}
+if not expected_desktop_tools.issubset(registered_tools):
+    raise SystemExit("Tool registry did not include the expected bounded desktop tools.")
+tool_runtime = ToolRuntime(get_tools())
+planner_tool_names = {tool.get("name", "") for tool in tool_runtime.planner_tools()}
+if not expected_desktop_tools.issubset(planner_tool_names):
+    raise SystemExit("ToolRuntime did not expose the expected bounded desktop tools to the planner.")
+desktop_observation = desktop_list_windows({})
+if not isinstance(desktop_observation, dict) or "windows" not in desktop_observation or "active_window" not in desktop_observation:
+    raise SystemExit("desktop_list_windows() did not return the expected desktop observation shape.")
+observation_token = str(desktop_observation.get("observation_token", "")).strip()
+active_window = desktop_observation.get("active_window", {}) if isinstance(desktop_observation.get("active_window", {}), dict) else {}
+active_rect = active_window.get("rect", {}) if isinstance(active_window.get("rect", {}), dict) else {}
+if not observation_token:
+    raise SystemExit("desktop_list_windows() did not return an observation token.")
+if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and int(active_rect.get("height", 0) or 0) > 8:
+    test_x = int(active_rect.get("x", 0)) + max(2, int(active_rect.get("width", 0) or 0) // 2)
+    test_y = int(active_rect.get("y", 0)) + max(2, int(active_rect.get("height", 0) or 0) // 2)
+    click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": observation_token})
+    if not click_preview.get("paused", False) or not click_preview.get("approval_required", False) or click_preview.get("checkpoint_tool") != "desktop_click_point":
+        raise SystemExit("desktop_click_point() did not require approval in the expected bounded way.")
+    type_preview = desktop_type_text(
+        {
+            "value": "desktop smoke text",
+            "field_label": "desktop smoke input",
+            "observation_token": observation_token,
+        }
+    )
+    if not type_preview.get("paused", False) or not type_preview.get("approval_required", False) or type_preview.get("checkpoint_tool") != "desktop_type_text":
+        raise SystemExit("desktop_type_text() did not require approval in the expected bounded way.")
+print("[OK] desktop tools")
+
+client = LocalOperatorApiClient("http://127.0.0.1:8765/")
+if client.base_url != "http://127.0.0.1:8765":
+    raise SystemExit("LocalOperatorApiClient did not normalize the base URL.")
+print("[OK] local api client")
+
+cors_server = LocalOperatorApiServer(port=0)
+cors_server.start_in_thread()
+cors_request = Request(
+    f"http://127.0.0.1:{cors_server.port}/health",
+    method="OPTIONS",
+    headers={"Origin": "http://127.0.0.1:1420"},
+)
+with urlopen(cors_request, timeout=5) as cors_response:
+    if cors_response.status != 204:
+        raise SystemExit("Local API did not return 204 for CORS preflight.")
+    if cors_response.headers.get("Access-Control-Allow-Origin") != "http://127.0.0.1:1420":
+        raise SystemExit("Local API did not return the expected allowed web origin.")
+    if "POST" not in cors_response.headers.get("Access-Control-Allow-Methods", ""):
+        raise SystemExit("Local API did not expose expected CORS methods.")
+health_payload = cors_server.controller.get_runtime_config()
+with urlopen(f"http://127.0.0.1:{cors_server.port}/health", timeout=5) as health_response:
+    parsed_health = json.loads(health_response.read().decode("utf-8"))
+    if parsed_health.get("data", {}).get("runtime", {}).get("active_model") != health_payload.get("active_model"):
+        raise SystemExit("Local API health did not expose the live runtime model configuration.")
+    management_payload = parsed_health.get("data", {}).get("management", {})
+    if not isinstance(management_payload, dict) or "managed_by_desktop" not in management_payload or "api_pid" not in management_payload:
+        raise SystemExit("Local API health did not expose the expected management ownership metadata.")
+cors_server.shutdown()
+print("[OK] local api cors")
+
+project_venv_python = _project_venv_python(Path.cwd())
+if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):
+    raise SystemExit("live_agent_eval did not resolve the expected project venv Python path.")
+if not _interpreter_has_playwright(project_venv_python):
+    raise SystemExit("live_agent_eval did not detect Playwright in the project venv runtime.")
+for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality"}:
+    if expected_scenario not in SCENARIO_NAMES:
+        raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
+print("[OK] live eval runtime selection")
+
+desktop_ui_root = Path("desktop-ui")
+required_desktop_ui_files = [
+    desktop_ui_root / "package.json",
+    desktop_ui_root / "src" / "App.tsx",
+    desktop_ui_root / "src" / "styles.css",
+    desktop_ui_root / "src" / "lib" / "api.ts",
+    desktop_ui_root / "src-tauri" / "Cargo.toml",
+    desktop_ui_root / "src-tauri" / "tauri.conf.json",
+    desktop_ui_root / "src-tauri" / "src" / "main.rs",
+]
+missing_desktop_ui_files = [str(path) for path in required_desktop_ui_files if not path.exists()]
+if missing_desktop_ui_files:
+    raise SystemExit(f"Desktop UI files are missing: {missing_desktop_ui_files}")
+
+desktop_package = json.loads((desktop_ui_root / "package.json").read_text(encoding="utf-8"))
+desktop_dependencies = desktop_package.get("dependencies", {})
+desktop_scripts = desktop_package.get("scripts", {})
+if "@tauri-apps/api" not in desktop_dependencies or "react-markdown" not in desktop_dependencies:
+    raise SystemExit("Desktop UI package.json is missing expected runtime dependencies.")
+if "tauri:dev" not in desktop_scripts or "build" not in desktop_scripts:
+    raise SystemExit("Desktop UI package.json is missing expected scripts.")
+
+tauri_config = json.loads((desktop_ui_root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+if tauri_config.get("build", {}).get("devUrl") != "http://127.0.0.1:1420":
+    raise SystemExit("Desktop UI tauri.conf.json is missing the expected local dev URL.")
+if tauri_config.get("build", {}).get("frontendDist") != "../dist":
+    raise SystemExit("Desktop UI tauri.conf.json is missing the expected frontend dist path.")
+
+desktop_app_source = (desktop_ui_root / "src" / "App.tsx").read_text(encoding="utf-8")
+desktop_api_source = (desktop_ui_root / "src" / "lib" / "api.ts").read_text(encoding="utf-8")
+desktop_tauri_source = (desktop_ui_root / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+if "openSessionEventStream" not in desktop_app_source or "details-drawer" not in desktop_app_source:
+    raise SystemExit("Desktop UI App.tsx is missing expected chat/stream/detail UI wiring.")
+if "ensureLocalApi" not in desktop_api_source or "openSessionEventStream" not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing expected local API helpers.")
+if 'invoke<{' not in desktop_api_source or 'Failed to fetch ${url}' not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing expected desktop bootstrap/fetch hardening.")
+if "ensure_local_api" not in desktop_tauri_source or "spawn_local_api" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing expected local API bootstrap commands.")
+if "load_desired_runtime" not in desktop_tauri_source or "pick_free_port" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing the expected runtime-compatible local API bootstrap hardening.")
+if "AI_OPERATOR_DESKTOP_OWNER_TOKEN" not in desktop_tauri_source or "AI_OPERATOR_DESKTOP_OWNER_PID" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing explicit managed-child ownership markers.")
+if "RunEvent::Exit" not in desktop_tauri_source or "shutdown_owned_api_process" not in desktop_tauri_source or "ReleasedUnowned" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing the expected ownership-safe shutdown guards.")
+if "desktop_runtime_events.jsonl" not in desktop_tauri_source or "commit_runtime_status" not in desktop_tauri_source or "attached_existing_backend" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing the expected runtime audit/status tracking.")
+if "failed_to_start_owned_child" not in desktop_tauri_source or "port_available" not in desktop_tauri_source:
+    raise SystemExit("Desktop UI Tauri host is missing the expected startup/attach hardening.")
+if 'THEME_STORAGE_KEY' not in desktop_app_source or 'Theme:' not in desktop_app_source or 'data-theme="dark"' not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
+    raise SystemExit("Desktop UI is missing the expected theme-toggle implementation.")
+if 'Model: {runtimeModel}' not in desktop_app_source or 'Reasoning: {runtimeEffortLabel}' not in desktop_app_source:
+    raise SystemExit("Desktop UI is missing the expected live runtime model indicator.")
+if 'desktopRuntimeStatus' not in desktop_app_source or 'Detached backend' not in desktop_app_source:
+    raise SystemExit("Desktop UI is missing the expected desktop runtime visibility wiring.")
+if 'runtimeStatus?: DesktopRuntimeStatus' not in desktop_api_source or 'logPath?: string' not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing the expected runtime bootstrap metadata.")
+if 'DRAFTS_STORAGE_KEY' not in desktop_app_source or 'Jump to latest' not in desktop_app_source or 'code-copy-button' not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
+    raise SystemExit("Desktop UI is missing the expected transcript/composer polish features.")
+print("[OK] desktop ui scaffold")
+
+if not _session_matches_query({"title": "Inspect repo", "status": "paused", "summary": "Needs approval", "pending_approval": {"kind": "browser_checkpoint"}}, "inspect paused"):
+    raise SystemExit("control_ui._session_matches_query() did not match expected session terms.")
+inline_segments = _parse_inline_markdown_segments("Use **bold**, `code`, and [docs](https://example.com).")
+inline_kinds = [segment.get("kind") for segment in inline_segments if segment.get("text")]
+if inline_kinds != ["text", "bold", "text", "code", "text", "link", "text"]:
+    raise SystemExit("control_ui._parse_inline_markdown_segments() did not preserve inline markdown structure.")
+if inline_segments[5].get("url") != "https://example.com":
+    raise SystemExit("control_ui._parse_inline_markdown_segments() did not preserve markdown link targets.")
+rich_blocks = _parse_rich_text_blocks(
+    "# Architecture\n\n- core loop\n- state store\n\n```python\nprint('hi')\n```"
+)
+if [block.get("kind") for block in rich_blocks[:3]] != ["heading_1", "bullet_list", "code"]:
+    raise SystemExit("control_ui._parse_rich_text_blocks() did not preserve heading/list/code structure.")
+if rich_blocks[2].get("language") != "python" or "print('hi')" not in rich_blocks[2].get("text", ""):
+    raise SystemExit("control_ui._parse_rich_text_blocks() did not preserve fenced code content.")
+timeline_entry = _timeline_entry_from_event(
+    {
+        "event": "task.completed",
+        "emitted_at": "2026-03-11T09:00:00",
+        "data": {"current_step": "Summarized the project architecture."},
+    }
+)
+if timeline_entry.get("label") != "Task completed" or "Summarized the project architecture." not in timeline_entry.get("detail", ""):
+    raise SystemExit("control_ui._timeline_entry_from_event() did not produce the expected compact task entry.")
+print("[OK] control ui helpers")
+
+if not _goal_requests_single_recommendation("Inspect the project and tell me the single most important next step."):
+    raise SystemExit("core.llm_client did not detect a single-recommendation goal.")
+if not _goal_requests_brief_answer("Inspect the project and answer briefly: is the local API the main control surface?"):
+    raise SystemExit("core.llm_client did not detect a brief-answer goal.")
+if not looks_like_simple_conversation_turn("By the way, what does 9 + 4 equal?"):
+    raise SystemExit("core.operator_behavior did not classify a simple casual question correctly.")
+busy_route = classify_chat_turn(
+    "By the way, what does 9 + 4 equal?",
+    session_status="running",
+    has_context=True,
+    pending_kind="",
+)
+if busy_route.get("mode") != "normal_chat" or busy_route.get("dispatch") != "chat":
+    raise SystemExit("core.operator_behavior did not keep a casual question in normal chat during a busy session.")
+print("[OK] behavior routing helpers")
+
+event_stream = client.open_event_stream(session_id="session-smoke")
+if "/events/stream" not in event_stream.url or "session_id=session-smoke" not in event_stream.url:
+    raise SystemExit("LocalOperatorApiClient did not build the event stream URL correctly.")
+print("[OK] local api event stream client")
+
+
+replay_server = LocalOperatorApiServer(
+    port=0,
+    settings={
+        "local_api_event_poll_seconds": 0.1,
+        "local_api_event_heartbeat_seconds": 3,
+        "local_api_event_replay_size": 20,
+        "local_api_event_channel_retention_seconds": 5,
+        "local_api_event_max_channels": 8,
+    },
+)
+replay_server.start_in_thread()
+replay_client = LocalOperatorApiClient(f"http://127.0.0.1:{replay_server.port}")
+replay_client.health()
+replay_session = replay_server.chat_manager.create_session(title="Replay smoke")
+replay_session_id = replay_session.get("session", {}).get("session_id", "")
+if not replay_session_id:
+    raise SystemExit("Replay smoke session was not created.")
+
+stream_one = replay_client.open_event_stream(session_id=replay_session_id, timeout_seconds=5)
+stream_one_iter = stream_one.iter_events()
+first_stream_event = next(stream_one_iter)
+second_stream_event = next(stream_one_iter)
+if first_stream_event.get("event") != "stream.hello" or second_stream_event.get("event") != "session.sync":
+    raise SystemExit("Local API stream did not start with the expected hello/sync events.")
+
+with replay_server.chat_manager._lock:
+    target_session = replay_server.chat_manager._find_session_locked(replay_session_id)
+    replay_server.chat_manager._append_message_locked(target_session, role="assistant", kind="status", content="Replay marker one")
+    replay_server.chat_manager._update_summary_locked(target_session)
+    replay_server.chat_manager._persist_locked()
+
+first_message_event = {}
+stream_deadline = time.time() + 4.0
+while time.time() < stream_deadline:
+    payload = next(stream_one_iter)
+    if payload.get("event") == "session.message" and "Replay marker one" in payload.get("data", {}).get("message", {}).get("content", ""):
+        first_message_event = payload
+        break
+if not first_message_event.get("event_id"):
+    raise SystemExit("Local API stream did not emit a replayable event id for the first message.")
+stream_one.close()
+
+long_final_reply = ("Replay marker two " + ("full final reply segment " * 180)).strip()
+with replay_server.chat_manager._lock:
+    target_session = replay_server.chat_manager._find_session_locked(replay_session_id)
+    replay_server.chat_manager._append_message_locked(target_session, role="assistant", kind="final", content=long_final_reply, status="completed")
+    replay_server.chat_manager._update_summary_locked(target_session)
+    replay_server.chat_manager._persist_locked()
+
+time.sleep(0.35)
+stream_two = replay_client.open_event_stream(session_id=replay_session_id, last_event_id=first_message_event.get("event_id", ""), timeout_seconds=5)
+stream_two_iter = stream_two.iter_events()
+replayed_event = {}
+replay_deadline = time.time() + 4.0
+while time.time() < replay_deadline:
+    payload = next(stream_two_iter)
+    if payload.get("event") == "session.message" and payload.get("data", {}).get("message", {}).get("content", "").strip() == long_final_reply:
+        replayed_event = payload
+        break
+if not replayed_event:
+    raise SystemExit("Local API stream did not replay the full missed session event after reconnect.")
+session_detail = replay_server.chat_manager.get_session(replay_session_id)
+authoritative_reply = session_detail.get("session", {}).get("authoritative_reply", {})
+if authoritative_reply.get("content", "").strip() != long_final_reply:
+    raise SystemExit("ChatSessionManager did not preserve the authoritative final reply content.")
+print("[OK] local api event replay")
+stream_two.close()
+replay_server.shutdown()
+temp_session_path = Path("data/session_state_smoke.json")
+session_store = SessionStore(temp_session_path)
+if temp_session_path.exists():
+    temp_session_path.unlink()
+
+default_state = TaskState("default scope goal", state_scope_id=DEFAULT_STATE_SCOPE_ID)
+default_state.status = "completed"
+default_state.last_summary = "Default scope summary"
+default_state.memory_notes = ["default note"]
+chat_scope_id = "chat:session-smoke"
+chat_state = TaskState("chat session goal", state_scope_id=chat_scope_id)
+chat_state.status = "paused"
+chat_state.last_summary = "Chat scope summary"
+chat_state.memory_notes = ["chat note"]
+chat_state.browser_checkpoint_pending = True
+
+if not session_store.save(default_state, scope_id=DEFAULT_STATE_SCOPE_ID):
+    raise SystemExit("SessionStore did not save the default scope state.")
+if not session_store.save(chat_state, scope_id=chat_scope_id):
+    raise SystemExit("SessionStore did not save the chat scope state.")
+
+loaded_default = session_store.load(DEFAULT_STATE_SCOPE_ID)
+loaded_chat = session_store.load(chat_scope_id)
+if loaded_default.get("task_state", {}).get("goal") != "default scope goal":
+    raise SystemExit("SessionStore did not preserve the default scope goal.")
+if loaded_chat.get("task_state", {}).get("goal") != "chat session goal":
+    raise SystemExit("SessionStore did not preserve the chat scope goal.")
+if not loaded_chat.get("task_state", {}).get("browser_checkpoint_pending", False):
+    raise SystemExit("SessionStore did not preserve the chat scope checkpoint state.")
+print("[OK] session store scope isolation")
+
+if temp_session_path.exists():
+    temp_session_path.unlink()
+
+temp_chat_path = Path("data/chat_sessions_route_smoke.json")
+if temp_chat_path.exists():
+    temp_chat_path.unlink()
+
+
+class _FakeChatClient:
+    def reply_in_chat(self, user_message, *, session_context="", mode="chat"):
+        return f"[{mode}] {user_message}"
+
+
+class _FakeController:
+    def __init__(self):
+        self.started_goals = []
+        self.control_actions = []
+        self.snapshot = {
+            "status": "idle",
+            "running": False,
+            "paused": False,
+            "current_step": "",
+            "result_status": "",
+            "result_message": "",
+            "active_task": {},
+            "pending_approval": {},
+            "browser": {},
+            "behavior": {"mode": "normal_chat", "task_phase": "idle"},
+            "human_control": {"state": "available"},
+            "task_control": {},
+            "queue": {"counts": {}, "queued_tasks": [], "recent_tasks": []},
+            "alerts": {"items": []},
+            "latest_run": {},
+        }
+
+    def get_snapshot(self, *, session_id: str = "", state_scope_id: str = ""):
+        return dict(self.snapshot)
+
+    def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = ""):
+        self.started_goals.append({"goal": goal, "session_id": session_id, "state_scope_id": state_scope_id})
+        self.snapshot["status"] = "running"
+        self.snapshot["active_task"] = {"task_id": "task-1", "status": "running", "last_message": "Started operator work.", "run_id": "run-1"}
+        self.snapshot["queue"] = {"counts": {}, "queued_tasks": [], "recent_tasks": [{"task_id": "task-1", "status": "running", "last_message": "Started operator work.", "run_id": "run-1"}]}
+        self.snapshot["behavior"] = {"mode": "workflow_execution", "task_phase": "executing"}
+        return {"ok": True, "task_id": f"task-{len(self.started_goals)}", "started": True, "message": "Started operator work."}
+
+    def defer_task(self, *, session_id: str = "", state_scope_id: str = ""):
+        self.control_actions.append(("defer", session_id, state_scope_id))
+        self.snapshot["status"] = "deferred"
+        self.snapshot["result_status"] = "deferred"
+        self.snapshot["result_message"] = "Deferred the task for later resumption."
+        self.snapshot["behavior"] = {"mode": "paused_waiting", "task_phase": "deferred"}
+        self.snapshot["task_control"] = {"event": "deferred", "resume_available": True}
+        return {"ok": True, "status": "deferred", "message": "Deferred the task for later resumption."}
+
+    def resume_task(self, *, session_id: str = "", state_scope_id: str = ""):
+        self.control_actions.append(("resume", session_id, state_scope_id))
+        self.snapshot["status"] = "running"
+        self.snapshot["result_status"] = "running"
+        self.snapshot["result_message"] = "Resumed the task and restarted it."
+        self.snapshot["behavior"] = {"mode": "workflow_execution", "task_phase": "executing"}
+        self.snapshot["task_control"] = {"event": "resumed", "resume_available": False}
+        return {"ok": True, "status": "running", "message": "Resumed the task and restarted it.", "started": True}
+
+    def replace_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = ""):
+        self.control_actions.append(("replace", goal, session_id, state_scope_id))
+        self.snapshot["status"] = "running"
+        self.snapshot["result_status"] = "running"
+        self.snapshot["result_message"] = "Started the replacement goal."
+        self.snapshot["behavior"] = {"mode": "workflow_execution", "task_phase": "executing"}
+        self.snapshot["task_control"] = {"event": "superseded", "replacement_goal": goal}
+        return {"ok": True, "status": "running", "message": "Started the replacement goal.", "task_id": "task-replacement", "started": True}
+
+    def stop_task(self, *, session_id: str = "", state_scope_id: str = ""):
+        self.control_actions.append(("stop", session_id, state_scope_id))
+        self.snapshot["status"] = "stopped"
+        self.snapshot["result_status"] = "stopped"
+        self.snapshot["result_message"] = "Stopped the task by explicit operator request."
+        self.snapshot["active_task"] = {"task_id": "task-1", "status": "stopped", "last_message": "Stopped the task by explicit operator request.", "run_id": "run-stop"}
+        self.snapshot["latest_run"] = {"run_id": "run-stop", "final_status": "stopped", "result_message": "Stopped the task by explicit operator request."}
+        self.snapshot["queue"] = {"counts": {}, "queued_tasks": [], "recent_tasks": [{"task_id": "task-1", "status": "stopped", "last_message": "Stopped the task by explicit operator request.", "run_id": "run-stop"}]}
+        self.snapshot["behavior"] = {"mode": "final_report", "task_phase": "stopped"}
+        self.snapshot["task_control"] = {"event": "stopped"}
+        return {"ok": True, "status": "stopped", "message": "Stopped the task by explicit operator request.", "task_id": "task-1"}
+
+    def retry_task(self, *, session_id: str = "", state_scope_id: str = ""):
+        self.control_actions.append(("retry", session_id, state_scope_id))
+        self.snapshot["status"] = "queued"
+        self.snapshot["result_status"] = "queued"
+        self.snapshot["result_message"] = "Queued goal."
+        self.snapshot["behavior"] = {"mode": "workflow_execution", "task_phase": "queued"}
+        self.snapshot["task_control"] = {"event": "retried"}
+        return {"ok": True, "status": "queued", "message": "Queued goal.", "task_id": "task-retry", "started": False}
+
+
+fake_controller = _FakeController()
+chat_manager = ChatSessionManager(
+    controller=fake_controller,
+    path=temp_chat_path,
+    max_sessions=4,
+    max_messages=12,
+    chat_client_factory=lambda: _FakeChatClient(),
+)
+created_session = chat_manager.create_session(title="Route smoke")
+route_session_id = created_session.get("session", {}).get("session_id", "")
+if not route_session_id:
+    raise SystemExit("ChatSessionManager did not create the smoke session.")
+
+chat_result = chat_manager.send_message(route_session_id, "What happened?")
+if fake_controller.started_goals:
+    raise SystemExit("ChatSessionManager routed a conversational follow-up into operator execution.")
+if chat_result.get("reply_mode") != "normal_chat":
+    raise SystemExit("ChatSessionManager did not keep the conversational follow-up in normal chat mode.")
+if chat_result.get("session", {}).get("authoritative_reply", {}).get("content", "").strip() != "[normal_chat] What happened?":
+    raise SystemExit("ChatSessionManager did not preserve the direct chat reply as the authoritative reply.")
+
+fake_controller.snapshot["status"] = "paused"
+fake_controller.snapshot["paused"] = True
+fake_controller.snapshot["pending_approval"] = {"kind": "browser_checkpoint", "reason": "Submitting the form requires approval."}
+approval_result = chat_manager.send_message(route_session_id, "continue")
+if len(fake_controller.started_goals) != 0:
+    raise SystemExit("ChatSessionManager treated a paused approval follow-up as a new operator task.")
+if approval_result.get("reply_mode") != "approval_needed_action":
+    raise SystemExit("ChatSessionManager did not keep the paused approval turn in chat guidance mode.")
+
+defer_result = chat_manager.send_message(route_session_id, "defer this for later")
+if fake_controller.control_actions[-1][0] != "defer":
+    raise SystemExit("ChatSessionManager did not map a defer request onto task control.")
+if defer_result.get("reply_mode") != "paused_waiting":
+    raise SystemExit("ChatSessionManager did not surface deferred work as paused/waiting.")
+
+resume_result = chat_manager.send_message(route_session_id, "resume that")
+if fake_controller.control_actions[-1][0] != "resume":
+    raise SystemExit("ChatSessionManager did not map a resume request onto task control.")
+if resume_result.get("reply_mode") != "workflow_execution":
+    raise SystemExit("ChatSessionManager did not surface resumed work as workflow execution.")
+
+operator_result = chat_manager.send_message(route_session_id, "Inspect this project and explain the main architecture.")
+if len(fake_controller.started_goals) != 1:
+    raise SystemExit("ChatSessionManager did not route a concrete operator request into operator execution.")
+if operator_result.get("reply_mode") != "read_only_investigation":
+    raise SystemExit("ChatSessionManager did not label the concrete task as read-only investigation mode.")
+
+replace_result = chat_manager.send_message(route_session_id, "instead inspect the frontend code")
+if fake_controller.control_actions[-1][0] != "replace":
+    raise SystemExit("ChatSessionManager did not map a replacement request onto task supersession.")
+if replace_result.get("reply_mode") != "workflow_execution":
+    raise SystemExit("ChatSessionManager did not surface replacement work as workflow execution.")
+
+stop_result = chat_manager.send_message(route_session_id, "stop that")
+stop_messages = stop_result.get("session", {}).get("messages", [])
+stop_authoritative = [
+    message
+    for message in stop_messages
+    if message.get("role") == "assistant"
+    and message.get("run_id") == "run-stop"
+    and (message.get("kind") in {"final", "result", "error"} or message.get("status") == "stopped")
+]
+if len(stop_authoritative) != 1:
+    raise SystemExit("ChatSessionManager emitted more than one authoritative stopped-task reply.")
+print("[OK] chat session routing")
+
+if temp_chat_path.exists():
+    temp_chat_path.unlink()
+
+temp_history_path = Path("data/run_history_smoke.json")
+store = RunHistoryStore(temp_history_path, max_runs=3)
+if temp_history_path.exists():
+    temp_history_path.unlink()
+
+state = TaskState("smoke history goal", state_scope_id=chat_scope_id)
+state.status = "completed"
+state.last_summary = "Smoke history summary"
+state.browser_task_name = "open_and_inspect"
+state.browser_task_status = "completed"
+state.browser_current_url = "https://example.test"
+state.add_step(
+    {
+        "type": "tool",
+        "status": "completed",
+        "tool": "browser_type",
+        "args": {"selector": "#email", "value": "user@example.com"},
+        "result": {
+            "ok": True,
+            "summary": "Typed into the field.",
+            "browser_task_name": "open_and_inspect",
+            "browser_task_step": "type into field",
+            "workflow_name": "Form flow",
+            "workflow_step": "type into field",
+            "recovery_notes": ["Retried once."],
+            "retry_count": 1,
+        },
+    }
+)
+store.record_run(
+    run_id="run-smoke",
+    goal=state.goal,
+    started_at=1.0,
+    ended_at=2.5,
+    final_status=state.status,
+    final_summary=state.last_summary,
+    result_message=("Smoke result message " * 160),
+    steps=state.steps,
+    task_state=state,
+    source="smoke_test",
+    session_id="session-smoke",
+    state_scope_id=chat_scope_id,
+)
+recent_runs = store.get_recent_runs(limit=2)
+filtered_runs = store.get_recent_runs(limit=2, session_id="session-smoke", state_scope_id=chat_scope_id)
+latest_run = store.get_latest_run(session_id="session-smoke", state_scope_id=chat_scope_id)
+if not recent_runs or latest_run.get("run_id") != "run-smoke":
+    raise SystemExit("RunHistoryStore did not persist the smoke history entry.")
+if len(filtered_runs) != 1 or filtered_runs[0].get("state_scope_id") != chat_scope_id:
+    raise SystemExit("RunHistoryStore did not filter runs by session/state scope correctly.")
+if len(str(latest_run.get("result_message", ""))) < 3000:
+    raise SystemExit("RunHistoryStore did not preserve the longer result_message body.")
+prepared_args = latest_run.get("steps", [{}])[0].get("prepared_args", {})
+if prepared_args.get("value") == "user@example.com":
+    raise SystemExit("RunHistoryStore did not sanitize sensitive step args.")
+print("[OK] run history store")
+
+if temp_history_path.exists():
+    temp_history_path.unlink()
+
+rejected_state = TaskState("approval smoke")
+rejected_state.status = "blocked"
+rejected_state.set_task_control(event="rejected", reason="Approval was rejected.")
+if "rejected" not in rejected_state.get_control_snapshot().get("behavior", {}).get("reason", "").lower():
+    raise SystemExit("TaskState behavior contract did not preserve rejected-approval context.")
+
+desktop_checkpoint_state = TaskState("desktop approval smoke")
+desktop_checkpoint_state.status = "paused"
+desktop_checkpoint_state.update_memory_from_tool(
+    "desktop_click_point",
+    {
+        "ok": False,
+        "paused": True,
+        "approval_required": True,
+        "checkpoint_required": True,
+        "checkpoint_reason": "Approval required before clicking the desktop point.",
+        "checkpoint_tool": "desktop_click_point",
+        "checkpoint_target": "Desktop Eval Window @ (120, 140)",
+        "checkpoint_resume_args": {
+            "x": 120,
+            "y": 140,
+            "expected_window_title": "Desktop Eval Window",
+            "observation_token": "desktop-smoke-token",
+        },
+        "summary": "Approval required before clicking the desktop point.",
+        "desktop_state": {
+            "active_window": {
+                "title": "Desktop Eval Window",
+                "window_id": "0x00123456",
+                "process_name": "python.exe",
+            },
+            "windows": [{"title": "Desktop Eval Window"}],
+            "observation_token": "desktop-smoke-token",
+            "observed_at": "2026-03-23T10:00:00",
+        },
+    },
+)
+desktop_snapshot = desktop_checkpoint_state.get_control_snapshot()
+if desktop_snapshot.get("pending_approval", {}).get("kind") != "desktop_action":
+    raise SystemExit("TaskState did not expose a desktop approval checkpoint in the control snapshot.")
+if not desktop_snapshot.get("paused", False):
+    raise SystemExit("TaskState did not treat a desktop checkpoint as paused work.")
+if desktop_checkpoint_state.to_session_snapshot().get("desktop_checkpoint_tool", "") != "desktop_click_point":
+    raise SystemExit("TaskState did not persist desktop checkpoint state.")
+
+browser_checkpoint_state = TaskState("browser checkpoint smoke")
+browser_checkpoint_state.add_step(
+    {
+        "type": "tool",
+        "tool": "browser_type",
+        "args": {"value": "user@example.com", "label": "Email"},
+        "status": "completed",
+    }
+)
+browser_checkpoint_state.update_memory_from_tool(
+    "browser_type",
+    {
+        "ok": True,
+        "summary": "Typed into 'email' on Checkpoint Form",
+        "browser_state": {"session_id": "default", "current_url": "file:///checkpoint_form.html", "current_title": "Checkpoint Form"},
+        "page": {"url": "file:///checkpoint_form.html", "title": "Checkpoint Form", "visible_text_excerpt": "Checkpoint Form Email Submit"},
+        "field": {"name": "email", "selector_hint": "#email", "type": "text"},
+        "last_browser_action": "Typed into 'email' on Checkpoint Form",
+    },
+)
+browser_checkpoint_state.add_step(
+    {
+        "type": "tool",
+        "tool": "browser_click",
+        "args": {"text": "Submit", "workflow_step": "checkpoint at submit click"},
+        "status": "paused",
+    }
+)
+browser_checkpoint_state.update_memory_from_tool(
+    "browser_click",
+    {
+        "ok": False,
+        "paused": True,
+        "approval_required": True,
+        "checkpoint_required": True,
+        "checkpoint_reason": "Approval required before clicking 'Submit'.",
+        "checkpoint_step": "checkpoint at submit click",
+        "checkpoint_target": "Submit",
+        "checkpoint_tool": "browser_click",
+        "checkpoint_resume_args": {"url": "file:///checkpoint_form.html", "expected_title_contains": "Checkpoint Form"},
+        "summary": "Approval required before clicking 'Submit'.",
+        "browser_state": {"session_id": "default"},
+        "page": {"url": "file:///checkpoint_form.html", "title": "Checkpoint Form", "visible_text_excerpt": "Checkpoint Form Email Submit"},
+    },
+)
+checkpoint_resume_args = browser_checkpoint_state.to_session_snapshot().get("browser_checkpoint_resume_args", {})
+if checkpoint_resume_args.get("resume_value") != "user@example.com" or checkpoint_resume_args.get("resume_selector") != "#email":
+    raise SystemExit("TaskState did not preserve enough browser checkpoint state to restore a resumed form step.")
+
+shutdown_browser_runtime()
+shutdown_desktop_runtime()
+print("[OK] task control behavior")
+
+temp_alert_path = Path("data/alert_history_smoke.json")
+alert_store = AlertStore(temp_alert_path, max_items=2)
+if temp_alert_path.exists():
+    temp_alert_path.unlink()
+
+saved_alerts = alert_store.save(
+    [
+        {"alert_id": "alert-one", "created_at": "2026-03-10T10:00:00+01:00", "severity": "info", "type": "watch_triggered", "source": "watch", "title": "Watch triggered", "message": "First alert."},
+        {"alert_id": "alert-two", "created_at": "2026-03-10T10:01:00+01:00", "severity": "warning", "type": "approval_needed", "source": "browser", "title": "Approval needed", "message": "Second alert."},
+        {"alert_id": "alert-three", "created_at": "2026-03-10T10:02:00+01:00", "severity": "error", "type": "task_failed", "source": "goal_run", "title": "Task failed", "message": "Third alert."},
+    ]
+)
+loaded_alerts = alert_store.load()
+if not saved_alerts:
+    raise SystemExit("AlertStore did not save alert state.")
+alert_items = loaded_alerts.get("alerts", [])
+alert_ids = {item.get("alert_id") for item in alert_items}
+if len(alert_items) != 2 or alert_ids != {"alert-two", "alert-three"}:
+    raise SystemExit("AlertStore did not preserve the expected alert set when trimming.")
+print("[OK] alert store")
+
+if temp_alert_path.exists():
+    temp_alert_path.unlink()
+
+temp_queue_path = Path("data/task_queue_smoke.json")
+queue_store = TaskQueueStore(temp_queue_path, max_items=2)
+if temp_queue_path.exists():
+    temp_queue_path.unlink()
+
+saved = queue_store.save(
+    [
+        {"task_id": "task-one", "goal": "Inspect project architecture", "status": "completed", "created_at": "2026-03-10T10:00:00+01:00", "last_message": "Completed.", "session_id": "session-old", "state_scope_id": "chat:session-old"},
+        {"task_id": "task-two", "goal": "Compare two files", "status": "queued", "created_at": "2026-03-10T10:01:00+01:00", "last_message": "Queued.", "session_id": "session-two", "state_scope_id": "chat:session-two"},
+        {"task_id": "task-three", "goal": "This older terminal task should be trimmed", "status": "failed", "created_at": "2026-03-10T09:59:00+01:00", "last_message": "Failed.", "state_scope_id": DEFAULT_STATE_SCOPE_ID},
+    ],
+    active_task_id="",
+)
+loaded_queue = queue_store.load()
+if not saved:
+    raise SystemExit("TaskQueueStore did not save queue state.")
+queue_tasks = loaded_queue.get("tasks", [])
+queue_ids = {task.get("task_id") for task in queue_tasks}
+if len(queue_tasks) != 2:
+    raise SystemExit("TaskQueueStore did not enforce the bounded queue size.")
+if queue_ids != {"task-two", "task-three"}:
+    raise SystemExit("TaskQueueStore did not keep the expected bounded task set after trimming.")
+print("[OK] task queue store")
+
+if temp_queue_path.exists():
+    temp_queue_path.unlink()
+
+temp_scheduled_path = Path("data/scheduled_tasks_smoke.json")
+scheduled_store = ScheduledTaskStore(temp_scheduled_path, max_items=2)
+if temp_scheduled_path.exists():
+    temp_scheduled_path.unlink()
+
+saved_scheduled = scheduled_store.save(
+    [
+        {"scheduled_id": "sched-one", "goal": "Run later once", "status": "scheduled", "recurrence": "once", "scheduled_for": "2026-03-11T10:00:00+01:00", "next_run_at": "2026-03-11T10:00:00+01:00", "last_message": "Scheduled."},
+        {"scheduled_id": "sched-two", "goal": "Daily summary", "status": "completed", "recurrence": "daily", "scheduled_for": "2026-03-10T09:00:00+01:00", "next_run_at": "2026-03-11T09:00:00+01:00", "last_message": "Completed once."},
+        {"scheduled_id": "sched-three", "goal": "Old failed once", "status": "failed", "recurrence": "once", "scheduled_for": "2026-03-09T09:00:00+01:00", "next_run_at": "2026-03-09T09:00:00+01:00", "last_message": "Failed."},
+    ]
+)
+loaded_scheduled = scheduled_store.load()
+if not saved_scheduled:
+    raise SystemExit("ScheduledTaskStore did not save scheduled state.")
+scheduled_tasks = loaded_scheduled.get("scheduled_tasks", [])
+scheduled_ids = {task.get("scheduled_id") for task in scheduled_tasks}
+if len(scheduled_tasks) != 2 or scheduled_ids != {"sched-one", "sched-two"}:
+    raise SystemExit("ScheduledTaskStore did not preserve the expected scheduled-task set when trimming.")
+print("[OK] scheduled task store")
+
+if temp_scheduled_path.exists():
+    temp_scheduled_path.unlink()
+
+temp_watch_path = Path("data/watch_state_smoke.json")
+watch_store = WatchStore(temp_watch_path, max_items=2)
+if temp_watch_path.exists():
+    temp_watch_path.unlink()
+
+saved_watch = watch_store.save(
+    [
+        {"watch_id": "watch-one", "goal": "Run when file exists", "status": "watching", "condition_type": "file_exists", "target": "README.md", "interval_seconds": 10, "allow_repeat": False, "last_message": "Watching."},
+        {"watch_id": "watch-two", "goal": "Repeat on project changes", "status": "completed", "condition_type": "inspect_project_changed", "target": ".", "match_text": "core loop", "interval_seconds": 30, "allow_repeat": True, "last_message": "Completed once."},
+        {"watch_id": "watch-three", "goal": "Old failed one-shot", "status": "failed", "condition_type": "file_changed", "target": "main.py", "interval_seconds": 10, "allow_repeat": False, "last_message": "Failed."},
+    ]
+)
+loaded_watch = watch_store.load()
+if not saved_watch:
+    raise SystemExit("WatchStore did not save watch state.")
+watch_items = loaded_watch.get("watches", [])
+watch_ids = {item.get("watch_id") for item in watch_items}
+if len(watch_items) != 2 or watch_ids != {"watch-one", "watch-two"}:
+    raise SystemExit("WatchStore did not preserve the expected watch set when trimming.")
+print("[OK] watch store")
+
+if temp_watch_path.exists():
+    temp_watch_path.unlink()
+
+print("Smoke test passed.")
+
+

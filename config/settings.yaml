@@ -1,0 +1,32 @@
+model: "gpt-5.4"
+reasoning:
+  effort: "medium"
+base_url: "https://api.openai.com/v1"
+
+dry_run: true
+risky_tools_enabled: false
+tool_timeout_seconds: 10
+emergency_stop_key: "f12"
+max_iterations: 12
+session_state_path: "data/session_state.json"
+run_history_path: "data/run_history.json"
+max_run_history_entries: 25
+queue_state_path: "data/task_queue.json"
+max_queue_state_items: 24
+scheduled_task_state_path: "data/scheduled_tasks.json"
+max_scheduled_task_entries: 24
+watch_state_path: "data/watch_state.json"
+max_watch_entries: 24
+alert_state_path: "data/alert_history.json"
+max_alert_entries: 40
+scheduler_poll_seconds: 5
+local_api_host: "127.0.0.1"
+local_api_port: 8765
+local_api_event_poll_seconds: 0.75
+local_api_event_heartbeat_seconds: 12
+local_api_event_replay_size: 80
+local_api_event_channel_retention_seconds: 45
+local_api_event_max_channels: 24
+chat_session_state_path: "data/chat_sessions.json"
+max_chat_sessions: 16
+max_chat_messages_per_session: 40

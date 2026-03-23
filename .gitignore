@@ -1,0 +1,16 @@
+desktop-ui/src-tauri/target/
+target/
+*.pdb
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+node_modules/
+desktop-ui/node_modules/
+desktop-ui/dist/
+dist/
+build/
+*.log
+tmp_write_probe.txt
+data/

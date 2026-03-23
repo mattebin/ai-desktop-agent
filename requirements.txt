@@ -1,0 +1,4 @@
+requests
+pyyaml
+keyboard
+playwright

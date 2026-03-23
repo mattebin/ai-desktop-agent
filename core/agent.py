@@ -1,0 +1,176 @@
+﻿from __future__ import annotations
+
+import time
+from typing import Any, Dict
+
+from core.config import load_settings
+from core.llm_client import HostedLLMClient
+from core.loop import run_task_loop
+from core.run_history import DEFAULT_RUN_HISTORY_PATH, RunHistoryStore
+from core.session_store import DEFAULT_SESSION_STATE_PATH, DEFAULT_STATE_SCOPE_ID, SessionStore
+from core.state import TaskState
+from core.tool_runtime import ToolRuntime
+from tools.registry import get_tools
+
+
+class Agent:
+    def __init__(self, settings: Dict[str, Any] | None = None):
+        self.settings = dict(settings) if isinstance(settings, dict) else load_settings()
+        self.llm = HostedLLMClient(settings=self.settings)
+        self.tools = ToolRuntime(get_tools())
+        session_state_path = self.settings.get("session_state_path", DEFAULT_SESSION_STATE_PATH)
+        self.session_store = SessionStore(session_state_path)
+        run_history_path = self.settings.get("run_history_path", DEFAULT_RUN_HISTORY_PATH)
+        max_runs = int(self.settings.get("max_run_history_entries", 25))
+        self.history_store = RunHistoryStore(run_history_path, max_runs=max_runs)
+
+    def get_runtime_config(self) -> Dict[str, object]:
+        return self.llm.get_runtime_config()
+
+    def _normalize_state_scope_id(self, state_scope_id: str | None = None) -> str:
+        text = str(state_scope_id or "").strip()[:120]
+        return text or DEFAULT_STATE_SCOPE_ID
+
+    def _refresh_summary(self, state: TaskState):
+        recent_notes = state.memory_notes[-6:]
+        if recent_notes:
+            state.set_summary(" | ".join(recent_notes))
+
+    def _should_preserve_pending_browser_checkpoint(self, goal: str) -> bool:
+        text = " ".join(str(goal or "").strip().lower().split())
+        if not text:
+            return False
+        if not self.tools.goal_has_explicit_browser_approval(text):
+            return False
+        return any(term in text for term in ("resume", "paused", "checkpoint", "continue"))
+
+    def load_task_state(
+        self,
+        goal: str = "",
+        *,
+        state_scope_id: str = DEFAULT_STATE_SCOPE_ID,
+        clear_pending_for_new_goal: bool = True,
+    ) -> TaskState:
+        normalized_scope_id = self._normalize_state_scope_id(state_scope_id)
+        persisted = self.session_store.load(scope_id=normalized_scope_id)
+        persisted_state = persisted.get("task_state", {})
+        previous_goal = str(persisted_state.get("goal", "")).strip()
+        requested_goal = str(goal).strip()
+        state_goal = requested_goal or previous_goal
+        state = TaskState(
+            state_goal,
+            session_state=persisted_state,
+            loaded_message=(persisted.get("loaded_message", "") if not requested_goal else ""),
+            state_scope_id=normalized_scope_id,
+        )
+        state.state_scope_id = normalized_scope_id
+
+        if requested_goal:
+            state.goal = requested_goal
+            preserve_checkpoint = self._should_preserve_pending_browser_checkpoint(requested_goal)
+            if clear_pending_for_new_goal and previous_goal and previous_goal != requested_goal and state.browser_checkpoint_pending:
+                if preserve_checkpoint:
+                    state.add_note("Preserved pending browser checkpoint for explicit approval resume goal.")
+                else:
+                    state.clear_browser_checkpoint()
+                    state.add_note("Cleared pending browser checkpoint for new goal.")
+                self._refresh_summary(state)
+
+        return state
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None) -> bool:
+        normalized_scope_id = self._normalize_state_scope_id(state_scope_id or getattr(state, "state_scope_id", DEFAULT_STATE_SCOPE_ID))
+        state.state_scope_id = normalized_scope_id
+        return self.session_store.save(state, scope_id=normalized_scope_id)
+
+    def record_run_history(
+        self,
+        state: TaskState,
+        *,
+        started_at: float,
+        step_start_index: int,
+        result: Dict[str, object] | None,
+        source: str,
+        goal: str | None = None,
+        session_id: str = "",
+        state_scope_id: str | None = None,
+    ) -> Dict[str, object]:
+        safe_step_start = max(0, int(step_start_index))
+        result_payload = result if isinstance(result, dict) else {}
+        normalized_scope_id = self._normalize_state_scope_id(state_scope_id or getattr(state, "state_scope_id", DEFAULT_STATE_SCOPE_ID))
+        return self.history_store.record_run(
+            run_id=self.history_store.next_run_id(),
+            goal=str(goal or state.goal).strip(),
+            started_at=started_at,
+            ended_at=time.time(),
+            final_status=str(result_payload.get("status", state.status)).strip() or state.status,
+            final_summary=str(state.last_summary).strip() or str(result_payload.get("message", "")).strip(),
+            result_message=str(result_payload.get("message", "")).strip(),
+            steps=state.steps[safe_step_start:],
+            task_state=state,
+            source=source,
+            step_offset=safe_step_start,
+            session_id=str(session_id).strip()[:80],
+            state_scope_id=normalized_scope_id,
+        )
+
+    def run_state(
+        self,
+        state: TaskState,
+        *,
+        planning_goal: str | None = None,
+        history_start_index: int | None = None,
+        run_source: str = "goal_run",
+        session_id: str = "",
+        control_callback=None,
+    ):
+        normalized_scope_id = self._normalize_state_scope_id(getattr(state, "state_scope_id", DEFAULT_STATE_SCOPE_ID))
+        state.state_scope_id = normalized_scope_id
+        step_start_index = len(state.steps) if history_start_index is None else max(0, int(history_start_index))
+        started_at = time.time()
+        self.session_store.save(state, scope_id=normalized_scope_id)
+
+        try:
+            result = run_task_loop(
+                self.llm,
+                self.tools,
+                state,
+                self.settings,
+                session_store=self.session_store,
+                planning_goal=planning_goal,
+                control_callback=control_callback,
+            )
+        except Exception as exc:
+            state.status = "blocked"
+            state.add_step(
+                {
+                    "type": "system",
+                    "status": "failed",
+                    "message": f"Agent run failed: {exc}",
+                }
+            )
+            state.add_note(f"Agent run failed: {exc}")
+            self._refresh_summary(state)
+            self.session_store.save(state, scope_id=normalized_scope_id)
+            result = {
+                "ok": False,
+                "status": "blocked",
+                "message": f"Agent run failed: {exc}",
+                "steps": state.steps,
+            }
+
+        history_entry = self.record_run_history(
+            state,
+            started_at=started_at,
+            step_start_index=step_start_index,
+            result=result,
+            source=run_source,
+            session_id=session_id,
+            state_scope_id=normalized_scope_id,
+        )
+        result["run_id"] = history_entry.get("run_id", "")
+        return result
+
+    def run_task(self, goal: str, *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID):
+        state = self.load_task_state(goal, state_scope_id=state_scope_id)
+        return self.run_state(state, run_source="goal_run")

@@ -1,0 +1,6 @@
+{
+  "summary": "Short summary of what changed this run.",
+  "next_task_prompt": "A fully formed next Codex prompt, including Context / Big Picture Goal and Next Task.",
+  "notes": "Optional short notes.",
+  "timestamp": "2026-03-11T22:00:00"
+}
