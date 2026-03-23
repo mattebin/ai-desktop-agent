@@ -15,6 +15,8 @@ It is intended to strengthen inspection, auditability, and future action groundi
 
 The layer now also includes a compact summary/index/selection helper on top of raw bundles so recent evidence can be referenced without fetching full bundle JSON everywhere.
 
+It also includes an on-demand artifact-viewer path so retained screenshots can be opened from selected/checkpoint/recent evidence references without turning the normal UI into a screenshot browser.
+
 ## Current evidence sources
 
 - bounded window observation via the desktop window backend

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 from core.backend_schemas import (
     normalize_desktop_evidence_ref,
+    normalize_desktop_evidence_artifact,
     normalize_desktop_evidence_summary,
     normalize_screen_observation,
     normalize_screenshot_observation,
@@ -314,6 +316,70 @@ def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "recency_seconds": int(normalized.get("recency_seconds", 0) or 0),
         "selection_reason": normalized.get("selection_reason", ""),
     }
+
+
+def describe_evidence_artifact(
+    bundle: Dict[str, Any] | None,
+    *,
+    summary: Dict[str, Any] | None = None,
+    content_path: str = "",
+    evidence_id: str = "",
+) -> Dict[str, Any]:
+    normalized_summary = normalize_desktop_evidence_summary(summary if isinstance(summary, dict) else {})
+    normalized_bundle = _sanitize_bundle(bundle if isinstance(bundle, dict) else {}) if isinstance(bundle, dict) and bundle else {}
+    artifact_path = ""
+    bundle_path = ""
+    artifact_type = ""
+    summary_text = ""
+    artifact_available = False
+    availability_state = "unavailable"
+    reason = "unavailable"
+
+    if normalized_bundle:
+        artifacts = normalized_bundle.get("artifacts", {}) if isinstance(normalized_bundle.get("artifacts", {}), dict) else {}
+        screenshot = normalized_bundle.get("screenshot", {}) if isinstance(normalized_bundle.get("screenshot", {}), dict) else {}
+        artifact_path = _trim_text(artifacts.get("screenshot_path", "") or screenshot.get("path", ""), limit=320)
+        bundle_path = _trim_text(artifacts.get("bundle_path", "") or normalized_bundle.get("bundle_path", ""), limit=320)
+        summary_text = _trim_text(normalized_bundle.get("summary", ""), limit=220)
+        if artifact_path:
+            candidate = Path(artifact_path)
+            artifact_available = candidate.exists() and candidate.is_file()
+            artifact_type = _trim_text(mimetypes.guess_type(candidate.name)[0] or "image/png", limit=80)
+            if artifact_available:
+                availability_state = "available"
+                reason = "available"
+            else:
+                availability_state = "missing"
+                reason = "missing_artifact"
+        else:
+            availability_state = "unavailable"
+            reason = "unavailable"
+    else:
+        artifact_path = _trim_text(normalized_summary.get("screenshot_path", ""), limit=320)
+        bundle_path = _trim_text(normalized_summary.get("bundle_path", ""), limit=320)
+        summary_text = _trim_text(normalized_summary.get("summary", ""), limit=220)
+        if artifact_path or bundle_path:
+            availability_state = "pruned"
+            reason = "pruned"
+        elif _trim_text(evidence_id or normalized_summary.get("evidence_id", ""), limit=80):
+            availability_state = "not_found"
+            reason = "not_found"
+
+    return normalize_desktop_evidence_artifact(
+        {
+            "evidence_id": _trim_text(evidence_id or normalized_bundle.get("evidence_id", "") or normalized_summary.get("evidence_id", ""), limit=80),
+            "artifact_available": artifact_available,
+            "artifact_type": artifact_type,
+            "artifact_path": artifact_path,
+            "artifact_name": Path(artifact_path).name if artifact_path else "",
+            "availability_state": availability_state,
+            "reason": reason,
+            "can_preview": bool(artifact_available and str(artifact_type).startswith("image/") and str(content_path).strip()),
+            "content_path": _trim_text(content_path, limit=240),
+            "bundle_path": bundle_path,
+            "summary": summary_text,
+        }
+    )
 
 
 def _title_match_score(summary: Dict[str, Any], text: str) -> int:
@@ -752,6 +818,23 @@ class DesktopEvidenceStore:
             active_window_title=active_window_title,
             target_window_title=target_window_title,
         )
+
+    def artifact_metadata(self, evidence_id: str, *, content_path: str = "") -> Dict[str, Any]:
+        lookup = _trim_text(evidence_id, limit=80)
+        if not lookup:
+            return describe_evidence_artifact({}, content_path=content_path, evidence_id="")
+        bundle = self.load_bundle(lookup)
+        summary = self.summary_for(lookup)
+        return describe_evidence_artifact(bundle, summary=summary, content_path=content_path, evidence_id=lookup)
+
+    def artifact_file_path(self, evidence_id: str) -> Path | None:
+        metadata = self.artifact_metadata(evidence_id)
+        if not metadata.get("artifact_available", False):
+            return None
+        candidate = Path(str(metadata.get("artifact_path", "")).strip())
+        if not candidate.exists() or not candidate.is_file():
+            return None
+        return candidate
 
     def find_by_observation_token(self, token: str) -> Dict[str, Any]:
         lookup = _trim_text(token, limit=120)

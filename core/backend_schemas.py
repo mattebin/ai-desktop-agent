@@ -367,3 +367,23 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
         "backend": _trim_text(value.get("backend", ""), limit=120),
         "selection_reason": _normalize_reason(value.get("selection_reason", "selected"), default="selected"),
     }
+
+
+def normalize_desktop_evidence_artifact(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    availability_state = _trim_text(value.get("availability_state", ""), limit=40).lower() or "unavailable"
+    if availability_state not in {"available", "missing", "pruned", "unavailable", "not_found"}:
+        availability_state = "unavailable"
+    return {
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "artifact_available": _coerce_bool(value.get("artifact_available", False), False),
+        "artifact_type": _trim_text(value.get("artifact_type", ""), limit=80),
+        "artifact_path": _trim_text(value.get("artifact_path", ""), limit=320),
+        "artifact_name": _trim_text(value.get("artifact_name", ""), limit=120),
+        "availability_state": availability_state,
+        "reason": _normalize_reason(value.get("reason", availability_state), default="unavailable"),
+        "can_preview": _coerce_bool(value.get("can_preview", False), False),
+        "content_path": _trim_text(value.get("content_path", ""), limit=240),
+        "bundle_path": _trim_text(value.get("bundle_path", ""), limit=320),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }

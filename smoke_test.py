@@ -5,6 +5,7 @@ import json
 import shutil
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 mods = [
@@ -519,6 +520,36 @@ try:
         parsed_selected = json.loads(selected_response.read().decode("utf-8"))
         if parsed_selected.get("data", {}).get("selected", {}).get("evidence_id") != "desk-smoke-3":
             raise SystemExit("Local API did not expose the expected selected desktop evidence summary.")
+
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3/artifact", timeout=5) as artifact_response:
+        parsed_artifact = json.loads(artifact_response.read().decode("utf-8"))
+        artifact_payload = parsed_artifact.get("data", {}).get("artifact", {})
+        if artifact_payload.get("evidence_id") != "desk-smoke-3" or not artifact_payload.get("artifact_available", False):
+            raise SystemExit("Local API did not expose the expected available desktop evidence artifact.")
+        if not str(artifact_payload.get("content_path", "")).endswith("/desktop/evidence/desk-smoke-3/artifact/content"):
+            raise SystemExit("Local API did not expose the expected artifact content path.")
+
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3/artifact/content", timeout=5) as artifact_content_response:
+        if artifact_content_response.read() != b"desktop evidence smoke 3":
+            raise SystemExit("Local API did not serve the expected desktop evidence artifact content.")
+
+    third_capture_path.unlink()
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3/artifact", timeout=5) as missing_artifact_response:
+        missing_payload = json.loads(missing_artifact_response.read().decode("utf-8")).get("data", {}).get("artifact", {})
+        if missing_payload.get("availability_state") != "missing":
+            raise SystemExit("Local API did not surface a missing desktop evidence artifact state after the file was removed.")
+
+    try:
+        with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3/artifact/content", timeout=5):
+            raise SystemExit("Local API artifact content route did not fail for a missing artifact.")
+    except HTTPError as exc:
+        if exc.code != 404:
+            raise
+
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-1/artifact", timeout=5) as pruned_artifact_response:
+        pruned_payload = json.loads(pruned_artifact_response.read().decode("utf-8")).get("data", {}).get("artifact", {})
+        if pruned_payload.get("availability_state") not in {"pruned", "not_found"}:
+            raise SystemExit("Local API did not surface the expected pruned/missing state for a removed evidence artifact.")
 finally:
     evidence_server.shutdown()
     desktop_evidence_module._STORE = original_evidence_store
@@ -601,6 +632,12 @@ if "Linked evidence" not in desktop_app_source or "Selected evidence" not in des
     raise SystemExit("Desktop UI App.tsx is missing the expected desktop evidence presentation surfaces.")
 if "evidence-preview" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8") or "evidence-list-footer" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
     raise SystemExit("Desktop UI styles are missing the expected compact desktop evidence presentation classes.")
+if "getDesktopEvidenceArtifact" not in desktop_api_source or "getDesktopEvidenceArtifactContentUrl" not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing the expected desktop evidence artifact helpers.")
+if "Evidence artifact" not in desktop_app_source or "View artifact" not in desktop_app_source or "artifact-viewer" not in desktop_app_source:
+    raise SystemExit("Desktop UI App.tsx is missing the expected desktop evidence artifact viewer wiring.")
+if "artifact-viewer" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8") or "artifact-preview-image" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
+    raise SystemExit("Desktop UI styles are missing the expected desktop evidence artifact viewer classes.")
 print("[OK] desktop ui scaffold")
 
 if not _session_matches_query({"title": "Inspect repo", "status": "paused", "summary": "Needs approval", "pending_approval": {"kind": "browser_checkpoint"}}, "inspect paused"):

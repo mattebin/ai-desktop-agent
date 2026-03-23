@@ -67,6 +67,7 @@ Evidence now appears in compact form in:
 - pending desktop approval surfaces via linked checkpoint evidence
 - active task/status surfaces via selected evidence and checkpoint evidence previews
 - secondary details surfaces via recent compact evidence summaries
+- on-demand artifact viewing from selected, checkpoint, and recent evidence entries when a retained screenshot is available
 
 Presentation rules:
 
@@ -74,6 +75,7 @@ Presentation rules:
 - prefer selected/checkpoint evidence references over raw bundles
 - keep retained artifact paths secondary
 - handle missing, partial, or pruned evidence explicitly without inflating the main chat surface
+- only open retained artifacts on demand; do not auto-expand screenshots into the main task surface
 
 ## Why this matters
 

@@ -95,6 +95,7 @@ Those summaries now feed compact UI/client presentation too:
 - desktop approvals show linked evidence context
 - active task/status surfaces show selected/checkpoint evidence previews
 - secondary details surfaces can inspect recent evidence summaries without raw bundle spam
+- retained evidence artifacts can be viewed on demand from those summary surfaces without auto-expanding screenshots into the main experience
 
 Current non-goals:
 

@@ -50,6 +50,20 @@ export type EvidenceSummary = {
   selection_reason?: string;
 };
 
+export type EvidenceArtifact = {
+  evidence_id?: string;
+  artifact_available?: boolean;
+  artifact_type?: string;
+  artifact_path?: string;
+  artifact_name?: string;
+  availability_state?: string;
+  reason?: string;
+  can_preview?: boolean;
+  content_path?: string;
+  bundle_path?: string;
+  summary?: string;
+};
+
 export type SessionMessage = {
   message_id?: string;
   created_at?: string;
@@ -305,6 +319,10 @@ export type DesktopEvidencePayload = {
   };
 };
 
+export type DesktopEvidenceArtifactPayload = {
+  artifact?: EvidenceArtifact;
+};
+
 function normalizeBaseUrl(baseUrl: string): string {
   return String(baseUrl || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
 }
@@ -447,6 +465,14 @@ export async function getAlerts(baseUrl: string, sessionId = "", limit = 8): Pro
 
 export async function getDesktopEvidence(baseUrl: string, limit = 8): Promise<DesktopEvidencePayload> {
   return request<DesktopEvidencePayload>(baseUrl, "/desktop/evidence", undefined, { limit });
+}
+
+export async function getDesktopEvidenceArtifact(baseUrl: string, evidenceId: string): Promise<DesktopEvidenceArtifactPayload> {
+  return request<DesktopEvidenceArtifactPayload>(baseUrl, `/desktop/evidence/${encodeURIComponent(evidenceId)}/artifact`);
+}
+
+export function getDesktopEvidenceArtifactContentUrl(baseUrl: string, evidenceId: string): string {
+  return buildUrl(baseUrl, `/desktop/evidence/${encodeURIComponent(evidenceId)}/artifact/content`);
 }
 
 export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: RunEntry[] }> {

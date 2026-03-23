@@ -886,7 +886,10 @@ a {
 .evidence-preview-header,
 .evidence-preview-footer,
 .evidence-preview-meta,
-.evidence-list-footer {
+.evidence-list-footer,
+.evidence-preview-actions,
+.artifact-viewer-header,
+.artifact-viewer-footer {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -894,7 +897,9 @@ a {
 }
 
 .evidence-preview-header,
-.evidence-preview-footer {
+.evidence-preview-footer,
+.artifact-viewer-header,
+.artifact-viewer-footer {
   justify-content: space-between;
 }
 
@@ -953,6 +958,11 @@ a {
   color: var(--muted-soft);
   border: 1px solid var(--border-soft);
   font-family: var(--font-mono);
+}
+
+.evidence-action-button {
+  padding: 8px 12px;
+  font-size: 0.82rem;
 }
 
 .approval-footnote {
@@ -1039,6 +1049,80 @@ a {
 
 .evidence-list-footer {
   margin-top: 10px;
+}
+
+.artifact-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.artifact-viewer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay-bg);
+  backdrop-filter: blur(8px);
+}
+
+.artifact-viewer-panel {
+  position: relative;
+  z-index: 1;
+  width: min(980px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 22px;
+  border-radius: 28px;
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
+}
+
+.artifact-viewer-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.artifact-viewer-empty {
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 24px;
+  border-radius: 22px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.artifact-viewer-empty-error {
+  background: var(--error-panel-bg);
+}
+
+.artifact-viewer-empty h4,
+.artifact-viewer-empty p {
+  margin: 0;
+}
+
+.artifact-preview-shell {
+  display: flex;
+  justify-content: center;
+  min-height: 280px;
+  padding: 12px;
+  border-radius: 22px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.artifact-preview-image {
+  max-width: 100%;
+  max-height: 70dvh;
+  object-fit: contain;
+  border-radius: 18px;
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.18);
 }
 
 @media (max-width: 1380px) {

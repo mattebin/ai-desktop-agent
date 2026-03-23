@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -263,6 +264,14 @@ def _desktop_evidence_selection_payload(parsed) -> Dict[str, Any]:
     }
 
 
+def _desktop_evidence_artifact_payload(evidence_id: str, *, content_path: str = "") -> Dict[str, Any]:
+    store = get_desktop_evidence_store()
+    metadata = store.artifact_metadata(evidence_id, content_path=content_path)
+    return {
+        "artifact": metadata,
+    }
+
+
 class LocalOperatorApiServer:
     def __init__(
         self,
@@ -321,6 +330,16 @@ class LocalOperatorApiServer:
                 self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _send_file(self, path: Path, *, content_type: str):
+                data = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(data)
 
             def _send_sse_headers(self):
                 self.send_response(200)
@@ -558,6 +577,30 @@ class LocalOperatorApiServer:
                     return
 
                 evidence_segments = self._path_segments(path)
+                if len(evidence_segments) == 5 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence" and evidence_segments[3] == "artifact" and evidence_segments[4] == "content":
+                    evidence_id = unquote(evidence_segments[2])
+                    artifact_file = get_desktop_evidence_store().artifact_file_path(evidence_id)
+                    if not artifact_file:
+                        self._respond_error(404, f"Desktop evidence artifact is unavailable: {evidence_id}")
+                        return
+                    metadata = get_desktop_evidence_store().artifact_metadata(evidence_id)
+                    content_type = _trim_text(metadata.get("artifact_type", ""), limit=80) or "application/octet-stream"
+                    try:
+                        self._send_file(artifact_file, content_type=content_type)
+                    except FileNotFoundError:
+                        self._respond_error(404, f"Desktop evidence artifact is unavailable: {evidence_id}")
+                    return
+
+                if len(evidence_segments) == 4 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence" and evidence_segments[3] == "artifact":
+                    evidence_id = unquote(evidence_segments[2])
+                    self._respond_ok(
+                        _desktop_evidence_artifact_payload(
+                            evidence_id,
+                            content_path=f"/desktop/evidence/{evidence_id}/artifact/content",
+                        )
+                    )
+                    return
+
                 if len(evidence_segments) == 3 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence":
                     evidence_id = unquote(evidence_segments[2])
                     bundle = get_desktop_evidence_store().load_bundle(evidence_id)

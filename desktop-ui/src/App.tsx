@@ -9,9 +9,12 @@ import {
   BrowserState,
   createSession,
   DesktopRuntimeStatus,
+  EvidenceArtifact,
   EvidenceSummary,
   ensureLocalApi,
   getAlerts,
+  getDesktopEvidenceArtifact,
+  getDesktopEvidenceArtifactContentUrl,
   getDesktopEvidence,
   getQueueState,
   getRecentRuns,
@@ -55,6 +58,16 @@ type ControlSnapshot = {
 };
 
 type ThemeMode = "light" | "dark";
+
+type ArtifactViewerState = {
+  open: boolean;
+  loading: boolean;
+  requestedEvidenceId: string;
+  sourceLabel: string;
+  heading: string;
+  artifact: EvidenceArtifact | null;
+  error: string;
+};
 
 const QUICK_PROMPTS = [
   "Inspect this project and explain the main architecture.",
@@ -473,14 +486,38 @@ function evidenceNote(preview?: EvidenceSummary | null): string {
   return "";
 }
 
+function artifactStateMessage(artifact?: EvidenceArtifact | null): string {
+  if (!artifact) {
+    return "";
+  }
+  const state = String(artifact.availability_state || "").toLowerCase();
+  if (state === "available") {
+    return "Retained screenshot available.";
+  }
+  if (state === "missing") {
+    return "The retained screenshot is no longer available in local storage.";
+  }
+  if (state === "pruned") {
+    return "This retained screenshot was pruned from the local evidence store.";
+  }
+  if (state === "not_found") {
+    return "This evidence reference is no longer available in the local evidence store.";
+  }
+  return "This evidence bundle does not currently include a retained artifact.";
+}
+
 function EvidencePreviewCard({
   title,
   preview,
   emptyText,
+  onViewArtifact,
+  artifactLoading,
 }: {
   title: string;
   preview?: EvidenceSummary | null;
   emptyText?: string;
+  onViewArtifact?: (preview: EvidenceSummary) => void;
+  artifactLoading?: boolean;
 }) {
   if (!hasEvidencePreview(preview)) {
     if (!emptyText) {
@@ -527,7 +564,14 @@ function EvidencePreviewCard({
       ) : null}
       <div className="evidence-preview-footer">
         {preview?.evidence_id ? <span className="evidence-reference">Ref {preview.evidence_id}</span> : null}
-        {preview?.selection_reason ? <span className="muted-label">{plainTextPreview(preview.selection_reason, 26)}</span> : null}
+        <div className="evidence-preview-actions">
+          {preview?.selection_reason ? <span className="muted-label">{plainTextPreview(preview.selection_reason, 26)}</span> : null}
+          {onViewArtifact && preview?.evidence_id && (preview.has_screenshot || preview.has_artifact) ? (
+            <button className="ghost-button evidence-action-button" onClick={() => onViewArtifact(preview)} type="button" disabled={artifactLoading}>
+              {artifactLoading ? "Loading..." : "View artifact"}
+            </button>
+          ) : null}
+        </div>
       </div>
       {note ? <p className="evidence-preview-note">{note}</p> : null}
     </div>
@@ -755,6 +799,15 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
   const [loadingConversation, setLoadingConversation] = useState(false);
+  const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
+    open: false,
+    loading: false,
+    requestedEvidenceId: "",
+    sourceLabel: "",
+    heading: "",
+    artifact: null,
+    error: "",
+  });
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [streamNote, setStreamNote] = useState("Waiting for live updates");
   const [isNearTranscriptBottom, setIsNearTranscriptBottom] = useState(true);
@@ -1276,6 +1329,55 @@ export default function App() {
     }
   }
 
+  async function handleViewEvidenceArtifact(preview: EvidenceSummary | null | undefined, sourceLabel: string) {
+    if (!apiBaseUrl || !preview?.evidence_id) {
+      return;
+    }
+    setArtifactViewer({
+      open: true,
+      loading: true,
+      requestedEvidenceId: preview.evidence_id,
+      sourceLabel,
+      heading: evidenceSummaryText(preview),
+      artifact: null,
+      error: "",
+    });
+    try {
+      const payload = await getDesktopEvidenceArtifact(apiBaseUrl, preview.evidence_id);
+      setArtifactViewer({
+        open: true,
+        loading: false,
+        requestedEvidenceId: preview.evidence_id,
+        sourceLabel,
+        heading: evidenceSummaryText(preview),
+        artifact: payload.artifact || null,
+        error: "",
+      });
+    } catch (error) {
+      setArtifactViewer({
+        open: true,
+        loading: false,
+        requestedEvidenceId: preview.evidence_id,
+        sourceLabel,
+        heading: evidenceSummaryText(preview),
+        artifact: null,
+        error: error instanceof Error ? error.message : "Unable to load the retained artifact.",
+      });
+    }
+  }
+
+  function closeArtifactViewer() {
+    setArtifactViewer({
+      open: false,
+      loading: false,
+      requestedEvidenceId: "",
+      sourceLabel: "",
+      heading: "",
+      artifact: null,
+      error: "",
+    });
+  }
+
   async function handleRefresh() {
     if (bootState !== "ready") {
       setBootstrapTick((current) => current + 1);
@@ -1479,6 +1581,8 @@ export default function App() {
               <EvidencePreviewCard
                 title="Linked evidence"
                 preview={pendingApprovalEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Approval evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === pendingApprovalEvidence?.evidence_id}
                 emptyText={
                   pendingApproval?.evidence_summary
                     ? plainTextPreview(pendingApproval.evidence_summary, 180)
@@ -1525,9 +1629,18 @@ export default function App() {
             <EvidencePreviewCard
               title="Selected evidence"
               preview={selectedDesktopEvidence}
+              onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+              artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
               emptyText="No desktop evidence is selected for the current task."
             />
-            {distinctCheckpointEvidence ? <EvidencePreviewCard title="Checkpoint evidence" preview={distinctCheckpointEvidence} /> : null}
+            {distinctCheckpointEvidence ? (
+              <EvidencePreviewCard
+                title="Checkpoint evidence"
+                preview={distinctCheckpointEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+              />
+            ) : null}
           </div>
         </section>
 
@@ -1590,9 +1703,18 @@ export default function App() {
                 <EvidencePreviewCard
                   title="Selected for this task"
                   preview={selectedDesktopEvidence}
+                  onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+                  artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
                   emptyText="No selected desktop evidence for the current task."
                 />
-                {distinctCheckpointEvidence ? <EvidencePreviewCard title="Linked checkpoint" preview={distinctCheckpointEvidence} /> : null}
+                {distinctCheckpointEvidence ? (
+                  <EvidencePreviewCard
+                    title="Linked checkpoint"
+                    preview={distinctCheckpointEvidence}
+                    onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                    artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+                  />
+                ) : null}
                 <div className="mini-list evidence-mini-list">
                   {controlData.desktopEvidence.map((item) => (
                     <article
@@ -1608,6 +1730,11 @@ export default function App() {
                         {item.evidence_id ? <span className="evidence-reference">Ref {item.evidence_id}</span> : null}
                         {item.has_screenshot ? <span className="evidence-chip evidence-chip-soft">Screenshot</span> : null}
                         {item.is_partial ? <span className="evidence-chip">Partial</span> : null}
+                        {item.evidence_id && (item.has_screenshot || item.has_artifact) ? (
+                          <button className="ghost-button evidence-action-button" onClick={() => void handleViewEvidenceArtifact(item, "Recent evidence")} type="button">
+                            View artifact
+                          </button>
+                        ) : null}
                       </div>
                     </article>
                   ))}
@@ -1682,6 +1809,57 @@ export default function App() {
                 </div>
               </section>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {artifactViewer.open ? (
+        <div className="artifact-viewer">
+          <div className="artifact-viewer-backdrop" onClick={closeArtifactViewer} />
+          <section className="artifact-viewer-panel">
+            <header className="artifact-viewer-header">
+              <div>
+                <div className="eyebrow">{artifactViewer.sourceLabel || "Desktop evidence"}</div>
+                <h3>Evidence artifact</h3>
+                <p className="secondary-copy">{plainTextPreview(artifactViewer.heading || artifactViewer.artifact?.summary || "Desktop evidence artifact", 180)}</p>
+              </div>
+              <button className="ghost-button" onClick={closeArtifactViewer} type="button">
+                Close
+              </button>
+            </header>
+
+            <div className="artifact-viewer-body">
+              {artifactViewer.loading ? (
+                <div className="artifact-viewer-empty">
+                  <div className="spinner" />
+                  <p>Loading retained evidence...</p>
+                </div>
+              ) : artifactViewer.error ? (
+                <div className="artifact-viewer-empty artifact-viewer-empty-error">
+                  <h4>Unable to load the artifact</h4>
+                  <p>{artifactViewer.error}</p>
+                </div>
+              ) : artifactViewer.artifact?.artifact_available && artifactViewer.artifact?.can_preview && artifactViewer.artifact?.evidence_id ? (
+                <div className="artifact-preview-shell">
+                  <img
+                    alt={artifactViewer.heading || artifactViewer.artifact.summary || "Desktop evidence artifact"}
+                    className="artifact-preview-image"
+                    src={getDesktopEvidenceArtifactContentUrl(apiBaseUrl, artifactViewer.artifact.evidence_id)}
+                  />
+                </div>
+              ) : (
+                <div className="artifact-viewer-empty">
+                  <h4>Artifact unavailable</h4>
+                  <p>{artifactStateMessage(artifactViewer.artifact)}</p>
+                </div>
+              )}
+            </div>
+
+            <footer className="artifact-viewer-footer">
+              {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
+              {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
+              {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
+            </footer>
           </section>
         </div>
       ) : null}
