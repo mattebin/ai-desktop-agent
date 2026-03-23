@@ -13,6 +13,8 @@ The desktop evidence layer creates a bounded, serialization-friendly evidence bu
 
 It is intended to strengthen inspection, auditability, and future action grounding without widening the current desktop action scope.
 
+The layer now also includes a compact summary/index/selection helper on top of raw bundles so recent evidence can be referenced without fetching full bundle JSON everywhere.
+
 ## Current evidence sources
 
 - bounded window observation via the desktop window backend
@@ -60,3 +62,4 @@ Current deterministic local coverage checks:
 - evidence serialization
 - state snapshot visibility
 - local API evidence exposure
+- compact summary generation and selection heuristics

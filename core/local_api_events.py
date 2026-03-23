@@ -56,6 +56,7 @@ def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
         "target": _trim_text(pending.get("target", ""), limit=180),
         "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
         "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
+        "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
     }
 
 
@@ -96,6 +97,18 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
         "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
         "evidence_reason": _trim_text(desktop.get("evidence_reason", ""), limit=80),
         "evidence_timestamp": _trim_text(desktop.get("evidence_timestamp", ""), limit=40),
+        "selected_evidence": {
+            "evidence_id": _trim_text(desktop.get("selected_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("selected_evidence", {}).get("summary", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=220),
+            "reason": _trim_text(desktop.get("selected_evidence", {}).get("reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
+            "selection_reason": _trim_text(desktop.get("selected_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
+        },
+        "checkpoint_evidence": {
+            "evidence_id": _trim_text(desktop.get("checkpoint_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("checkpoint_evidence", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=220),
+            "reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
+            "selection_reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
+        },
     }
 
 

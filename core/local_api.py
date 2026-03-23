@@ -23,7 +23,7 @@ from core.local_api_events import (
     DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
     LocalApiEventStream,
 )
-from core.desktop_evidence import get_desktop_evidence_store
+from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -129,6 +129,8 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "target": _trim_text(pending.get("target", ""), limit=180),
             "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
             "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
+            "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
+            "evidence_preview": _compact_evidence_payload(pending.get("evidence_preview", {})),
         },
         "active_task": snapshot.get("active_task", {}),
         "browser": {
@@ -154,6 +156,8 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_summary": _trim_text(desktop.get("evidence_summary", ""), limit=220),
             "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
             "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
+            "selected_evidence": _compact_evidence_payload(desktop.get("selected_evidence", {})),
+            "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
         },
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
@@ -207,11 +211,55 @@ def _watch_payload(watch_state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _compact_evidence_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    preview = compact_evidence_preview(value if isinstance(value, dict) else {})
+    return {
+        "evidence_id": _trim_text(preview.get("evidence_id", ""), limit=80),
+        "timestamp": _trim_text(preview.get("timestamp", ""), limit=40),
+        "evidence_kind": _trim_text(preview.get("evidence_kind", ""), limit=60),
+        "reason": _trim_text(preview.get("reason", ""), limit=40),
+        "summary": _trim_text(preview.get("summary", ""), limit=220),
+        "active_window_title": _trim_text(preview.get("active_window_title", ""), limit=180),
+        "active_window_process": _trim_text(preview.get("active_window_process", ""), limit=120),
+        "target_window_title": _trim_text(preview.get("target_window_title", ""), limit=180),
+        "has_screenshot": bool(preview.get("has_screenshot", False)),
+        "has_artifact": bool(preview.get("has_artifact", False)),
+        "screenshot_scope": _trim_text(preview.get("screenshot_scope", ""), limit=60),
+        "ui_evidence_present": bool(preview.get("ui_evidence_present", False)),
+        "ui_control_count": _coerce_int(preview.get("ui_control_count", 0), 0, minimum=0, maximum=128),
+        "is_partial": bool(preview.get("is_partial", False)),
+        "recency_seconds": _coerce_int(preview.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "selection_reason": _trim_text(preview.get("selection_reason", ""), limit=40),
+    }
+
+
 def _desktop_evidence_payload(limit: int = 8) -> Dict[str, Any]:
     store = get_desktop_evidence_store()
     return {
         "recent": store.recent_refs(limit=limit),
+        "recent_summaries": [_compact_evidence_payload(item) for item in store.recent_summaries(limit=limit)],
         "status": store.status_snapshot(),
+    }
+
+
+def _desktop_evidence_selection_payload(parsed) -> Dict[str, Any]:
+    query = parse_qs(parsed.query)
+    store = get_desktop_evidence_store()
+    result = store.select_summary(
+        strategy=str(query.get("strategy", ["latest"])[0]).strip(),
+        evidence_id=str(query.get("evidence_id", [""])[0]).strip(),
+        observation_token=str(query.get("observation_token", [""])[0]).strip(),
+        active_window_title=str(query.get("active_window_title", [""])[0]).strip(),
+        target_window_title=str(query.get("target_window_title", [""])[0]).strip(),
+        checkpoint_evidence_id=str(query.get("checkpoint_evidence_id", [""])[0]).strip(),
+        checkpoint_target=str(query.get("checkpoint_target", [""])[0]).strip(),
+        task_evidence_id=str(query.get("task_evidence_id", [""])[0]).strip(),
+    )
+    return {
+        "strategy": _trim_text(result.get("strategy", ""), limit=60),
+        "reason": _trim_text(result.get("reason", ""), limit=40),
+        "candidate_count": _coerce_int(result.get("candidate_count", 0), 0, minimum=0, maximum=10_000),
+        "selected": _compact_evidence_payload(result.get("selected", {})),
     }
 
 
@@ -503,6 +551,10 @@ class LocalOperatorApiServer:
                 if path == "/desktop/evidence":
                     limit = self._query_limit(parsed, default=8, maximum=24)
                     self._respond_ok(_desktop_evidence_payload(limit=limit))
+                    return
+
+                if path == "/desktop/evidence/selected":
+                    self._respond_ok(_desktop_evidence_selection_payload(parsed))
                     return
 
                 evidence_segments = self._path_segments(path)

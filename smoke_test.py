@@ -56,7 +56,15 @@ if failed:
 
 from core.alerts import AlertStore
 import core.desktop_evidence as desktop_evidence_module
-from core.desktop_evidence import DesktopEvidenceStore, build_desktop_evidence_bundle
+from core.desktop_evidence import (
+    DesktopEvidenceStore,
+    build_desktop_evidence_bundle,
+    compact_evidence_preview,
+    select_checkpoint_evidence,
+    select_recent_evidence,
+    select_task_evidence,
+    summarize_evidence_bundle,
+)
 from core.chat_sessions import ChatSessionManager
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
@@ -329,6 +337,7 @@ first_bundle = build_desktop_evidence_bundle(
     },
 )
 first_bundle["evidence_id"] = "desk-smoke-1"
+first_bundle["timestamp"] = "2026-03-23T10:00:00+01:00"
 first_ref = temp_evidence_store.record_bundle(first_bundle)
 loaded_first_bundle = temp_evidence_store.load_bundle("desk-smoke-1")
 if loaded_first_bundle.get("evidence_id") != "desk-smoke-1":
@@ -340,14 +349,15 @@ if json.loads(json.dumps(loaded_first_bundle)).get("evidence_id") != "desk-smoke
 
 second_bundle = build_desktop_evidence_bundle(
     source_action="desktop_get_active_window",
-    active_window={"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"},
-    windows=[{"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"}],
+    active_window={"title": "Partial Evidence Window", "window_id": "0x00123457", "process_name": "pythonw.exe"},
+    windows=[{"title": "Partial Evidence Window", "window_id": "0x00123457", "process_name": "pythonw.exe"}],
     observation_token="desktop-evidence-smoke-2",
     screenshot={},
-    ui_evidence={"backend": "pywinauto", "target": "Evidence Smoke Window", "controls": []},
+    ui_evidence={"backend": "pywinauto", "target": "Partial Evidence Window", "controls": []},
     errors=["screenshot backend unavailable"],
 )
 second_bundle["evidence_id"] = "desk-smoke-2"
+second_bundle["timestamp"] = "2026-03-23T10:01:00+01:00"
 second_ref = temp_evidence_store.record_bundle(second_bundle)
 loaded_second_bundle = temp_evidence_store.load_bundle("desk-smoke-2")
 if loaded_second_bundle.get("reason") != "partial":
@@ -357,8 +367,8 @@ third_capture_path = temp_evidence_store.artifact_path("desk-smoke-3", extension
 third_capture_path.write_bytes(b"desktop evidence smoke 3")
 third_bundle = build_desktop_evidence_bundle(
     source_action="desktop_capture_screenshot",
-    active_window={"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"},
-    windows=[{"title": "Evidence Smoke Window", "window_id": "0x00123456", "process_name": "python.exe"}],
+    active_window={"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+    windows=[{"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"}],
     observation_token="desktop-evidence-smoke-3",
     screenshot={
         "backend": "mss",
@@ -368,6 +378,7 @@ third_bundle = build_desktop_evidence_bundle(
     },
 )
 third_bundle["evidence_id"] = "desk-smoke-3"
+third_bundle["timestamp"] = "2026-03-23T10:02:00+01:00"
 third_ref = temp_evidence_store.record_bundle(third_bundle)
 if temp_evidence_store.load_bundle("desk-smoke-1"):
     raise SystemExit("DesktopEvidenceStore did not prune an older bundle when retention was exceeded.")
@@ -379,6 +390,49 @@ if temp_evidence_store.find_by_observation_token("desktop-evidence-smoke-3").get
     raise SystemExit("DesktopEvidenceStore did not resolve an evidence ref by observation token.")
 if temp_evidence_store.status_snapshot().get("latest", {}).get("evidence_id") != "desk-smoke-3":
     raise SystemExit("DesktopEvidenceStore did not expose the latest evidence status correctly.")
+
+summary_first = summarize_evidence_bundle(loaded_first_bundle)
+summary_second = summarize_evidence_bundle(loaded_second_bundle)
+summary_third = summarize_evidence_bundle(temp_evidence_store.load_bundle("desk-smoke-3"))
+if not summary_first.get("has_screenshot", False) or not summary_first.get("ui_evidence_present", False):
+    raise SystemExit("Desktop evidence summary did not preserve screenshot/UI evidence presence.")
+if summary_second.get("reason") != "partial" or not summary_second.get("is_partial", False):
+    raise SystemExit("Desktop evidence summary did not preserve partial evidence state.")
+if compact_evidence_preview(summary_third).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("compact_evidence_preview() did not preserve the expected evidence id.")
+
+recent_summaries = temp_evidence_store.recent_summaries(limit=8)
+if len(recent_summaries) != 2:
+    raise SystemExit("DesktopEvidenceStore did not expose the expected bounded recent summaries.")
+latest_selection = select_recent_evidence(recent_summaries, strategy="latest")
+if latest_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_recent_evidence(latest) did not choose the most recent evidence.")
+latest_screenshot_selection = select_recent_evidence(recent_summaries, strategy="latest_with_screenshot")
+if latest_screenshot_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_recent_evidence(latest_with_screenshot) did not choose the latest screenshot evidence.")
+latest_partial_selection = select_recent_evidence(recent_summaries, strategy="latest_partial")
+if latest_partial_selection.get("selected", {}).get("evidence_id") != "desk-smoke-2":
+    raise SystemExit("select_recent_evidence(latest_partial) did not choose the latest partial evidence.")
+window_selection = select_recent_evidence(recent_summaries, strategy="window_title", active_window_title="Approval Target Window")
+if window_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_recent_evidence(window_title) did not match the expected window title.")
+checkpoint_selection = select_checkpoint_evidence(
+    recent_summaries,
+    checkpoint_evidence_id="desk-smoke-3",
+    checkpoint_target="Approval Target Window",
+)
+if checkpoint_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_checkpoint_evidence() did not choose the checkpoint-linked evidence.")
+task_selection = select_task_evidence(
+    recent_summaries,
+    task_evidence_id="desk-smoke-2",
+    active_window_title="Partial Evidence Window",
+)
+if task_selection.get("selected", {}).get("evidence_id") != "desk-smoke-2":
+    raise SystemExit("select_task_evidence() did not choose the task-linked evidence.")
+
+original_evidence_store = getattr(desktop_evidence_module, "_STORE", None)
+desktop_evidence_module._STORE = temp_evidence_store
 
 desktop_state = TaskState("desktop evidence smoke")
 desktop_state.update_memory_from_tool(
@@ -406,9 +460,40 @@ if desktop_evidence_snapshot.get("desktop", {}).get("evidence_id") != "desk-smok
     raise SystemExit("TaskState did not surface desktop evidence in the authoritative control snapshot.")
 if desktop_evidence_snapshot.get("desktop", {}).get("evidence_bundle_path", "") != third_ref.get("bundle_path", ""):
     raise SystemExit("TaskState did not preserve the desktop evidence bundle path.")
+if desktop_evidence_snapshot.get("desktop", {}).get("selected_evidence", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("TaskState did not surface the selected desktop evidence summary.")
 
-original_evidence_store = getattr(desktop_evidence_module, "_STORE", None)
-desktop_evidence_module._STORE = temp_evidence_store
+desktop_checkpoint_summary_state = TaskState("desktop checkpoint evidence smoke")
+desktop_checkpoint_summary_state.update_memory_from_tool(
+    "desktop_click_point",
+    {
+        "ok": False,
+        "paused": True,
+        "approval_required": True,
+        "checkpoint_required": True,
+        "checkpoint_reason": "Approval required before clicking.",
+        "checkpoint_tool": "desktop_click_point",
+        "checkpoint_target": "Approval Target Window",
+        "checkpoint_resume_args": {"x": 12, "y": 18, "observation_token": "desktop-evidence-smoke-3"},
+        "summary": "Approval required before clicking.",
+        "desktop_state": {
+            "active_window": {
+                "title": "Approval Target Window",
+                "window_id": "0x00123458",
+                "process_name": "notepad.exe",
+            },
+            "windows": [{"title": "Approval Target Window"}],
+            "observation_token": "desktop-evidence-smoke-3",
+            "observed_at": "2026-03-23T10:02:00",
+        },
+        "desktop_evidence_ref": third_ref,
+        "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
+    },
+)
+checkpoint_snapshot = desktop_checkpoint_summary_state.get_control_snapshot()
+if checkpoint_snapshot.get("pending_approval", {}).get("evidence_preview", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("TaskState did not surface checkpoint-linked evidence in pending approval state.")
+
 evidence_server = LocalOperatorApiServer(port=0)
 evidence_server.start_in_thread()
 try:
@@ -417,13 +502,23 @@ try:
         recent_items = parsed_evidence.get("data", {}).get("recent", [])
         if not recent_items or recent_items[-1].get("evidence_id") != "desk-smoke-3":
             raise SystemExit("Local API did not expose recent desktop evidence references.")
+        recent_summaries_payload = parsed_evidence.get("data", {}).get("recent_summaries", [])
+        if not recent_summaries_payload or recent_summaries_payload[-1].get("evidence_id") != "desk-smoke-3":
+            raise SystemExit("Local API did not expose recent desktop evidence summaries.")
         if parsed_evidence.get("data", {}).get("status", {}).get("root", "") != str(temp_evidence_root):
             raise SystemExit("Local API did not expose the desktop evidence store status.")
+        if parsed_evidence.get("data", {}).get("status", {}).get("latest_summary", {}).get("evidence_id") != "desk-smoke-3":
+            raise SystemExit("Local API did not expose the latest desktop evidence summary.")
 
     with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-3", timeout=5) as bundle_response:
         parsed_bundle = json.loads(bundle_response.read().decode("utf-8"))
         if parsed_bundle.get("data", {}).get("bundle", {}).get("evidence_id") != "desk-smoke-3":
             raise SystemExit("Local API did not expose the requested desktop evidence bundle.")
+
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/selected?strategy=latest_with_screenshot", timeout=5) as selected_response:
+        parsed_selected = json.loads(selected_response.read().decode("utf-8"))
+        if parsed_selected.get("data", {}).get("selected", {}).get("evidence_id") != "desk-smoke-3":
+            raise SystemExit("Local API did not expose the expected selected desktop evidence summary.")
 finally:
     evidence_server.shutdown()
     desktop_evidence_module._STORE = original_evidence_store

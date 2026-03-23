@@ -931,6 +931,29 @@ class TaskState:
             if len(uncertainties) >= 2:
                 break
 
+        selected_evidence: Dict[str, Any] = {}
+        checkpoint_evidence: Dict[str, Any] = {}
+        try:
+            from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
+
+            store = get_desktop_evidence_store()
+            selected_result = store.select_summary(
+                task_evidence_id=self.desktop_last_evidence_id,
+                observation_token=self.desktop_observation_token,
+                active_window_title=self.desktop_active_window_title,
+                target_window_title=self.desktop_last_target_window,
+            )
+            checkpoint_result = store.select_summary(
+                checkpoint_evidence_id=self.desktop_checkpoint_evidence_id,
+                checkpoint_target=self.desktop_checkpoint_target,
+                active_window_title=self.desktop_active_window_title,
+            )
+            selected_evidence = compact_evidence_preview(selected_result.get("selected", {}))
+            checkpoint_evidence = compact_evidence_preview(checkpoint_result.get("selected", {}))
+        except Exception:
+            selected_evidence = {}
+            checkpoint_evidence = {}
+
         return {
             "windows": self._normalize_values(self.desktop_windows[-limit:], limit=limit, text_limit=180),
             "active_window_title": self.desktop_active_window_title[:180],
@@ -950,11 +973,13 @@ class TaskState:
             "evidence_bundle_path": self.desktop_last_evidence_bundle_path[:320],
             "evidence_reason": self.desktop_last_evidence_reason[:40],
             "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
+            "selected_evidence": selected_evidence,
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
             "checkpoint_tool": self.desktop_checkpoint_tool[:80],
             "checkpoint_target": self.desktop_checkpoint_target[:180],
             "checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
+            "checkpoint_evidence": checkpoint_evidence,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
             "uncertainties": uncertainties,
@@ -2107,6 +2132,8 @@ class TaskState:
             "summary": "",
             "approval_status": "",
             "evidence_id": "",
+            "evidence_summary": "",
+            "evidence_preview": {},
             "target_files": [],
         }
         if browser_activity.get("checkpoint_pending"):
@@ -2119,6 +2146,8 @@ class TaskState:
                 "summary": str(browser_activity.get("expected_state", "")).strip(),
                 "approval_status": str(browser_activity.get("checkpoint_approval_status", "not approved")).strip() or "not approved",
                 "evidence_id": "",
+                "evidence_summary": "",
+                "evidence_preview": {},
                 "target_files": [],
             }
         elif desktop_activity.get("checkpoint_pending"):
@@ -2134,6 +2163,8 @@ class TaskState:
                 "summary": str(desktop_activity.get("last_action", "") or desktop_activity.get("checkpoint_target", "")).strip(),
                 "approval_status": str(desktop_activity.get("checkpoint_approval_status", "not approved")).strip() or "not approved",
                 "evidence_id": str(desktop_activity.get("checkpoint_evidence_id", "")).strip(),
+                "evidence_summary": str(desktop_activity.get("checkpoint_evidence", {}).get("summary", "")).strip(),
+                "evidence_preview": desktop_activity.get("checkpoint_evidence", {}),
                 "target_files": [],
             }
         elif (
@@ -2151,6 +2182,8 @@ class TaskState:
                 "summary": str(review_bundle.get("summary", "")).strip(),
                 "approval_status": "not approved",
                 "evidence_id": "",
+                "evidence_summary": "",
+                "evidence_preview": {},
                 "target_files": [item.get("display", "") for item in review_bundle.get("items", []) if item.get("display")],
             }
 

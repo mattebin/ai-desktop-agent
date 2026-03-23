@@ -15,6 +15,11 @@ BACKEND_REASON_CODES = {
     "partial",
     "retained",
     "pruned",
+    "selected",
+    "matched",
+    "linked",
+    "recent",
+    "no_match",
     "filesystem_event",
     "state_changed",
     "captured",
@@ -323,4 +328,42 @@ def normalize_desktop_evidence_ref(value: Dict[str, Any] | None) -> Dict[str, An
         "observation_token": _trim_text(value.get("observation_token", ""), limit=120),
         "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
         "backend": _trim_text(value.get("backend", ""), limit=120),
+    }
+
+
+def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    screen_size = value.get("screen_size", {}) if isinstance(value.get("screen_size", {}), dict) else {}
+    return {
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
+        "source_action": _trim_text(value.get("source_action", ""), limit=80),
+        "evidence_kind": _trim_text(value.get("evidence_kind", ""), limit=60),
+        "reason": _normalize_reason(value.get("reason", "collected"), default="collected"),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "active_window_class_name": _trim_text(value.get("active_window_class_name", ""), limit=120),
+        "active_window_process": _trim_text(value.get("active_window_process", ""), limit=120),
+        "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
+        "window_count": _coerce_int(value.get("window_count", 0), 0, minimum=0, maximum=128),
+        "monitor_count": _coerce_int(value.get("monitor_count", 0), 0, minimum=0, maximum=16),
+        "screen_size": {
+            "width": _coerce_int(screen_size.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(screen_size.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "window_summary": _trim_text(value.get("window_summary", ""), limit=180),
+        "screen_summary": _trim_text(value.get("screen_summary", ""), limit=180),
+        "has_screenshot": _coerce_bool(value.get("has_screenshot", False), False),
+        "has_artifact": _coerce_bool(value.get("has_artifact", False), False),
+        "screenshot_scope": _trim_text(value.get("screenshot_scope", ""), limit=60),
+        "screenshot_backend": _trim_text(value.get("screenshot_backend", ""), limit=60),
+        "screenshot_path": _trim_text(value.get("screenshot_path", ""), limit=320),
+        "bundle_path": _trim_text(value.get("bundle_path", ""), limit=320),
+        "ui_evidence_present": _coerce_bool(value.get("ui_evidence_present", False), False),
+        "ui_control_count": _coerce_int(value.get("ui_control_count", 0), 0, minimum=0, maximum=128),
+        "observation_token": _trim_text(value.get("observation_token", ""), limit=120),
+        "is_partial": _coerce_bool(value.get("is_partial", False), False),
+        "recency_seconds": _coerce_int(value.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "backend": _trim_text(value.get("backend", ""), limit=120),
+        "selection_reason": _normalize_reason(value.get("selection_reason", "selected"), default="selected"),
     }

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from core.backend_schemas import (
     normalize_desktop_evidence_ref,
+    normalize_desktop_evidence_summary,
     normalize_screen_observation,
     normalize_screenshot_observation,
     normalize_ui_evidence_observation,
@@ -42,6 +43,16 @@ def _iso_timestamp() -> str:
         return datetime.now().astimezone().isoformat(timespec="seconds")
     except Exception:
         return ""
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
 
 
 def _coerce_int(value: Any, default: int, *, minimum: int = 0, maximum: int = 100_000) -> int:
@@ -178,6 +189,302 @@ def bundle_ref(bundle: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = None) -> Dict[str, Any]:
+    normalized = _sanitize_bundle(bundle)
+    active_window = normalized.get("active_window", {}) if isinstance(normalized.get("active_window", {}), dict) else {}
+    target_window = normalized.get("target_window", {}) if isinstance(normalized.get("target_window", {}), dict) else {}
+    screenshot = normalized.get("screenshot", {}) if isinstance(normalized.get("screenshot", {}), dict) else {}
+    ui_evidence = normalized.get("ui_evidence", {}) if isinstance(normalized.get("ui_evidence", {}), dict) else {}
+    screen = normalized.get("screen", {}) if isinstance(normalized.get("screen", {}), dict) else {}
+    artifacts = normalized.get("artifacts", {}) if isinstance(normalized.get("artifacts", {}), dict) else {}
+
+    source_action = _trim_text(normalized.get("source_action", ""), limit=80)
+    has_screenshot = bool(str(screenshot.get("path", "")).strip())
+    has_artifact = bool(str(artifacts.get("screenshot_path", "")).strip() or str(screenshot.get("path", "")).strip())
+    ui_controls = ui_evidence.get("controls", []) if isinstance(ui_evidence.get("controls", []), list) else []
+    active_title = _trim_text(active_window.get("title", ""), limit=180)
+    target_title = _trim_text(target_window.get("title", ""), limit=180)
+    screen_virtual = screen.get("virtual_screen", {}) if isinstance(screen.get("virtual_screen", {}), dict) else {}
+    width = _coerce_int(screen_virtual.get("width", 0), 0, minimum=0, maximum=100_000)
+    height = _coerce_int(screen_virtual.get("height", 0), 0, minimum=0, maximum=100_000)
+    backend_label = " / ".join(
+        value
+        for value in [
+            _trim_text(normalized.get("window_backend", ""), limit=60),
+            _trim_text(normalized.get("screenshot_backend", ""), limit=60),
+            _trim_text(normalized.get("ui_evidence_backend", ""), limit=60),
+        ]
+        if value
+    )
+
+    if source_action == "desktop_capture_screenshot" or has_screenshot:
+        evidence_kind = "desktop_capture"
+    elif source_action == "desktop_focus_window":
+        evidence_kind = "window_focus"
+    elif source_action in {"desktop_get_active_window", "desktop_list_windows"}:
+        evidence_kind = "window_observation"
+    else:
+        evidence_kind = "desktop_observation"
+
+    timestamp_text = _trim_text(normalized.get("timestamp", ""), limit=40)
+    now_value = now if isinstance(now, datetime) else datetime.now().astimezone()
+    recorded_at = _parse_timestamp(timestamp_text)
+    if recorded_at is None:
+        recency_seconds = 0
+    else:
+        try:
+            recency_seconds = max(0, int((now_value - recorded_at).total_seconds()))
+        except Exception:
+            recency_seconds = 0
+
+    window_summary = _trim_text(
+        f"{int(normalized.get('window_count', 0) or 0)} visible windows; active '{active_title or 'desktop'}'",
+        limit=180,
+    )
+    if width and height:
+        screen_summary = _trim_text(
+            f"{width}x{height} across {int(screen.get('monitor_count', 0) or 0)} monitor(s)",
+            limit=180,
+        )
+    else:
+        screen_summary = _trim_text(
+            f"{int(screen.get('monitor_count', 0) or 0)} monitor(s) observed",
+            limit=180,
+        )
+
+    summary_text = _trim_text(
+        normalized.get("summary", "")
+        or (
+            f"Collected {'partial ' if normalized.get('reason') == 'partial' else ''}desktop evidence for {active_title or 'the desktop'}."
+        ),
+        limit=240,
+    )
+    return normalize_desktop_evidence_summary(
+        {
+            "evidence_id": normalized.get("evidence_id", ""),
+            "timestamp": timestamp_text,
+            "source_action": source_action,
+            "evidence_kind": evidence_kind,
+            "reason": normalized.get("reason", "partial"),
+            "summary": summary_text,
+            "active_window_title": active_title,
+            "active_window_class_name": _trim_text(active_window.get("class_name", ""), limit=120),
+            "active_window_process": _trim_text(active_window.get("process_name", ""), limit=120),
+            "target_window_title": target_title,
+            "window_count": int(normalized.get("window_count", 0) or 0),
+            "monitor_count": int(screen.get("monitor_count", 0) or 0),
+            "screen_size": {"width": width, "height": height},
+            "window_summary": window_summary,
+            "screen_summary": screen_summary,
+            "has_screenshot": has_screenshot,
+            "has_artifact": has_artifact,
+            "screenshot_scope": _trim_text(screenshot.get("scope", ""), limit=60),
+            "screenshot_backend": _trim_text(screenshot.get("backend", ""), limit=60),
+            "screenshot_path": _trim_text(artifacts.get("screenshot_path", "") or screenshot.get("path", ""), limit=320),
+            "bundle_path": _trim_text(artifacts.get("bundle_path", "") or normalized.get("bundle_path", ""), limit=320),
+            "ui_evidence_present": bool(ui_controls),
+            "ui_control_count": len(ui_controls),
+            "observation_token": _trim_text(normalized.get("observation_token", ""), limit=120),
+            "is_partial": str(normalized.get("reason", "")).strip().lower() == "partial",
+            "recency_seconds": recency_seconds,
+            "backend": backend_label,
+            "selection_reason": "selected",
+        }
+    )
+
+
+def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    summary = value if isinstance(value, dict) else {}
+    normalized = normalize_desktop_evidence_summary(summary)
+    return {
+        "evidence_id": normalized.get("evidence_id", ""),
+        "timestamp": normalized.get("timestamp", ""),
+        "evidence_kind": normalized.get("evidence_kind", ""),
+        "reason": normalized.get("reason", ""),
+        "summary": normalized.get("summary", ""),
+        "active_window_title": normalized.get("active_window_title", ""),
+        "active_window_process": normalized.get("active_window_process", ""),
+        "target_window_title": normalized.get("target_window_title", ""),
+        "has_screenshot": bool(normalized.get("has_screenshot", False)),
+        "has_artifact": bool(normalized.get("has_artifact", False)),
+        "screenshot_scope": normalized.get("screenshot_scope", ""),
+        "ui_evidence_present": bool(normalized.get("ui_evidence_present", False)),
+        "ui_control_count": int(normalized.get("ui_control_count", 0) or 0),
+        "is_partial": bool(normalized.get("is_partial", False)),
+        "recency_seconds": int(normalized.get("recency_seconds", 0) or 0),
+        "selection_reason": normalized.get("selection_reason", ""),
+    }
+
+
+def _title_match_score(summary: Dict[str, Any], text: str) -> int:
+    query = " ".join(str(text or "").lower().split())
+    if not query:
+        return 0
+    active_title = " ".join(str(summary.get("active_window_title", "")).lower().split())
+    target_title = " ".join(str(summary.get("target_window_title", "")).lower().split())
+    if active_title == query or target_title == query:
+        return 3
+    if query in active_title or query in target_title:
+        return 2
+    if active_title in query or target_title in query:
+        return 1
+    return 0
+
+
+def _rank_recent_summaries(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items = [normalize_desktop_evidence_summary(item) for item in summaries if isinstance(item, dict)]
+    items.sort(
+        key=lambda item: (
+            -int(item.get("recency_seconds", 0) or 0),
+            item.get("timestamp", ""),
+            item.get("evidence_id", ""),
+        )
+    )
+    return items
+
+
+def _recent_first_summaries(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        [normalize_desktop_evidence_summary(item) for item in summaries if isinstance(item, dict)],
+        key=lambda item: (
+            int(item.get("recency_seconds", 0) or 0),
+            item.get("timestamp", ""),
+            item.get("evidence_id", ""),
+        ),
+    )
+
+
+def select_recent_evidence(
+    summaries: Iterable[Dict[str, Any]],
+    *,
+    strategy: str = "latest",
+    evidence_id: str = "",
+    observation_token: str = "",
+    active_window_title: str = "",
+    target_window_title: str = "",
+) -> Dict[str, Any]:
+    items = _recent_first_summaries(summaries)
+    if not items:
+        return {"strategy": strategy, "reason": "no_match", "selected": {}, "candidate_count": 0}
+
+    lookup_id = _trim_text(evidence_id, limit=80)
+    if lookup_id:
+        for item in items:
+            if item.get("evidence_id") == lookup_id:
+                selected = dict(item)
+                selected["selection_reason"] = "linked"
+                return {"strategy": strategy, "reason": "linked", "selected": normalize_desktop_evidence_summary(selected), "candidate_count": len(items)}
+        return {"strategy": strategy, "reason": "no_match", "selected": {}, "candidate_count": len(items)}
+
+    lookup_token = _trim_text(observation_token, limit=120)
+    if lookup_token:
+        for item in items:
+            if item.get("observation_token") == lookup_token:
+                selected = dict(item)
+                selected["selection_reason"] = "linked"
+                return {"strategy": strategy, "reason": "linked", "selected": normalize_desktop_evidence_summary(selected), "candidate_count": len(items)}
+
+    strategy_text = _trim_text(strategy or "latest", limit=80).lower()
+    selected_item: Dict[str, Any] = {}
+    selection_reason = "selected"
+
+    if strategy_text == "latest_with_screenshot":
+        for item in items:
+            if item.get("has_screenshot"):
+                selected_item = item
+                selection_reason = "matched"
+                break
+    elif strategy_text == "latest_partial":
+        for item in items:
+            if item.get("is_partial"):
+                selected_item = item
+                selection_reason = "matched"
+                break
+    elif strategy_text == "latest_full":
+        for item in items:
+            if not item.get("is_partial"):
+                selected_item = item
+                selection_reason = "matched"
+                break
+    elif strategy_text in {"window_title", "active_window_title"}:
+        scored = [
+            (item, max(_title_match_score(item, active_window_title), _title_match_score(item, target_window_title)))
+            for item in items
+        ]
+        scored = [entry for entry in scored if entry[1] > 0]
+        if scored:
+            scored.sort(
+                key=lambda entry: (
+                    -entry[1],
+                    0 if entry[0].get("has_screenshot") else 1,
+                    int(entry[0].get("recency_seconds", 0) or 0),
+                )
+            )
+            selected_item = scored[0][0]
+            selection_reason = "matched"
+
+    if not selected_item:
+        selected_item = items[0]
+
+    selected = dict(selected_item)
+    selected["selection_reason"] = selection_reason
+    return {
+        "strategy": strategy_text or "latest",
+        "reason": selection_reason,
+        "selected": normalize_desktop_evidence_summary(selected),
+        "candidate_count": len(items),
+    }
+
+
+def select_checkpoint_evidence(
+    summaries: Iterable[Dict[str, Any]],
+    *,
+    checkpoint_evidence_id: str = "",
+    checkpoint_target: str = "",
+    active_window_title: str = "",
+) -> Dict[str, Any]:
+    if _trim_text(checkpoint_evidence_id, limit=80):
+        return select_recent_evidence(summaries, strategy="checkpoint", evidence_id=checkpoint_evidence_id)
+
+    window_title = _trim_text(checkpoint_target, limit=180) or _trim_text(active_window_title, limit=180)
+    if window_title:
+        result = select_recent_evidence(
+            summaries,
+            strategy="window_title",
+            active_window_title=window_title,
+            target_window_title=window_title,
+        )
+        if result.get("selected"):
+            return result
+    return select_recent_evidence(summaries, strategy="latest_with_screenshot")
+
+
+def select_task_evidence(
+    summaries: Iterable[Dict[str, Any]],
+    *,
+    task_evidence_id: str = "",
+    observation_token: str = "",
+    active_window_title: str = "",
+    target_window_title: str = "",
+) -> Dict[str, Any]:
+    if _trim_text(task_evidence_id, limit=80):
+        return select_recent_evidence(summaries, strategy="task", evidence_id=task_evidence_id)
+    if _trim_text(observation_token, limit=120):
+        result = select_recent_evidence(summaries, strategy="task", observation_token=observation_token)
+        if result.get("selected"):
+            return result
+    if _trim_text(active_window_title, limit=180) or _trim_text(target_window_title, limit=180):
+        result = select_recent_evidence(
+            summaries,
+            strategy="window_title",
+            active_window_title=active_window_title,
+            target_window_title=target_window_title,
+        )
+        if result.get("selected"):
+            return result
+    return select_recent_evidence(summaries, strategy="latest")
+
+
 def collect_display_metadata(virtual_screen: Dict[str, Any]) -> Dict[str, Any]:
     monitors: List[Dict[str, Any]] = []
     backend = "native"
@@ -288,13 +595,27 @@ class DesktopEvidenceStore:
         if not isinstance(payload, dict):
             return {"bundles": []}
         bundles = payload.get("bundles", [])
-        return {"bundles": [normalize_desktop_evidence_ref(item) for item in bundles if isinstance(item, dict)]}
+        normalized: List[Dict[str, Any]] = []
+        for item in bundles:
+            if not isinstance(item, dict):
+                continue
+            if item.get("evidence_kind") or item.get("has_screenshot") is not None and "summary" in item and "window_count" in item:
+                normalized.append(normalize_desktop_evidence_summary(item))
+                continue
+            evidence_id = _trim_text(item.get("evidence_id", ""), limit=80)
+            if evidence_id:
+                bundle = self.load_bundle(evidence_id)
+                if bundle:
+                    normalized.append(summarize_evidence_bundle(bundle))
+                    continue
+            normalized.append(normalize_desktop_evidence_summary(item))
+        return {"bundles": normalized}
 
     def _write_index(self, refs: List[Dict[str, Any]]):
         payload = {
             "version": 1,
             "updated_at": _iso_timestamp(),
-            "bundles": [normalize_desktop_evidence_ref(item) for item in refs],
+            "bundles": [normalize_desktop_evidence_summary(item) for item in refs],
         }
         self.root.mkdir(parents=True, exist_ok=True)
         self.index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -328,8 +649,9 @@ class DesktopEvidenceStore:
             self.root.mkdir(parents=True, exist_ok=True)
             bundle_file.write_text(json.dumps(normalized, indent=2, ensure_ascii=False), encoding="utf-8")
 
+            summary = summarize_evidence_bundle(normalized)
             refs = [item for item in self._read_index().get("bundles", []) if item.get("evidence_id") != evidence_id]
-            refs.append(bundle_ref(normalized))
+            refs.append(summary)
             refs = refs[-self.max_items :]
             self._write_index(refs)
             self._prune_locked(refs)
@@ -376,6 +698,61 @@ class DesktopEvidenceStore:
         refs = self._read_index().get("bundles", [])
         return [normalize_desktop_evidence_ref(item) for item in refs[-max(1, int(limit or 1)) :]]
 
+    def recent_summaries(self, limit: int = 8) -> List[Dict[str, Any]]:
+        summaries = self._read_index().get("bundles", [])
+        safe_limit = max(1, int(limit or 1))
+        items = summaries[-safe_limit:]
+        return [normalize_desktop_evidence_summary(item) for item in items]
+
+    def summary_for(self, evidence_id: str, *, now: datetime | None = None) -> Dict[str, Any]:
+        lookup = _trim_text(evidence_id, limit=80)
+        if not lookup:
+            return {}
+        for item in reversed(self._read_index().get("bundles", [])):
+            if item.get("evidence_id") == lookup:
+                return normalize_desktop_evidence_summary(item)
+        bundle = self.load_bundle(lookup)
+        if not bundle:
+            return {}
+        return summarize_evidence_bundle(bundle, now=now)
+
+    def select_summary(
+        self,
+        *,
+        strategy: str = "latest",
+        evidence_id: str = "",
+        observation_token: str = "",
+        active_window_title: str = "",
+        target_window_title: str = "",
+        checkpoint_evidence_id: str = "",
+        checkpoint_target: str = "",
+        task_evidence_id: str = "",
+    ) -> Dict[str, Any]:
+        recent = self.recent_summaries(limit=self.max_items)
+        if _trim_text(checkpoint_evidence_id, limit=80) or _trim_text(checkpoint_target, limit=180):
+            return select_checkpoint_evidence(
+                recent,
+                checkpoint_evidence_id=checkpoint_evidence_id,
+                checkpoint_target=checkpoint_target,
+                active_window_title=active_window_title,
+            )
+        if _trim_text(task_evidence_id, limit=80) or _trim_text(observation_token, limit=120):
+            return select_task_evidence(
+                recent,
+                task_evidence_id=task_evidence_id,
+                observation_token=observation_token,
+                active_window_title=active_window_title,
+                target_window_title=target_window_title,
+            )
+        return select_recent_evidence(
+            recent,
+            strategy=strategy,
+            evidence_id=evidence_id,
+            observation_token=observation_token,
+            active_window_title=active_window_title,
+            target_window_title=target_window_title,
+        )
+
     def find_by_observation_token(self, token: str) -> Dict[str, Any]:
         lookup = _trim_text(token, limit=120)
         if not lookup:
@@ -392,6 +769,7 @@ class DesktopEvidenceStore:
             "bundle_count": len(refs),
             "max_items": self.max_items,
             "latest": normalize_desktop_evidence_ref(refs[-1] if refs else {}),
+            "latest_summary": compact_evidence_preview(refs[-1] if refs else {}),
         }
 
 

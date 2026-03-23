@@ -469,7 +469,11 @@ def get_desktop_backend_status() -> Dict[str, Any]:
         ui_evidence_backend=_get_ui_evidence_backend(),
     )
     try:
-        status["evidence_store"] = get_desktop_evidence_store().status_snapshot()
+        store = get_desktop_evidence_store()
+        status["evidence_store"] = {
+            **store.status_snapshot(),
+            "recent_summaries": store.recent_summaries(limit=4),
+        }
     except Exception:
         status["evidence_store"] = {"bundle_count": 0, "root": "", "latest": {}}
     return status
