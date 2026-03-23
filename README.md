@@ -18,6 +18,7 @@ This project is now a serious local operator framework with:
 - a compact desktop evidence summary/selection layer for recent evidence lookup
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
 - live eval coverage for core and realistic workflows
+- a tighter live-eval client/harness wait path for desktop-grounding validation
 
 ## Current architecture
 
@@ -97,6 +98,8 @@ Those summaries now feed compact UI/client presentation too:
 - active task/status surfaces show selected/checkpoint evidence previews
 - secondary details surfaces can inspect recent evidence summaries without raw bundle spam
 - retained evidence artifacts can be viewed on demand from those summary surfaces without auto-expanding screenshots into the main experience
+
+Recent validation work also tightened the desktop live-eval wait path and confirmed the main screenshot-backed approval-grounding path locally plus in one bounded desktop-grounding live scenario, while leaving stale-evidence follow-up behavior as the next targeted validation slice.
 
 Current non-goals:
 

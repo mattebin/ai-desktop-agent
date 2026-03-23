@@ -73,8 +73,8 @@ from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer, _status_payload
-from core.local_api_client import LocalOperatorApiClient
-from core.loop import _is_redundant_desktop_observation, _maybe_pause_for_desktop_action
+from core.local_api_client import LocalOperatorApiClient, wait_for_local_api_status
+from core.loop import _is_redundant_desktop_observation, _maybe_pause_for_desktop_action, _maybe_recover_desktop_action_failure
 from core.operator_behavior import classify_chat_turn, looks_like_simple_conversation_turn
 from core.operator_controller import OperatorController
 from core.run_history import RunHistoryStore
@@ -84,7 +84,7 @@ from core.state import TaskState
 from core.tool_runtime import ToolRuntime
 from core.watchers import WatchStore
 from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks, _session_matches_query, _timeline_entry_from_event
-from live_agent_eval import SCENARIO_NAMES, _interpreter_has_playwright, _project_venv_python
+from live_agent_eval import SCENARIO_NAMES, _golden_final_answer_checks, _interpreter_has_playwright, _latest_new_run, _project_venv_python
 from tools.browser import shutdown_browser_runtime
 from tools.desktop import (
     desktop_capture_screenshot,
@@ -256,6 +256,88 @@ print("[OK] desktop tools")
 client = LocalOperatorApiClient("http://127.0.0.1:8765/")
 if client.base_url != "http://127.0.0.1:8765":
     raise SystemExit("LocalOperatorApiClient did not normalize the base URL.")
+
+
+class _WaitStatusProbe:
+    def __init__(self, snapshots, *, session_payload=None):
+        self.snapshots = list(snapshots)
+        self.session_payload = session_payload or {}
+        self.calls = 0
+
+    def status(self):
+        if self.calls < len(self.snapshots):
+            item = self.snapshots[self.calls]
+        else:
+            item = self.snapshots[-1] if self.snapshots else {}
+        self.calls += 1
+        return dict(item)
+
+    def session(self):
+        return dict(self.session_payload)
+
+
+stable_terminal_probe = _WaitStatusProbe(
+    [
+        {"status": "running", "running": True, "active_task": {"status": "running"}, "latest_run": {"final_status": ""}},
+        {"status": "completed", "running": True, "active_task": {"status": "running"}, "latest_run": {"final_status": "running"}},
+        {"status": "completed", "running": True, "active_task": {"status": "running"}, "latest_run": {"final_status": "running"}},
+    ],
+    session_payload={"session": {"authoritative_reply": {"content": "Done."}}},
+)
+stable_terminal_status = wait_for_local_api_status(
+    stable_terminal_probe.status,
+    {"completed"},
+    timeout_seconds=0.1,
+    interval_seconds=0.001,
+    session_getter=stable_terminal_probe.session,
+    session_label="wait-stable-terminal",
+)
+if stable_terminal_status.get("status") != "completed":
+    raise SystemExit("wait_for_local_api_status() did not return the stable completed status when ancillary fields lagged.")
+
+
+class _StubWaitClient(LocalOperatorApiClient):
+    def __init__(self, probe):
+        super().__init__("http://127.0.0.1:8765/")
+        self._probe = probe
+
+    def get_status(self, *, session_id: str = "", state_scope_id: str = ""):
+        return self._probe.status()
+
+    def get_session(self, session_id: str):
+        return self._probe.session()
+
+
+client_wait_probe = _WaitStatusProbe(
+    [
+        {"status": "paused", "running": False, "active_task": {"status": "paused"}, "latest_run": {"final_status": "paused"}},
+    ],
+    session_payload={"session": {"last_result_message": "Paused for approval."}},
+)
+stub_client = _StubWaitClient(client_wait_probe)
+if stub_client.wait_for_status("session-wait-smoke", {"paused"}, timeout_seconds=0.1, interval_seconds=0.001).get("status") != "paused":
+    raise SystemExit("LocalOperatorApiClient.wait_for_status() did not return the expected paused snapshot.")
+
+timeout_probe = _WaitStatusProbe(
+    [
+        {"status": "completed", "running": True, "active_task": {"status": "running"}, "latest_run": {"final_status": "running"}, "pending_approval": {"kind": "desktop_action"}},
+    ],
+    session_payload={"session": {"authoritative_reply": {"content": "Still finalizing."}}},
+)
+try:
+    wait_for_local_api_status(
+        timeout_probe.status,
+        {"blocked"},
+        timeout_seconds=0.01,
+        interval_seconds=0.001,
+        session_getter=timeout_probe.session,
+        session_label="wait-timeout-smoke",
+    )
+    raise SystemExit("wait_for_local_api_status() did not time out when the requested status never appeared.")
+except TimeoutError as exc:
+    message = str(exc)
+    if "running=True" not in message or "latest_run_status=running" not in message or "pending_approval=desktop_action" not in message:
+        raise SystemExit("wait_for_local_api_status() timeout did not include the expected diagnostic fields.")
 print("[OK] local api client")
 
 cors_server = LocalOperatorApiServer(port=0)
@@ -617,6 +699,66 @@ if paused_snapshot.get("pending_approval", {}).get("evidence_preview", {}).get("
 if paused_snapshot.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Desktop approval synthesis did not retain checkpoint evidence sufficiency for the paused desktop checkpoint.")
 
+desktop_retry_state = TaskState("Click (12, 18) in window titled 'Approval Target Window'")
+desktop_retry_failure = {
+    "ok": False,
+    "summary": "A fresh desktop observation is required before acting. Inspect windows or capture a screenshot first.",
+    "error": "A fresh desktop observation is required before acting. Inspect windows or capture a screenshot first.",
+    "desktop_state": {
+        "active_window": {"title": "Approval Target Window", "window_id": "0x00123458", "process_name": "notepad.exe"},
+        "windows": [{"title": "Approval Target Window"}],
+        "observation_token": "desktop-evidence-smoke-3",
+        "observed_at": "2026-03-23T10:02:00",
+    },
+    "desktop_evidence_ref": third_ref,
+    "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
+}
+desktop_retry_state.add_step({"type": "tool", "status": "failed", "tool": "desktop_click_point", "args": {"x": 12, "y": 18}, "result": desktop_retry_failure})
+desktop_retry_state.update_memory_from_tool("desktop_click_point", desktop_retry_failure)
+desktop_retry_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_capture_screenshot", "args": {}, "result": desktop_ready_result})
+desktop_retry_state.update_memory_from_tool("desktop_capture_screenshot", desktop_ready_result)
+desktop_retry_pause = _maybe_pause_for_desktop_action(
+    _DesktopApprovalStubLLM(),
+    _DesktopApprovalStubRuntime(),
+    desktop_retry_state,
+    "Click (12, 18) in window titled 'Approval Target Window'",
+)
+if not isinstance(desktop_retry_pause, dict) or desktop_retry_pause.get("status") != "paused":
+    raise SystemExit("Desktop approval synthesis still treated a failed desktop click step as blocking the later evidence-backed paused checkpoint.")
+
+
+class _DesktopRecoveryRuntime(_DesktopApprovalStubRuntime):
+    def __init__(self, refresh_result):
+        self.refresh_result = refresh_result
+        self.calls = []
+
+    def prepare_args(self, tool_name: str, args: dict, task_state, planning_goal=None):
+        prepared = dict(args)
+        self.calls.append(("prepare", tool_name, prepared))
+        return prepared
+
+    def execute(self, tool_name: str, args: dict):
+        self.calls.append(("execute", tool_name, dict(args)))
+        return self.refresh_result
+
+
+desktop_recovery_state = TaskState("Click (12, 18) in window titled 'Approval Target Window'")
+desktop_recovery_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_get_active_window", "args": {}, "result": desktop_refresh_result})
+desktop_recovery_state.update_memory_from_tool("desktop_get_active_window", desktop_refresh_result)
+desktop_recovery_runtime = _DesktopRecoveryRuntime(desktop_ready_result)
+desktop_recovery_result = _maybe_recover_desktop_action_failure(
+    _DesktopApprovalStubLLM(),
+    desktop_recovery_runtime,
+    desktop_recovery_state,
+    "Click (12, 18) in window titled 'Approval Target Window'",
+    "desktop_click_point",
+    desktop_retry_failure,
+)
+if not isinstance(desktop_recovery_result, dict) or desktop_recovery_result.get("status") != "paused":
+    raise SystemExit("Desktop action recovery did not refresh observation and synthesize a paused approval checkpoint after the fresh-observation failure.")
+if [call[1] for call in desktop_recovery_runtime.calls if call[0] == "execute"] != ["desktop_capture_screenshot"]:
+    raise SystemExit("Desktop action recovery did not use the expected bounded screenshot refresh tool.")
+
 evidence_server = LocalOperatorApiServer(port=0)
 evidence_server.start_in_thread()
 try:
@@ -684,9 +826,29 @@ if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):
     raise SystemExit("live_agent_eval did not resolve the expected project venv Python path.")
 if not _interpreter_has_playwright(project_venv_python):
     raise SystemExit("live_agent_eval did not detect Playwright in the project venv runtime.")
-for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality"}:
+for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding"}:
     if expected_scenario not in SCENARIO_NAMES:
         raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
+if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
+    raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
+no_run_checks = _golden_final_answer_checks(
+    status="completed",
+    message="The active window is Desktop Eval Main.",
+    session_payload={
+        "session": {
+            "messages": [
+                {"role": "assistant", "kind": "final", "content": "Previous run final.", "run_id": "run-one"},
+                {"role": "assistant", "kind": "result", "content": "The active window is Desktop Eval Main.", "run_id": ""},
+            ],
+            "last_result_message": "The active window is Desktop Eval Main.",
+        }
+    },
+    run={},
+    expected_terms={"Desktop Eval Main"},
+)
+single_reply_check = next((check for check in no_run_checks if check.name == "single_authoritative_reply_per_run"), None)
+if single_reply_check is None or not single_reply_check.passed:
+    raise SystemExit("_golden_final_answer_checks() still over-counted prior authoritative replies for a chat-only follow-up without a new run.")
 print("[OK] live eval runtime selection")
 
 desktop_ui_root = Path("desktop-ui")

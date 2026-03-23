@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 
 import json
-from typing import Any, Dict
+import time
+from typing import Any, Callable, Dict, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -9,6 +10,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_LOCAL_API_TIMEOUT_SECONDS = 4.0
 DEFAULT_LOCAL_API_STREAM_TIMEOUT_SECONDS = 45.0
+LOCAL_API_TERMINAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "superseded", "deferred"}
 
 
 class LocalOperatorApiClientError(RuntimeError):
@@ -20,6 +22,118 @@ def _trim_text(value: Any, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def _authoritative_session_reply(session_payload: Dict[str, Any] | None) -> str:
+    payload = session_payload if isinstance(session_payload, dict) else {}
+    session = payload.get("session", {}) if isinstance(payload.get("session", {}), dict) else {}
+    authoritative = (
+        session.get("authoritative_reply", {})
+        if isinstance(session.get("authoritative_reply", {}), dict)
+        else {}
+    )
+    content = _trim_text(authoritative.get("content", ""), limit=220)
+    if content:
+        return content
+    last_result = _trim_text(session.get("last_result_message", ""), limit=220)
+    if last_result:
+        return last_result
+    messages = session.get("messages", []) if isinstance(session.get("messages", []), list) else []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role", "")).strip().lower() != "assistant":
+            continue
+        content = _trim_text(message.get("content", ""), limit=220)
+        if content:
+            return content
+    return ""
+
+
+def _status_wait_debug(snapshot: Dict[str, Any] | None, session_payload: Dict[str, Any] | None = None) -> str:
+    current = snapshot if isinstance(snapshot, dict) else {}
+    active_task = current.get("active_task", {}) if isinstance(current.get("active_task", {}), dict) else {}
+    latest_run = current.get("latest_run", {}) if isinstance(current.get("latest_run", {}), dict) else {}
+    pending = current.get("pending_approval", {}) if isinstance(current.get("pending_approval", {}), dict) else {}
+    parts = [
+        f"status={_trim_text(current.get('status', ''), limit=40) or '<none>'}",
+        f"running={bool(current.get('running', False))}",
+        f"active_task_status={_trim_text(active_task.get('status', ''), limit=40) or '<none>'}",
+        f"latest_run_status={_trim_text(latest_run.get('final_status', ''), limit=40) or '<none>'}",
+        f"pending_approval={_trim_text(pending.get('kind', ''), limit=40) or '<none>'}",
+    ]
+    reply = _authoritative_session_reply(session_payload)
+    if reply:
+        parts.append(f"reply={_trim_text(reply, limit=120)}")
+    return ", ".join(parts)
+
+
+def wait_for_local_api_status(
+    status_getter: Callable[[], Dict[str, Any]],
+    statuses: Iterable[str],
+    *,
+    timeout_seconds: float = 120.0,
+    interval_seconds: float = 0.75,
+    session_getter: Callable[[], Dict[str, Any]] | None = None,
+    session_label: str = "",
+) -> Dict[str, Any]:
+    wanted = {str(status).strip().lower() for status in statuses if str(status).strip()}
+    if not wanted:
+        raise ValueError("At least one desired status is required.")
+
+    deadline = time.time() + max(1.0, float(timeout_seconds))
+    interval = max(0.05, float(interval_seconds))
+    last_snapshot: Dict[str, Any] = {}
+    last_session: Dict[str, Any] = {}
+    stable_terminal_status = ""
+    stable_terminal_polls = 0
+
+    while time.time() < deadline:
+        last_snapshot = status_getter() if callable(status_getter) else {}
+        current_status = str(last_snapshot.get("status", "")).strip().lower()
+
+        if current_status in wanted:
+            if current_status not in LOCAL_API_TERMINAL_STATUSES:
+                return last_snapshot
+
+            active_task = last_snapshot.get("active_task", {}) if isinstance(last_snapshot.get("active_task", {}), dict) else {}
+            latest_run = last_snapshot.get("latest_run", {}) if isinstance(last_snapshot.get("latest_run", {}), dict) else {}
+            active_status = str(active_task.get("status", "")).strip().lower()
+            latest_run_status = str(latest_run.get("final_status", "")).strip().lower()
+            running = bool(last_snapshot.get("running", False))
+
+            if current_status == stable_terminal_status:
+                stable_terminal_polls += 1
+            else:
+                stable_terminal_status = current_status
+                stable_terminal_polls = 1
+
+            terminal_snapshot_ready = (
+                not running
+                and active_status in {"", current_status}
+                and latest_run_status in {"", current_status}
+            )
+            if terminal_snapshot_ready:
+                return last_snapshot
+
+            if stable_terminal_polls >= 2:
+                if callable(session_getter):
+                    try:
+                        last_session = session_getter()
+                    except Exception:
+                        last_session = {}
+                return last_snapshot
+        else:
+            stable_terminal_status = ""
+            stable_terminal_polls = 0
+
+        time.sleep(interval)
+
+    session_suffix = f" for {session_label}" if str(session_label).strip() else ""
+    raise TimeoutError(
+        f"Timed out waiting for status {sorted(wanted)}{session_suffix}. "
+        f"Last snapshot: {_status_wait_debug(last_snapshot, last_session)}"
+    )
 
 
 class LocalOperatorApiClient:
@@ -164,6 +278,26 @@ class LocalOperatorApiClient:
             "POST",
             "/approval/reject",
             body={"session_id": session_id, "state_scope_id": state_scope_id},
+        )
+
+    def wait_for_status(
+        self,
+        session_id: str,
+        statuses: Iterable[str],
+        *,
+        state_scope_id: str = "",
+        timeout_seconds: float = 120.0,
+        interval_seconds: float = 0.75,
+    ) -> Dict[str, Any]:
+        session_id_value = str(session_id or "").strip()
+        state_scope_value = str(state_scope_id or "").strip()
+        return wait_for_local_api_status(
+            lambda: self.get_status(session_id=session_id_value, state_scope_id=state_scope_value),
+            statuses,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            session_getter=(lambda: self.get_session(session_id_value)) if session_id_value else None,
+            session_label=session_id_value or state_scope_value,
         )
 
     def open_event_stream(

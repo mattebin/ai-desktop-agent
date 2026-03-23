@@ -70,7 +70,15 @@ The current evidence-aware reasoning integration is intentionally bounded.
 
 ## Later live validation
 
-When a later paid live validation pass is worthwhile, it should check:
+The desktop live-eval harness wait path was tightened so terminal waiting now follows the authoritative top-level session status and reports the last corroborating fields on timeout instead of blocking behind stale ancillary fields.
+
+A bounded desktop evidence-grounding live pass has now validated these paths:
+
+- sufficient screenshot-backed evidence can ground a direct desktop investigation answer
+- partial desktop evidence can be refreshed into screenshot-backed evidence before an approval-gated click pause
+- desktop action pauses can retain linked evidence preview and assessment in state/API
+
+The next targeted live validation should still re-check:
 
 - desktop-state questions answered from current evidence when no refresh is needed
 - one fresh observation collected when current desktop evidence is partial, stale, or mismatched

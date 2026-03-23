@@ -1002,3 +1002,10 @@ def get_desktop_evidence_store(settings: Dict[str, Any] | None = None) -> Deskto
         )
         _STORE = DesktopEvidenceStore(root, max_items=max_items)
         return _STORE
+
+
+def reset_desktop_evidence_store(settings: Dict[str, Any] | None = None) -> DesktopEvidenceStore:
+    global _STORE
+    with _STORE_LOCK:
+        _STORE = None
+    return get_desktop_evidence_store(settings=settings)

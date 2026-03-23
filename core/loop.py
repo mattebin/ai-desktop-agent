@@ -264,6 +264,17 @@ def _has_any_tool_step(task_state, tool_name: str) -> bool:
     return False
 
 
+def _has_completed_or_paused_tool_step(task_state, tool_name: str) -> bool:
+    for step in reversed(task_state.steps):
+        if step.get("type") != "tool":
+            continue
+        if str(step.get("tool", "")).strip() != tool_name:
+            continue
+        if str(step.get("status", "")).strip() in {"completed", "paused"}:
+            return True
+    return False
+
+
 def _goal_mentions_desktop_focus(goal: str) -> bool:
     return "focus" in str(goal or "").strip().lower()
 
@@ -392,10 +403,12 @@ def _finalize_synthesized_desktop_pause(
     note: str,
     session_store=None,
 ):
+    evidence_id = str(getattr(task_state, "desktop_last_evidence_id", "")).strip()
     task_state.set_desktop_checkpoint(
         reason=checkpoint_reason,
         tool=tool_name,
         target=checkpoint_target,
+        evidence_id=evidence_id,
         approval_status="not approved",
         resume_args=resume_args,
     )
@@ -604,7 +617,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
         return None
 
     click_point = _goal_desktop_click_point(planner_goal)
-    if click_point and not _has_any_tool_step(task_state, "desktop_click_point"):
+    if click_point and not _has_completed_or_paused_tool_step(task_state, "desktop_click_point"):
         desktop_activity = task_state._collect_desktop_activity(limit=4)
         selected_assessment = _desktop_evidence_assessment(
             task_state,
@@ -645,7 +658,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
         )
 
     type_request = _goal_desktop_type_request(planner_goal)
-    if type_request and not _has_any_tool_step(task_state, "desktop_type_text"):
+    if type_request and not _has_completed_or_paused_tool_step(task_state, "desktop_type_text"):
         desktop_activity = task_state._collect_desktop_activity(limit=4)
         selected_assessment = _desktop_evidence_assessment(
             task_state,
@@ -685,6 +698,61 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             note=note,
             session_store=session_store,
         )
+    return None
+
+
+def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner_goal: str, tool_name: str, result, session_store=None):
+    if tool_name not in {"desktop_click_point", "desktop_type_text"}:
+        return None
+    if not isinstance(result, dict) or result.get("ok", False) or result.get("paused", False):
+        return None
+
+    detail_text = " ".join(
+        str(result.get(key, "")).strip().lower()
+        for key in ("error", "summary", "message")
+        if str(result.get(key, "")).strip()
+    )
+    refresh_needed = any(
+        phrase in detail_text
+        for phrase in (
+            "fresh desktop observation is required before acting",
+            "missing or expired",
+            "capture a screenshot again",
+            "inspect windows or capture a screenshot first",
+        )
+    )
+    if not refresh_needed:
+        return None
+
+    refresh_tool = "desktop_capture_screenshot" if tool_name == "desktop_click_point" else "desktop_get_active_window"
+    refresh_seed_args = {"scope": "active_window"} if refresh_tool == "desktop_capture_screenshot" else {}
+    refresh_args = tool_runtime.prepare_args(refresh_tool, refresh_seed_args, task_state, planning_goal=planner_goal)
+    refresh_result = tool_runtime.execute(refresh_tool, refresh_args)
+    _record_tool_result(task_state, refresh_tool, refresh_args, refresh_result)
+    _persist_session_state(session_store, task_state)
+
+    if refresh_result.get("paused", False):
+        task_state.status = "paused"
+        _persist_session_state(session_store, task_state)
+        return {
+            "ok": False,
+            "status": "paused",
+            "message": _finalize_message(llm, task_state),
+            "steps": task_state.steps,
+        }
+
+    synthesized_desktop_pause = _maybe_pause_for_desktop_action(
+        llm,
+        tool_runtime,
+        task_state,
+        planner_goal,
+        session_store=session_store,
+    )
+    if synthesized_desktop_pause is not None:
+        return synthesized_desktop_pause
+
+    if refresh_result.get("ok", False):
+        return {"continue_loop": True}
     return None
 
 
@@ -839,6 +907,19 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
                 "message": _finalize_message(llm, task_state),
                 "steps": task_state.steps,
             }
+        desktop_recovery = _maybe_recover_desktop_action_failure(
+            llm,
+            tool_runtime,
+            task_state,
+            planner_goal,
+            tool_name,
+            result,
+            session_store=session_store,
+        )
+        if desktop_recovery is not None:
+            if desktop_recovery.get("continue_loop", False):
+                continue
+            return desktop_recovery
         synthesized_pause = _maybe_pause_for_browser_checkpoint(
             llm,
             tool_runtime,

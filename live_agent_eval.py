@@ -9,14 +9,17 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 import requests
 
 from core.config import load_settings
+from core.desktop_evidence import get_desktop_evidence_store, reset_desktop_evidence_store
 from core.llm_client import HostedLLMClient
 from core.local_api import LocalOperatorApiServer
+from core.local_api_client import wait_for_local_api_status
 from tools.desktop import desktop_focus_window, desktop_get_active_window
 from tools.files import clear_inspect_project_cache
 
@@ -32,6 +35,7 @@ SCENARIO_NAMES = (
     "continuity_quality",
     "brief_answer_quality",
     "desktop_control",
+    "desktop_evidence_grounding",
 )
 TERMINAL_EVAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "superseded", "deferred"}
 AUTHORITATIVE_MESSAGE_KINDS = {"final", "result", "error"}
@@ -312,7 +316,11 @@ def _golden_final_answer_checks(
 ) -> List[CheckResult]:
     latest_run = run if isinstance(run, dict) else {}
     run_id = str(latest_run.get("run_id", "")).strip()
-    authoritative_messages = _authoritative_messages(session_payload, run_id=run_id)
+    if run_id:
+        authoritative_messages = _authoritative_messages(session_payload, run_id=run_id)
+    else:
+        latest_authoritative = _authoritative_reply(session_payload)
+        authoritative_messages = [{"content": latest_authoritative}] if latest_authoritative else []
     checks = [
         _build_check(
             "authoritative_reply_present",
@@ -463,6 +471,45 @@ def _latest_run(runs: List[Dict[str, Any]], *, final_status: str = "", source: s
             continue
         return run
     return {}
+
+
+def _latest_new_run(previous_runs: List[Dict[str, Any]], current_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    seen_ids = {str(run.get("run_id", "")).strip() for run in previous_runs if isinstance(run, dict)}
+    for run in current_runs:
+        if not isinstance(run, dict):
+            continue
+        run_id = str(run.get("run_id", "")).strip()
+        if run_id and run_id not in seen_ids:
+            return run
+    return {}
+
+
+def _desktop_evidence_id_from_status(status_payload: Dict[str, Any]) -> str:
+    desktop = status_payload.get("desktop", {}) if isinstance(status_payload.get("desktop", {}), dict) else {}
+    selected = desktop.get("selected_evidence", {}) if isinstance(desktop.get("selected_evidence", {}), dict) else {}
+    checkpoint = desktop.get("checkpoint_evidence", {}) if isinstance(desktop.get("checkpoint_evidence", {}), dict) else {}
+    return (
+        str(checkpoint.get("evidence_id", "")).strip()
+        or str(selected.get("evidence_id", "")).strip()
+        or str(desktop.get("checkpoint_evidence_id", "")).strip()
+        or str(desktop.get("evidence_id", "")).strip()
+    )
+
+
+def _age_desktop_evidence(settings: Dict[str, Any], evidence_id: str, *, age_seconds: int = 900) -> Dict[str, Any]:
+    lookup = str(evidence_id or "").strip()
+    if not lookup:
+        raise RuntimeError("Cannot age desktop evidence without an evidence id.")
+    store = get_desktop_evidence_store(settings=settings)
+    bundle = store.load_bundle(lookup)
+    if not bundle:
+        raise RuntimeError(f"Could not load desktop evidence bundle {lookup}.")
+    bundle["timestamp"] = (datetime.now().astimezone() - timedelta(seconds=max(60, int(age_seconds)))).isoformat(timespec="seconds")
+    store.record_bundle(bundle)
+    refreshed = store.summary_for(lookup)
+    if str(refreshed.get("evidence_id", "")).strip() != lookup:
+        raise RuntimeError(f"Desktop evidence bundle {lookup} did not persist after aging.")
+    return refreshed
 
 
 def _tool_names_from_run(run: Dict[str, Any]) -> List[str]:
@@ -925,6 +972,26 @@ def _make_context() -> EvalContext:
 
 def _project_venv_python(workspace: Path) -> Path:
     candidate = workspace / ".venv" / "Scripts" / "python.exe"
+    if candidate.exists():
+        return candidate
+
+    git_file = workspace / ".git"
+    if git_file.exists() and git_file.is_file():
+        try:
+            gitdir_text = git_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            gitdir_text = ""
+        if gitdir_text.lower().startswith("gitdir:"):
+            gitdir_value = gitdir_text.split(":", 1)[1].strip()
+            gitdir_path = Path(gitdir_value)
+            if not gitdir_path.is_absolute():
+                gitdir_path = (workspace / gitdir_value).resolve()
+            common_git_dir = gitdir_path.parent.parent if gitdir_path.name else gitdir_path
+            repo_root = common_git_dir.parent
+            repo_candidate = repo_root / ".venv" / "Scripts" / "python.exe"
+            if repo_candidate.exists():
+                return repo_candidate
+
     return candidate
 
 
@@ -988,6 +1055,8 @@ def _scenario_settings(context: EvalContext, name: str, overrides: Dict[str, Any
             "max_run_history_entries": 48,
             "max_chat_sessions": 20,
             "max_chat_messages_per_session": 60,
+            "desktop_evidence_root": str(scenario_dir / "desktop_evidence"),
+            "max_desktop_evidence_entries": 24,
         }
     )
     for key, value in (overrides or {}).items():
@@ -1003,6 +1072,7 @@ def _scenario_settings(context: EvalContext, name: str, overrides: Dict[str, Any
 class LocalApiHarness:
     def __init__(self, settings: Dict[str, Any]):
         self.settings = settings
+        reset_desktop_evidence_store(settings=settings)
         self.server = LocalOperatorApiServer(host="127.0.0.1", port=0, settings=settings)
         self.thread = self.server.start_in_thread()
         self.base_url = f"http://127.0.0.1:{self.server.port}"
@@ -1020,6 +1090,10 @@ class LocalApiHarness:
             pass
         try:
             self.thread.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            reset_desktop_evidence_store(settings=self.settings)
         except Exception:
             pass
 
@@ -1126,31 +1200,13 @@ class LocalApiHarness:
         timeout: float = 120.0,
         interval: float = 0.75,
     ) -> Dict[str, Any]:
-        wanted = {str(status).strip().lower() for status in statuses}
-        deadline = time.time() + timeout
-        last_snapshot: Dict[str, Any] = {}
-        while time.time() < deadline:
-            last_snapshot = self.status(session_id=session_id)
-            current_status = str(last_snapshot.get("status", "")).strip().lower()
-            if current_status in wanted:
-                if current_status in TERMINAL_EVAL_STATUSES:
-                    active_task = last_snapshot.get("active_task", {}) if isinstance(last_snapshot.get("active_task", {}), dict) else {}
-                    active_status = str(active_task.get("status", "")).strip().lower()
-                    latest_run = last_snapshot.get("latest_run", {}) if isinstance(last_snapshot.get("latest_run", {}), dict) else {}
-                    latest_run_status = str(latest_run.get("final_status", "")).strip().lower()
-                    if bool(last_snapshot.get("running", False)):
-                        time.sleep(interval)
-                        continue
-                    if active_status and active_status not in TERMINAL_EVAL_STATUSES and active_status != current_status:
-                        time.sleep(interval)
-                        continue
-                    if latest_run_status and latest_run_status not in {current_status, ""} and active_status not in {current_status, ""}:
-                        time.sleep(interval)
-                        continue
-                return last_snapshot
-            time.sleep(interval)
-        raise TimeoutError(
-            f"Timed out waiting for status {sorted(wanted)} for session {session_id}. Last status={last_snapshot.get('status', '')}"
+        return wait_for_local_api_status(
+            lambda: self.status(session_id=session_id),
+            statuses,
+            timeout_seconds=timeout,
+            interval_seconds=interval,
+            session_getter=lambda: self.session_detail(session_id),
+            session_label=session_id,
         )
 
 
@@ -2823,6 +2879,441 @@ def run_desktop_control_scenario(context: EvalContext) -> Dict[str, Any]:
     }
 
 
+def run_desktop_evidence_grounding_scenario(context: EvalContext) -> Dict[str, Any]:
+    name = "desktop_evidence_grounding"
+    scenario_dir, settings = _scenario_settings(context, name)
+    clear_inspect_project_cache()
+    phases: List[Dict[str, Any]] = []
+
+    with DesktopFixtureHarness(context, scenario_dir) as fixture, LocalApiHarness(settings) as api:
+        def _reject_paused_session(session_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+            api.reject(session_id=session_id)
+            return api.wait_for_status(session_id, {"blocked"}, timeout=timeout)
+
+        fixture.wait_for_state(
+            lambda state: bool(state.get("button_center")) and bool(state.get("entry_center")),
+            timeout=12.0,
+            description="desktop fixture coordinates",
+        )
+        if not fixture.ensure_active(fixture.main_title, timeout=6.0):
+            raise RuntimeError(f"Could not focus the main desktop fixture window '{fixture.main_title}'.")
+
+        button_center = fixture.read_state().get("button_center", {})
+        button_x = int(button_center.get("x", 0) or 0) if isinstance(button_center, dict) else 0
+        button_y = int(button_center.get("y", 0) or 0) if isinstance(button_center, dict) else 0
+        if button_x <= 0 or button_y <= 0:
+            raise RuntimeError(f"Desktop fixture button coordinates were invalid: {fixture.read_state()}")
+
+        sufficient_session = api.create_session(title="Desktop evidence sufficient eval").get("session", {}).get("session_id", "")
+        sufficient_runs_before = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        sufficient_goal = (
+            f"Focus the visible desktop window titled '{fixture.main_title}', capture a screenshot of the active window, "
+            "and summarize in one or two direct sentences what you inspected."
+        )
+        sufficient_started = time.time()
+        sufficient_dispatch = api.send_message(sufficient_session, sufficient_goal)
+        sufficient_status = api.wait_for_status(sufficient_session, {"completed"})
+        sufficient_detail = api.session_detail(sufficient_session)
+        sufficient_runs_after = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        sufficient_run = _latest_new_run(sufficient_runs_before, sufficient_runs_after)
+        sufficient_message = _authoritative_reply(sufficient_detail)
+        sufficient_tools = _tool_names_from_run(sufficient_run)
+        sufficient_selected = sufficient_status.get("desktop", {}).get("selected_evidence", {})
+        sufficient_assessment = sufficient_status.get("desktop", {}).get("selected_evidence_assessment", {})
+        sufficient_checks = [
+            _build_check(
+                "sufficient_phase_completed",
+                "execution",
+                sufficient_status.get("status") == "completed",
+                f"Status={sufficient_status.get('status')}",
+            ),
+            _build_check(
+                "screenshot_used_for_grounding",
+                "tool_choice",
+                "desktop_capture_screenshot" in sufficient_tools,
+                f"Tools={sufficient_tools}",
+            ),
+            _build_check(
+                "selected_evidence_present",
+                "desktop",
+                bool(str(sufficient_selected.get("evidence_id", "")).strip()),
+                f"Selected evidence={sufficient_selected}",
+            ),
+            _build_check(
+                "selected_evidence_sufficient",
+                "desktop",
+                bool(sufficient_assessment.get("sufficient", False)) and sufficient_assessment.get("state") == "sufficient",
+                f"Assessment={sufficient_assessment}",
+            ),
+            _build_check(
+                "selected_evidence_has_screenshot",
+                "desktop",
+                bool(sufficient_selected.get("has_screenshot", False)),
+                f"Selected evidence={sufficient_selected}",
+            ),
+        ]
+        sufficient_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=sufficient_message,
+                session_payload=sufficient_detail,
+                run=sufficient_run,
+                expected_terms={fixture.main_title, "screenshot"},
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_sufficient_capture",
+                goal=sufficient_goal,
+                checks=sufficient_checks,
+                started_at=sufficient_started,
+                status=sufficient_status.get("status", ""),
+                reply_mode=str(sufficient_dispatch.get("reply_mode", "")).strip(),
+                final_message=sufficient_message,
+                run=sufficient_run,
+                snapshot=sufficient_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        follow_runs_before = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        follow_goal = (
+            "Using the current bounded desktop evidence if it is already sufficient, answer briefly which window is active right now. "
+            "Refresh desktop observation only if the current evidence is stale or insufficient."
+        )
+        follow_started = time.time()
+        follow_dispatch = api.send_message(sufficient_session, follow_goal)
+        follow_status = api.wait_for_status(sufficient_session, {"completed"})
+        follow_detail = api.session_detail(sufficient_session)
+        follow_runs_after = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        follow_run = _latest_new_run(follow_runs_before, follow_runs_after)
+        follow_message = _authoritative_reply(follow_detail)
+        follow_tools = _tool_names_from_run(follow_run)
+        follow_checks = [
+            _build_check(
+                "follow_up_completed",
+                "execution",
+                follow_status.get("status") == "completed",
+                f"Status={follow_status.get('status')}",
+            ),
+            _build_check(
+                "redundant_capture_avoided",
+                "desktop",
+                "desktop_capture_screenshot" not in follow_tools,
+                f"Tools={follow_tools}",
+            ),
+            _build_check(
+                "follow_up_answer_grounded",
+                "final_answer",
+                _contains(follow_message, fixture.main_title),
+                f"Final message={follow_message}",
+            ),
+        ]
+        follow_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=follow_message,
+                session_payload=follow_detail,
+                run=follow_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=70,
+                forbidden_terms={"approval", "workflow execution"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_reuse_sufficient_evidence",
+                goal=follow_goal,
+                checks=follow_checks,
+                started_at=follow_started,
+                status=follow_status.get("status", ""),
+                reply_mode=str(follow_dispatch.get("reply_mode", "")).strip(),
+                final_message=follow_message,
+                run=follow_run,
+                snapshot=follow_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        aged_evidence_id = _desktop_evidence_id_from_status(sufficient_status)
+        aged_summary = _age_desktop_evidence(settings, aged_evidence_id, age_seconds=900)
+        stale_runs_before = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        stale_goal = (
+            "Using the current bounded desktop evidence if it is still current, answer briefly which window is active right now. "
+            "If the evidence is stale, refresh desktop observation once before answering."
+        )
+        stale_started = time.time()
+        stale_dispatch = api.send_message(sufficient_session, stale_goal)
+        stale_status = api.wait_for_status(sufficient_session, {"completed"})
+        stale_detail = api.session_detail(sufficient_session)
+        stale_runs_after = _session_runs(Path(settings["run_history_path"]), sufficient_session)
+        stale_run = _latest_new_run(stale_runs_before, stale_runs_after)
+        stale_message = _authoritative_reply(stale_detail)
+        stale_tools = _tool_names_from_run(stale_run)
+        stale_evidence_id = _desktop_evidence_id_from_status(stale_status)
+        stale_assessment = stale_status.get("desktop", {}).get("selected_evidence_assessment", {})
+        stale_checks = [
+            _build_check(
+                "aged_evidence_became_stale",
+                "desktop",
+                int(aged_summary.get("recency_seconds", 0) or 0) >= 600,
+                f"Aged summary={aged_summary}",
+            ),
+            _build_check(
+                "stale_phase_completed",
+                "execution",
+                stale_status.get("status") == "completed",
+                f"Status={stale_status.get('status')}",
+            ),
+            _build_check(
+                "stale_evidence_triggered_refresh",
+                "desktop",
+                any(tool in {"desktop_get_active_window", "desktop_list_windows", "desktop_capture_screenshot"} for tool in stale_tools),
+                f"Tools={stale_tools}",
+            ),
+            _build_check(
+                "stale_evidence_replaced",
+                "desktop",
+                bool(stale_evidence_id) and stale_evidence_id != aged_evidence_id,
+                f"Old evidence={aged_evidence_id} new evidence={stale_evidence_id}",
+            ),
+            _build_check(
+                "refreshed_evidence_now_usable",
+                "desktop",
+                stale_assessment.get("state") in {"sufficient", "partial"} and not stale_assessment.get("needs_refresh", False),
+                f"Assessment={stale_assessment}",
+            ),
+        ]
+        stale_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=stale_message,
+                session_payload=stale_detail,
+                run=stale_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=80,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_stale_refresh",
+                goal=stale_goal,
+                checks=stale_checks,
+                started_at=stale_started,
+                status=stale_status.get("status", ""),
+                reply_mode=str(stale_dispatch.get("reply_mode", "")).strip(),
+                final_message=stale_message,
+                run=stale_run,
+                snapshot=stale_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        missing_session = api.create_session(title="Desktop evidence missing eval").get("session", {}).get("session_id", "")
+        missing_runs_before = _session_runs(Path(settings["run_history_path"]), missing_session)
+        missing_goal = (
+            f"Find the visible desktop window titled '{fixture.main_title}', focus it, inspect the current desktop state, "
+            f"capture a screenshot of the active window, and then click the known visible button center at ({button_x}, {button_y}). "
+            "Ask for approval right before clicking and do not click until approval is granted."
+        )
+        missing_started = time.time()
+        missing_dispatch = api.send_message(missing_session, missing_goal)
+        missing_paused = api.wait_for_status(missing_session, {"paused"})
+        missing_detail = api.session_detail(missing_session)
+        missing_runs_after = _session_runs(Path(settings["run_history_path"]), missing_session)
+        missing_run = _latest_new_run(missing_runs_before, missing_runs_after)
+        missing_message = _authoritative_reply(missing_detail) or _last_assistant_message(missing_detail)
+        missing_tools = _tool_names_from_run(missing_run)
+        missing_pending = missing_paused.get("pending_approval", {})
+        missing_checks = [
+            _build_check(
+                "missing_to_paused",
+                "approval",
+                missing_paused.get("status") == "paused",
+                f"Status={missing_paused.get('status')}",
+            ),
+            _build_check(
+                "missing_collected_evidence_before_pause",
+                "tool_choice",
+                "desktop_capture_screenshot" in missing_tools and "desktop_click_point" in missing_tools,
+                f"Tools={missing_tools}",
+            ),
+            _build_check(
+                "missing_pause_grounded_in_checkpoint_evidence",
+                "desktop",
+                bool(str(missing_pending.get("evidence_id", "")).strip())
+                and bool(missing_pending.get("evidence_assessment", {}).get("sufficient", False)),
+                f"Pending approval={missing_pending}",
+            ),
+            _build_check(
+                "missing_click_not_executed",
+                "desktop",
+                int(fixture.read_state().get("click_count", 0) or 0) == 0,
+                f"Fixture state={fixture.read_state()}",
+            ),
+        ]
+        missing_checks.extend(
+            _golden_final_answer_checks(
+                status="paused",
+                message=missing_message,
+                session_payload=missing_detail,
+                run=missing_run,
+                expected_terms={"approval", "click", fixture.main_title},
+                require_next_step=True,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_missing_evidence_pause",
+                goal=missing_goal,
+                checks=missing_checks,
+                started_at=missing_started,
+                status=missing_paused.get("status", ""),
+                reply_mode=str(missing_dispatch.get("reply_mode", "")).strip(),
+                final_message=missing_message,
+                run=missing_run,
+                snapshot=missing_paused,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+        missing_rejected = _reject_paused_session(missing_session)
+        if missing_rejected.get("status") != "blocked":
+            raise RuntimeError(f"Desktop grounding eval could not clear the paused missing-evidence checkpoint: {missing_rejected}")
+
+        partial_session = api.create_session(title="Desktop evidence partial eval").get("session", {}).get("session_id", "")
+        partial_seed_runs_before = _session_runs(Path(settings["run_history_path"]), partial_session)
+        partial_seed_goal = (
+            "Using the bounded desktop tools only, inspect the visible desktop windows and answer briefly which window is active right now. "
+            "Keep the answer direct and short."
+        )
+        partial_seed_started = time.time()
+        partial_seed_dispatch = api.send_message(partial_session, partial_seed_goal)
+        partial_seed_status = api.wait_for_status(partial_session, {"completed"})
+        partial_seed_detail = api.session_detail(partial_session)
+        partial_seed_runs_after = _session_runs(Path(settings["run_history_path"]), partial_session)
+        partial_seed_run = _latest_new_run(partial_seed_runs_before, partial_seed_runs_after)
+        partial_seed_assessment = partial_seed_status.get("desktop", {}).get("selected_evidence_assessment", {})
+        partial_seed_checks = [
+            _build_check(
+                "partial_seed_completed",
+                "execution",
+                partial_seed_status.get("status") == "completed",
+                f"Status={partial_seed_status.get('status')}",
+            ),
+            _build_check(
+                "partial_seed_is_partial",
+                "desktop",
+                partial_seed_assessment.get("state") == "partial",
+                f"Assessment={partial_seed_assessment}",
+            ),
+        ]
+        partial_seed_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=_authoritative_reply(partial_seed_detail),
+                session_payload=partial_seed_detail,
+                run=partial_seed_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=60,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_partial_seed",
+                goal=partial_seed_goal,
+                checks=partial_seed_checks,
+                started_at=partial_seed_started,
+                status=partial_seed_status.get("status", ""),
+                reply_mode=str(partial_seed_dispatch.get("reply_mode", "")).strip(),
+                final_message=_authoritative_reply(partial_seed_detail),
+                run=partial_seed_run,
+                snapshot=partial_seed_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        partial_click_runs_before = _session_runs(Path(settings["run_history_path"]), partial_session)
+        partial_click_goal = (
+            f"Using the current bounded desktop evidence if possible, click the known visible button center at ({button_x}, {button_y}) "
+            f"in the visible desktop window titled '{fixture.main_title}'. Ask for approval right before clicking and do not click until approval is granted."
+        )
+        partial_click_started = time.time()
+        partial_click_dispatch = api.send_message(partial_session, partial_click_goal)
+        partial_click_paused = api.wait_for_status(partial_session, {"paused"})
+        partial_click_detail = api.session_detail(partial_session)
+        partial_click_runs_after = _session_runs(Path(settings["run_history_path"]), partial_session)
+        partial_click_run = _latest_new_run(partial_click_runs_before, partial_click_runs_after)
+        partial_click_message = _authoritative_reply(partial_click_detail) or _last_assistant_message(partial_click_detail)
+        partial_click_tools = _tool_names_from_run(partial_click_run)
+        partial_click_pending = partial_click_paused.get("pending_approval", {})
+        partial_click_checks = [
+            _build_check(
+                "partial_click_paused",
+                "approval",
+                partial_click_paused.get("status") == "paused",
+                f"Status={partial_click_paused.get('status')}",
+            ),
+            _build_check(
+                "partial_evidence_forced_refresh_before_pause",
+                "desktop",
+                "desktop_capture_screenshot" in partial_click_tools and "desktop_click_point" in partial_click_tools,
+                f"Tools={partial_click_tools}",
+            ),
+            _build_check(
+                "partial_pause_now_grounded_in_sufficient_evidence",
+                "desktop",
+                bool(partial_click_pending.get("evidence_assessment", {}).get("sufficient", False)),
+                f"Pending approval={partial_click_pending}",
+            ),
+            _build_check(
+                "partial_click_not_executed",
+                "desktop",
+                int(fixture.read_state().get("click_count", 0) or 0) == 0,
+                f"Fixture state={fixture.read_state()}",
+            ),
+        ]
+        partial_click_checks.extend(
+            _golden_final_answer_checks(
+                status="paused",
+                message=partial_click_message,
+                session_payload=partial_click_detail,
+                run=partial_click_run,
+                expected_terms={"approval", "click", fixture.main_title},
+                require_next_step=True,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_partial_refresh_before_pause",
+                goal=partial_click_goal,
+                checks=partial_click_checks,
+                started_at=partial_click_started,
+                status=partial_click_paused.get("status", ""),
+                reply_mode=str(partial_click_dispatch.get("reply_mode", "")).strip(),
+                final_message=partial_click_message,
+                run=partial_click_run,
+                snapshot=partial_click_paused,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+        partial_rejected = _reject_paused_session(partial_session)
+        if partial_rejected.get("status") != "blocked":
+            raise RuntimeError(f"Desktop grounding eval could not clear the paused partial-evidence checkpoint: {partial_rejected}")
+
+    combined_failures = [failure for phase in phases for failure in phase.get("prompt_failures", [])]
+    return {
+        "name": name,
+        "passed": not combined_failures,
+        "prompt_failures": combined_failures,
+        "phases": phases,
+        "scenario_dir": str(scenario_dir),
+    }
+
+
 SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "outcome_style_corpus": run_outcome_style_corpus_scenario,
     "chat_routing": run_chat_routing_scenario,
@@ -2834,6 +3325,7 @@ SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "continuity_quality": run_continuity_quality_scenario,
     "brief_answer_quality": run_brief_answer_quality_scenario,
     "desktop_control": run_desktop_control_scenario,
+    "desktop_evidence_grounding": run_desktop_evidence_grounding_scenario,
 }
 
 
