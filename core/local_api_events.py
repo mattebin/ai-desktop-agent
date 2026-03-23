@@ -57,6 +57,13 @@ def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
         "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
         "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
         "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
+        "evidence_assessment": {
+            "state": _trim_text(pending.get("evidence_assessment", {}).get("state", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(pending.get("evidence_assessment", {}).get("reason", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(pending.get("evidence_assessment", {}).get("summary", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(pending.get("evidence_assessment", {}).get("sufficient", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(pending.get("evidence_assessment", {}).get("needs_refresh", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
+        },
     }
 
 
@@ -103,11 +110,25 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "reason": _trim_text(desktop.get("selected_evidence", {}).get("reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
             "selection_reason": _trim_text(desktop.get("selected_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
         },
+        "selected_evidence_assessment": {
+            "state": _trim_text(desktop.get("selected_evidence_assessment", {}).get("state", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_evidence_assessment", {}).get("reason", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(desktop.get("selected_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(desktop.get("selected_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
+        },
         "checkpoint_evidence": {
             "evidence_id": _trim_text(desktop.get("checkpoint_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=80),
             "summary": _trim_text(desktop.get("checkpoint_evidence", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=220),
             "reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
             "selection_reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
+        },
+        "checkpoint_evidence_assessment": {
+            "state": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("state", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("reason", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(desktop.get("checkpoint_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(desktop.get("checkpoint_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
         },
     }
 

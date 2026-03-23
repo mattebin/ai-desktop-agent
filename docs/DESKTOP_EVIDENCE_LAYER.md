@@ -17,6 +17,8 @@ The layer now also includes a compact summary/index/selection helper on top of r
 
 It also includes an on-demand artifact-viewer path so retained screenshots can be opened from selected/checkpoint/recent evidence references without turning the normal UI into a screenshot browser.
 
+The operator now uses the same compact selected/checkpoint desktop evidence as model-facing grounding for bounded desktop investigations and desktop approval preparation.
+
 ## Current evidence sources
 
 - bounded window observation via the desktop window backend
@@ -52,7 +54,28 @@ Retention is bounded by `max_desktop_evidence_entries` in `config/settings.yaml`
 - no OCR-heavy interpretation
 - no broad UI automation
 - no new desktop action capability
-- no model-facing planner/routing/final-answer changes in this pass
+- no broad desktop autonomy or navigation
+- no raw bundle/blob dumping into prompts
+
+## Evidence-aware reasoning rules
+
+The current evidence-aware reasoning integration is intentionally bounded.
+
+- desktop investigations may answer from selected evidence when it is recent and sufficient
+- desktop approval grounding uses the checkpoint-linked evidence summary when present
+- desktop click preparation prefers screenshot-backed evidence
+- desktop typing preparation can rely on recent focused-window evidence without requiring OCR
+- stale, partial, or target-mismatched evidence should trigger one fresh observation before action preparation
+- repeated identical desktop inspection should stop once current evidence is already sufficient
+
+## Later live validation
+
+When a later paid live validation pass is worthwhile, it should check:
+
+- desktop-state questions answered from current evidence when no refresh is needed
+- one fresh observation collected when current desktop evidence is partial, stale, or mismatched
+- desktop approval requests that clearly reference the evidence they are based on
+- desktop final answers that mention evidence compactly without turning into bundle dumps
 
 ## Local testing
 
@@ -65,3 +88,5 @@ Current deterministic local coverage checks:
 - state snapshot visibility
 - local API evidence exposure
 - compact summary generation and selection heuristics
+- evidence sufficiency / refresh assessment
+- checkpoint and selected evidence grounding in state/API

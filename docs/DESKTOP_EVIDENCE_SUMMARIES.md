@@ -1,6 +1,6 @@
 # Desktop Evidence Summaries
 
-This document explains the compact desktop evidence summary and selection layer built on top of the read-only desktop evidence store.
+This document explains the compact desktop evidence summary, selection, and bounded reasoning-grounding layer built on top of the read-only desktop evidence store.
 
 ## Purpose
 
@@ -12,6 +12,7 @@ It provides:
 - deterministic recent-evidence selection
 - checkpoint/task-linked evidence lookup
 - API/state-friendly previews for future approval and investigation grounding
+- bounded evidence sufficiency / refresh assessment for desktop investigations and approvals
 
 ## Summary shape
 
@@ -53,10 +54,24 @@ Heuristics currently prioritize:
 
 ## Current non-goals
 
-- no model-facing use of summaries in this pass
 - no OCR-heavy interpretation
 - no new desktop action capability
 - no broad UI automation
+
+## Bounded reasoning use
+
+The current operator now uses these compact summaries in a bounded way:
+
+- selected evidence can ground read-only desktop investigations
+- checkpoint evidence can ground paused desktop approval explanations
+- desktop action preparation can decide whether existing evidence is sufficient or whether one fresh observation is needed first
+
+The current rules stay intentionally narrow:
+
+- use compact summaries only, never raw screenshots or full bundle blobs in prompts
+- prefer deterministic selection over model-side relevance scoring
+- treat stale, partial, or mismatched evidence as refresh-needed
+- keep screenshot-backed grounding especially important for click preparation
 
 ## UI and client presentation
 

@@ -16,6 +16,7 @@ This project is now a serious local operator framework with:
 - optional local infrastructure backends for scheduling, file watching, desktop observation, and future UI evidence
 - a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
 - a compact desktop evidence summary/selection layer for recent evidence lookup
+- evidence-aware desktop reasoning for bounded investigations and approval grounding
 - live eval coverage for core and realistic workflows
 
 ## Current architecture
@@ -88,7 +89,7 @@ Current role:
 - expose recent evidence references through the authoritative local API
 - support future approval grounding without adding new action capability in this pass
 
-The evidence layer now also exposes compact recent summaries and deterministic selection helpers for the most relevant recent evidence bundle.
+The evidence layer now also exposes compact recent summaries, deterministic selection helpers, and bounded evidence sufficiency assessment for the most relevant recent desktop evidence bundle.
 
 Those summaries now feed compact UI/client presentation too:
 
@@ -102,7 +103,7 @@ Current non-goals:
 - no OCR-heavy desktop interpretation
 - no broad UI automation
 - no new desktop actions beyond the existing bounded set
-- no model-facing behavior change by itself
+- no broad autonomous desktop navigation or OCR-heavy desktop reasoning
 
 ## Project philosophy
 

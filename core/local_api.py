@@ -132,6 +132,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
             "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
             "evidence_preview": _compact_evidence_payload(pending.get("evidence_preview", {})),
+            "evidence_assessment": _compact_evidence_assessment(pending.get("evidence_assessment", {})),
         },
         "active_task": snapshot.get("active_task", {}),
         "browser": {
@@ -158,7 +159,9 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
             "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
             "selected_evidence": _compact_evidence_payload(desktop.get("selected_evidence", {})),
+            "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
             "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
+            "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
         },
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
@@ -231,6 +234,25 @@ def _compact_evidence_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "is_partial": bool(preview.get("is_partial", False)),
         "recency_seconds": _coerce_int(preview.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "selection_reason": _trim_text(preview.get("selection_reason", ""), limit=40),
+    }
+
+
+def _compact_evidence_assessment(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    assessment = value if isinstance(value, dict) else {}
+    return {
+        "evidence_id": _trim_text(assessment.get("evidence_id", ""), limit=80),
+        "purpose": _trim_text(assessment.get("purpose", ""), limit=80),
+        "state": _trim_text(assessment.get("state", ""), limit=40),
+        "reason": _trim_text(assessment.get("reason", ""), limit=40),
+        "summary": _trim_text(assessment.get("summary", ""), limit=220),
+        "sufficient": bool(assessment.get("sufficient", False)),
+        "needs_refresh": bool(assessment.get("needs_refresh", False)),
+        "target_window_title": _trim_text(assessment.get("target_window_title", ""), limit=180),
+        "target_window_match": bool(assessment.get("target_window_match", False)),
+        "has_screenshot": bool(assessment.get("has_screenshot", False)),
+        "is_partial": bool(assessment.get("is_partial", False)),
+        "recency_seconds": _coerce_int(assessment.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "stale": bool(assessment.get("stale", False)),
     }
 
 

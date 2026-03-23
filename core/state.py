@@ -54,6 +54,37 @@ MAX_TASK_GOAL_CHARS = 4000
 MAX_TASK_REPLACEMENT_GOAL_CHARS = 2000
 
 
+def _desktop_evidence_context_lines(label: str, summary: Dict[str, Any], assessment: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(assessment, dict):
+        assessment = {}
+
+    evidence_summary = str(summary.get("summary", "")).strip()
+    if evidence_summary:
+        lines.append(f"- {label} evidence: {evidence_summary}")
+
+    assessment_summary = str(assessment.get("summary", "")).strip()
+    if assessment_summary:
+        lines.append(f"- {label} evidence assessment: {assessment_summary}")
+
+    reason = str(assessment.get("reason", "")).strip()
+    state = str(assessment.get("state", "")).strip()
+    if reason or state:
+        detail_parts: List[str] = []
+        if state:
+            detail_parts.append(f"state={state}")
+        if reason:
+            detail_parts.append(f"reason={reason}")
+        if assessment.get("needs_refresh", False):
+            detail_parts.append("refresh=yes")
+        elif assessment.get("sufficient", False):
+            detail_parts.append("refresh=no")
+        lines.append(f"- {label} evidence status: {'; '.join(detail_parts)}")
+    return lines
+
+
 class TaskState:
     def __init__(
         self,
@@ -933,6 +964,8 @@ class TaskState:
 
         selected_evidence: Dict[str, Any] = {}
         checkpoint_evidence: Dict[str, Any] = {}
+        selected_evidence_assessment: Dict[str, Any] = {}
+        checkpoint_evidence_assessment: Dict[str, Any] = {}
         try:
             from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 
@@ -950,9 +983,25 @@ class TaskState:
             )
             selected_evidence = compact_evidence_preview(selected_result.get("selected", {}))
             checkpoint_evidence = compact_evidence_preview(checkpoint_result.get("selected", {}))
+            selected_evidence_assessment = store.assess_summary(
+                summary=selected_result.get("selected", {}),
+                purpose="desktop_investigation",
+                target_window_title=self.desktop_last_target_window,
+                require_screenshot=False,
+                max_age_seconds=240,
+            )
+            checkpoint_evidence_assessment = store.assess_summary(
+                summary=checkpoint_result.get("selected", {}),
+                purpose="desktop_approval",
+                target_window_title=self.desktop_checkpoint_target or self.desktop_last_target_window,
+                require_screenshot=str(self.desktop_checkpoint_tool).strip() == "desktop_click_point",
+                max_age_seconds=120,
+            )
         except Exception:
             selected_evidence = {}
             checkpoint_evidence = {}
+            selected_evidence_assessment = {}
+            checkpoint_evidence_assessment = {}
 
         return {
             "windows": self._normalize_values(self.desktop_windows[-limit:], limit=limit, text_limit=180),
@@ -974,12 +1023,14 @@ class TaskState:
             "evidence_reason": self.desktop_last_evidence_reason[:40],
             "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "selected_evidence": selected_evidence,
+            "selected_evidence_assessment": selected_evidence_assessment,
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
             "checkpoint_tool": self.desktop_checkpoint_tool[:80],
             "checkpoint_target": self.desktop_checkpoint_target[:180],
             "checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "checkpoint_evidence": checkpoint_evidence,
+            "checkpoint_evidence_assessment": checkpoint_evidence_assessment,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
             "uncertainties": uncertainties,
@@ -1529,6 +1580,18 @@ class TaskState:
                     lines.append(f"- Screenshot captured: {desktop_activity['screenshot_path']}")
             if desktop_activity["observed_at"]:
                 lines.append(f"- Desktop observed at: {desktop_activity['observed_at']}")
+            evidence_grounding_lines = _desktop_evidence_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_evidence", {}),
+                desktop_activity.get("selected_evidence_assessment", {}),
+            )
+            checkpoint_grounding_lines = _desktop_evidence_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_evidence", {}),
+                desktop_activity.get("checkpoint_evidence_assessment", {}),
+            )
+            for line in evidence_grounding_lines + checkpoint_grounding_lines:
+                lines.append(line)
             if desktop_activity["actions"]:
                 lines.append("Desktop action history:")
                 for action in desktop_activity["actions"]:
@@ -2134,6 +2197,7 @@ class TaskState:
             "evidence_id": "",
             "evidence_summary": "",
             "evidence_preview": {},
+            "evidence_assessment": {},
             "target_files": [],
         }
         if browser_activity.get("checkpoint_pending"):
@@ -2148,6 +2212,7 @@ class TaskState:
                 "evidence_id": "",
                 "evidence_summary": "",
                 "evidence_preview": {},
+                "evidence_assessment": {},
                 "target_files": [],
             }
         elif desktop_activity.get("checkpoint_pending"):
@@ -2160,11 +2225,16 @@ class TaskState:
                 ),
                 "tool": str(desktop_activity.get("checkpoint_tool", "")).strip(),
                 "target": str(desktop_activity.get("checkpoint_target", "")).strip(),
-                "summary": str(desktop_activity.get("last_action", "") or desktop_activity.get("checkpoint_target", "")).strip(),
+                "summary": str(
+                    desktop_activity.get("checkpoint_evidence", {}).get("summary", "")
+                    or desktop_activity.get("last_action", "")
+                    or desktop_activity.get("checkpoint_target", "")
+                ).strip(),
                 "approval_status": str(desktop_activity.get("checkpoint_approval_status", "not approved")).strip() or "not approved",
                 "evidence_id": str(desktop_activity.get("checkpoint_evidence_id", "")).strip(),
                 "evidence_summary": str(desktop_activity.get("checkpoint_evidence", {}).get("summary", "")).strip(),
                 "evidence_preview": desktop_activity.get("checkpoint_evidence", {}),
+                "evidence_assessment": desktop_activity.get("checkpoint_evidence_assessment", {}),
                 "target_files": [],
             }
         elif (
@@ -2184,6 +2254,7 @@ class TaskState:
                 "evidence_id": "",
                 "evidence_summary": "",
                 "evidence_preview": {},
+                "evidence_assessment": {},
                 "target_files": [item.get("display", "") for item in review_bundle.get("items", []) if item.get("display")],
             }
 
@@ -2321,6 +2392,18 @@ class TaskState:
                 lines.append(f"- Evidence summary: {desktop_activity.get('evidence_summary', '')}")
             if desktop_activity.get("observed_at"):
                 lines.append(f"- Desktop observed at: {desktop_activity.get('observed_at', '')}")
+            for line in _desktop_evidence_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_evidence", {}),
+                desktop_activity.get("selected_evidence_assessment", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_evidence_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_evidence", {}),
+                desktop_activity.get("checkpoint_evidence_assessment", {}),
+            ):
+                lines.append(line)
             if desktop_activity.get("actions"):
                 lines.append("Recent desktop actions:")
                 for action in desktop_activity.get("actions", [])[:4]:

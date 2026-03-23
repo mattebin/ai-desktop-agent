@@ -320,6 +320,67 @@ def _desktop_target_window_ready(task_state, planner_goal: str) -> bool:
     return expected_title.lower() in active_title.lower()
 
 
+def _desktop_evidence_assessment(
+    task_state,
+    *,
+    purpose: str,
+    target_window_title: str = "",
+    require_screenshot: bool = False,
+):
+    try:
+        from core.desktop_evidence import assess_desktop_evidence
+
+        desktop_activity = task_state._collect_desktop_activity(limit=4)
+        return assess_desktop_evidence(
+            desktop_activity.get("selected_evidence", {}),
+            purpose=purpose,
+            target_window_title=target_window_title or desktop_activity.get("last_target_window", ""),
+            require_screenshot=require_screenshot,
+            max_age_seconds=240 if purpose == "desktop_investigation" else 120,
+        )
+    except Exception:
+        return {}
+
+
+def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) -> bool:
+    if tool_name not in _DESKTOP_INSPECT_TOOLS:
+        return False
+    if getattr(task_state, "desktop_checkpoint_pending", False):
+        return False
+    if not task_state.steps:
+        return False
+    last_step = task_state.steps[-1]
+    if last_step.get("type") != "tool" or last_step.get("status") != "completed":
+        return False
+    if str(last_step.get("tool", "")).strip() != tool_name:
+        return False
+
+    require_screenshot = tool_name == "desktop_capture_screenshot"
+    assessment = _desktop_evidence_assessment(
+        task_state,
+        purpose="desktop_investigation",
+        target_window_title=_goal_desktop_window_title(planner_goal),
+        require_screenshot=require_screenshot,
+    )
+    if not assessment.get("sufficient", False):
+        return False
+    if require_screenshot and not str(getattr(task_state, "desktop_last_screenshot_path", "")).strip():
+        return False
+    return True
+
+
+def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=None):
+    note = f"Stopped repeating {tool_name} after the current desktop evidence was already sufficient and finalized from the latest desktop observation."
+    return _finalize_guarded_completion(
+        llm,
+        task_state,
+        note,
+        tool_name=tool_name,
+        args={},
+        session_store=session_store,
+    )
+
+
 def _finalize_synthesized_desktop_pause(
     llm,
     task_state,
@@ -544,12 +605,24 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
 
     click_point = _goal_desktop_click_point(planner_goal)
     if click_point and not _has_any_tool_step(task_state, "desktop_click_point"):
+        desktop_activity = task_state._collect_desktop_activity(limit=4)
+        selected_assessment = _desktop_evidence_assessment(
+            task_state,
+            purpose="desktop_action_prepare",
+            target_window_title=_goal_desktop_window_title(planner_goal),
+            require_screenshot=True,
+        )
+        if not selected_assessment.get("sufficient", False):
+            return None
         x, y = click_point
+        evidence_summary = str(desktop_activity.get("selected_evidence", {}).get("summary", "")).strip()
         checkpoint_reason = (
             f"Ready to click the known visible button center at ({x}, {y}) in the active window "
             f"'{getattr(task_state, 'desktop_active_window_title', 'the active window')}'. "
             "Awaiting explicit user approval before performing the real desktop click."
         )
+        if evidence_summary:
+            checkpoint_reason += f" Evidence basis: {evidence_summary}"
         checkpoint_target = f"{getattr(task_state, 'desktop_active_window_title', 'desktop target')} @ ({x}, {y})"
         resume_args = {
             "x": x,
@@ -573,13 +646,25 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
 
     type_request = _goal_desktop_type_request(planner_goal)
     if type_request and not _has_any_tool_step(task_state, "desktop_type_text"):
+        desktop_activity = task_state._collect_desktop_activity(limit=4)
+        selected_assessment = _desktop_evidence_assessment(
+            task_state,
+            purpose="desktop_action_prepare",
+            target_window_title=_goal_desktop_window_title(planner_goal),
+            require_screenshot=False,
+        )
+        if not selected_assessment.get("sufficient", False):
+            return None
         value = str(type_request.get("value", "")).strip()
         field_label = str(type_request.get("field_label", "")).strip()
+        evidence_summary = str(desktop_activity.get("selected_evidence", {}).get("summary", "")).strip()
         checkpoint_reason = (
             f"Ready to type bounded text into '{field_label}' in the active window "
             f"'{getattr(task_state, 'desktop_active_window_title', 'the active window')}'. "
             "Awaiting explicit user approval before performing the real desktop typing action."
         )
+        if evidence_summary:
+            checkpoint_reason += f" Evidence basis: {evidence_summary}"
         checkpoint_target = f"{field_label} in {getattr(task_state, 'desktop_active_window_title', 'the active window')}"
         resume_args = {
             "value": value,
@@ -739,6 +824,9 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
 
         if _is_redundant_browser_follow_up(task_state, tool_name, args):
             return _finalize_redundant_browser_follow_up(llm, task_state, tool_name, args, session_store=session_store)
+
+        if _is_redundant_desktop_observation(task_state, tool_name, planner_goal):
+            return _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=session_store)
 
         result = tool_runtime.execute(tool_name, args)
         _record_tool_result(task_state, tool_name, args, result)

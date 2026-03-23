@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from core.backend_schemas import (
     normalize_desktop_evidence_ref,
+    normalize_desktop_evidence_assessment,
     normalize_desktop_evidence_artifact,
     normalize_desktop_evidence_summary,
     normalize_screen_observation,
@@ -316,6 +317,115 @@ def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "recency_seconds": int(normalized.get("recency_seconds", 0) or 0),
         "selection_reason": normalized.get("selection_reason", ""),
     }
+
+
+def assess_desktop_evidence(
+    summary: Dict[str, Any] | None,
+    *,
+    purpose: str = "desktop_investigation",
+    target_window_title: str = "",
+    require_screenshot: bool = False,
+    max_age_seconds: int = 180,
+) -> Dict[str, Any]:
+    normalized = normalize_desktop_evidence_summary(summary if isinstance(summary, dict) else {})
+    purpose_text = _trim_text(purpose or "desktop_investigation", limit=80) or "desktop_investigation"
+    target_text = _trim_text(target_window_title, limit=180)
+    evidence_id = _trim_text(normalized.get("evidence_id", ""), limit=80)
+    recency_seconds = _coerce_int(normalized.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000)
+    age_limit = _coerce_int(max_age_seconds, 180, minimum=15, maximum=86_400)
+    active_title = _trim_text(normalized.get("active_window_title", ""), limit=180).lower()
+    selected_target = _trim_text(normalized.get("target_window_title", ""), limit=180).lower()
+    desired_target = target_text.lower()
+    target_match = True
+    if desired_target:
+        target_match = (
+            desired_target in active_title
+            or desired_target in selected_target
+            or (active_title and active_title in desired_target)
+            or (selected_target and selected_target in desired_target)
+        )
+
+    has_summary = bool(evidence_id or normalized.get("summary", ""))
+    has_screenshot = bool(normalized.get("has_screenshot", False))
+    is_partial = bool(normalized.get("is_partial", False))
+    stale = recency_seconds > age_limit if has_summary else False
+
+    state = "sufficient"
+    sufficient = True
+    needs_refresh = False
+    reason = "current_evidence"
+
+    if not has_summary:
+        state = "missing"
+        sufficient = False
+        needs_refresh = True
+        reason = "no_evidence"
+    elif not target_match:
+        state = "needs_refresh"
+        sufficient = False
+        needs_refresh = True
+        reason = "target_window_mismatch"
+    elif require_screenshot and not has_screenshot:
+        state = "needs_refresh"
+        sufficient = False
+        needs_refresh = True
+        reason = "missing_screenshot"
+    elif stale:
+        state = "needs_refresh"
+        sufficient = False
+        needs_refresh = True
+        reason = "stale_evidence"
+    elif is_partial:
+        if purpose_text == "desktop_investigation":
+            state = "partial"
+            sufficient = True
+            needs_refresh = False
+            reason = "partial_but_answerable"
+        else:
+            state = "needs_refresh"
+            sufficient = False
+            needs_refresh = True
+            reason = "partial_evidence"
+
+    if state == "sufficient":
+        summary_text = (
+            f"Current desktop evidence is sufficient for {purpose_text.replace('_', ' ')}."
+            if evidence_id
+            else "Current desktop evidence is sufficient."
+        )
+    elif state == "partial":
+        summary_text = (
+            f"Current desktop evidence is partial but likely sufficient for {purpose_text.replace('_', ' ')}."
+        )
+    elif state == "missing":
+        summary_text = "No relevant desktop evidence is available yet."
+    elif reason == "target_window_mismatch":
+        summary_text = "Current desktop evidence does not match the intended target window."
+    elif reason == "missing_screenshot":
+        summary_text = "A fresh desktop screenshot is recommended before this action."
+    elif reason == "stale_evidence":
+        summary_text = "Current desktop evidence is stale and should be refreshed."
+    else:
+        summary_text = "Current desktop evidence should be refreshed before proceeding."
+
+    return normalize_desktop_evidence_assessment(
+        {
+            "evidence_id": evidence_id,
+            "purpose": purpose_text,
+            "state": state,
+            "sufficient": sufficient,
+            "needs_refresh": needs_refresh,
+            "reason": reason,
+            "summary": summary_text,
+            "target_window_title": target_text,
+            "target_window_match": target_match,
+            "has_screenshot": has_screenshot,
+            "is_partial": is_partial,
+            "recency_seconds": recency_seconds,
+            "stale": stale,
+            "selection_reason": normalized.get("selection_reason", ""),
+        }
+    )
 
 
 def describe_evidence_artifact(
@@ -817,6 +927,27 @@ class DesktopEvidenceStore:
             observation_token=observation_token,
             active_window_title=active_window_title,
             target_window_title=target_window_title,
+        )
+
+    def assess_summary(
+        self,
+        *,
+        summary: Dict[str, Any] | None = None,
+        evidence_id: str = "",
+        purpose: str = "desktop_investigation",
+        target_window_title: str = "",
+        require_screenshot: bool = False,
+        max_age_seconds: int = 180,
+    ) -> Dict[str, Any]:
+        resolved_summary = summary if isinstance(summary, dict) else {}
+        if not resolved_summary and _trim_text(evidence_id, limit=80):
+            resolved_summary = self.summary_for(evidence_id)
+        return assess_desktop_evidence(
+            resolved_summary,
+            purpose=purpose,
+            target_window_title=target_window_title,
+            require_screenshot=require_screenshot,
+            max_age_seconds=max_age_seconds,
         )
 
     def artifact_metadata(self, evidence_id: str, *, content_path: str = "") -> Dict[str, Any]:

@@ -34,6 +34,13 @@ BACKEND_REASON_CODES = {
     "invalid_input",
     "not_found",
     "stale",
+    "current_evidence",
+    "no_evidence",
+    "partial_evidence",
+    "partial_but_answerable",
+    "stale_evidence",
+    "target_window_mismatch",
+    "missing_screenshot",
     "missing_artifact",
     "error",
 }
@@ -366,6 +373,29 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
         "recency_seconds": _coerce_int(value.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "backend": _trim_text(value.get("backend", ""), limit=120),
         "selection_reason": _normalize_reason(value.get("selection_reason", "selected"), default="selected"),
+    }
+
+
+def normalize_desktop_evidence_assessment(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    state = _trim_text(value.get("state", ""), limit=40).lower() or "missing"
+    if state not in {"sufficient", "partial", "needs_refresh", "missing"}:
+        state = "missing"
+    return {
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "purpose": _trim_text(value.get("purpose", ""), limit=80),
+        "state": state,
+        "sufficient": _coerce_bool(value.get("sufficient", False), False),
+        "needs_refresh": _coerce_bool(value.get("needs_refresh", False), False),
+        "reason": _normalize_reason(value.get("reason", state), default=state),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+        "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
+        "target_window_match": _coerce_bool(value.get("target_window_match", False), False),
+        "has_screenshot": _coerce_bool(value.get("has_screenshot", False), False),
+        "is_partial": _coerce_bool(value.get("is_partial", False), False),
+        "recency_seconds": _coerce_int(value.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "stale": _coerce_bool(value.get("stale", False), False),
+        "selection_reason": _normalize_reason(value.get("selection_reason", ""), default="selected"),
     }
 
 
