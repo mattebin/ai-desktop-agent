@@ -58,6 +58,23 @@ Heuristics currently prioritize:
 - no new desktop action capability
 - no broad UI automation
 
+## UI and client presentation
+
+Current UI/client surfaces use the existing authoritative local API fields rather than recomputing evidence relevance in the frontend.
+
+Evidence now appears in compact form in:
+
+- pending desktop approval surfaces via linked checkpoint evidence
+- active task/status surfaces via selected evidence and checkpoint evidence previews
+- secondary details surfaces via recent compact evidence summaries
+
+Presentation rules:
+
+- keep summaries compact and calm
+- prefer selected/checkpoint evidence references over raw bundles
+- keep retained artifact paths secondary
+- handle missing, partial, or pruned evidence explicitly without inflating the main chat surface
+
 ## Why this matters
 
 This prepares future approval and investigation flows to refer to the best recent desktop evidence bundle explicitly and compactly, without turning the current system into a raw artifact dump.

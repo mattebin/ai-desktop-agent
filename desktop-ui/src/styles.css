@@ -859,6 +859,102 @@ a {
   margin-top: 16px;
 }
 
+.rail-evidence-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.evidence-preview {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.evidence-preview.is-partial {
+  border-color: rgba(154, 103, 0, 0.22);
+  background: var(--warning-soft);
+}
+
+.evidence-preview-empty {
+  background: var(--surface-muted);
+}
+
+.evidence-preview-header,
+.evidence-preview-footer,
+.evidence-preview-meta,
+.evidence-list-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.evidence-preview-header,
+.evidence-preview-footer {
+  justify-content: space-between;
+}
+
+.evidence-preview-title {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--muted-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.evidence-preview-summary {
+  margin: 10px 0 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.evidence-preview-meta {
+  margin-top: 10px;
+}
+
+.evidence-preview-footer {
+  margin-top: 10px;
+}
+
+.evidence-preview-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.5;
+}
+
+.evidence-chip,
+.evidence-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 0.76rem;
+  line-height: 1;
+}
+
+.evidence-chip {
+  background: var(--neutral-soft);
+  color: var(--muted);
+}
+
+.evidence-chip-soft {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.evidence-reference {
+  background: var(--surface-muted);
+  color: var(--muted-soft);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+}
+
 .approval-footnote {
   margin: 12px 0 0;
   color: var(--muted-soft);
@@ -935,6 +1031,14 @@ a {
   background: var(--surface-soft);
   border: 1px solid var(--border-soft);
   min-height: 220px;
+}
+
+.evidence-mini-list {
+  margin-top: 14px;
+}
+
+.evidence-list-footer {
+  margin-top: 10px;
 }
 
 @media (max-width: 1380px) {

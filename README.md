@@ -90,6 +90,12 @@ Current role:
 
 The evidence layer now also exposes compact recent summaries and deterministic selection helpers for the most relevant recent evidence bundle.
 
+Those summaries now feed compact UI/client presentation too:
+
+- desktop approvals show linked evidence context
+- active task/status surfaces show selected/checkpoint evidence previews
+- secondary details surfaces can inspect recent evidence summaries without raw bundle spam
+
 Current non-goals:
 
 - no OCR-heavy desktop interpretation

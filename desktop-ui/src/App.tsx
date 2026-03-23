@@ -9,8 +9,10 @@ import {
   BrowserState,
   createSession,
   DesktopRuntimeStatus,
+  EvidenceSummary,
   ensureLocalApi,
   getAlerts,
+  getDesktopEvidence,
   getQueueState,
   getRecentRuns,
   getScheduledState,
@@ -49,6 +51,7 @@ type ControlSnapshot = {
   scheduled: ScheduledPayload | null;
   watches: WatchPayload | null;
   recentRuns: RunEntry[];
+  desktopEvidence: EvidenceSummary[];
 };
 
 type ThemeMode = "light" | "dark";
@@ -382,6 +385,155 @@ function approvalSummary(pending?: PendingApproval | null): string {
   return pending.reason || pending.summary || pending.step || pending.kind;
 }
 
+function hasEvidencePreview(preview?: EvidenceSummary | null): boolean {
+  if (!preview) {
+    return false;
+  }
+  return Boolean(
+    preview.evidence_id ||
+      preview.summary ||
+      preview.active_window_title ||
+      preview.target_window_title ||
+      preview.has_screenshot ||
+      preview.ui_evidence_present,
+  );
+}
+
+function formatEvidenceRecency(seconds?: number): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    return "";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s ago`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m ago`;
+  }
+  if (seconds < 86400) {
+    return `${Math.round(seconds / 3600)}h ago`;
+  }
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+function evidenceMetaItems(preview?: EvidenceSummary | null): string[] {
+  if (!preview) {
+    return [];
+  }
+  const items = [
+    preview.active_window_title ? `Window: ${preview.active_window_title}` : "",
+    preview.target_window_title ? `Target: ${preview.target_window_title}` : "",
+    preview.active_window_process ? `Process: ${preview.active_window_process}` : "",
+    preview.screen_summary || preview.window_summary || "",
+    formatEvidenceRecency(preview.recency_seconds),
+  ].filter(Boolean);
+  return items.slice(0, 3);
+}
+
+function evidenceSummaryText(preview?: EvidenceSummary | null): string {
+  if (!preview) {
+    return "";
+  }
+  return (
+    preview.summary ||
+    preview.active_window_title ||
+    preview.target_window_title ||
+    preview.window_summary ||
+    preview.screen_summary ||
+    "Desktop evidence captured."
+  );
+}
+
+function evidenceBadges(preview?: EvidenceSummary | null): string[] {
+  if (!preview) {
+    return [];
+  }
+  const badges: string[] = [];
+  if (preview.is_partial) {
+    badges.push("Partial");
+  }
+  if (preview.has_screenshot) {
+    badges.push(preview.has_artifact ? "Screenshot retained" : "Screenshot unavailable");
+  }
+  if (preview.ui_evidence_present) {
+    badges.push(preview.ui_control_count ? `UI evidence (${preview.ui_control_count})` : "UI evidence");
+  }
+  return badges;
+}
+
+function evidenceNote(preview?: EvidenceSummary | null): string {
+  if (!preview) {
+    return "";
+  }
+  if (preview.has_screenshot && !preview.has_artifact) {
+    return "A screenshot was collected earlier, but the retained artifact is no longer available.";
+  }
+  if (preview.is_partial) {
+    return "This evidence bundle is partial, so some desktop context may still be missing.";
+  }
+  return "";
+}
+
+function EvidencePreviewCard({
+  title,
+  preview,
+  emptyText,
+}: {
+  title: string;
+  preview?: EvidenceSummary | null;
+  emptyText?: string;
+}) {
+  if (!hasEvidencePreview(preview)) {
+    if (!emptyText) {
+      return null;
+    }
+    return (
+      <div className="evidence-preview evidence-preview-empty">
+        <div className="evidence-preview-header">
+          <span className="evidence-preview-title">{title}</span>
+        </div>
+        <p className="evidence-preview-summary">{emptyText}</p>
+      </div>
+    );
+  }
+
+  const metaItems = evidenceMetaItems(preview);
+  const badges = evidenceBadges(preview);
+  const note = evidenceNote(preview);
+
+  return (
+    <div className={clsx("evidence-preview", preview?.is_partial && "is-partial")}>
+      <div className="evidence-preview-header">
+        <span className="evidence-preview-title">{title}</span>
+        {preview?.reason && preview.reason !== "collected" ? <span className="muted-label">{plainTextPreview(preview.reason, 28)}</span> : null}
+      </div>
+      <p className="evidence-preview-summary">{plainTextPreview(evidenceSummaryText(preview), 180)}</p>
+      {metaItems.length ? (
+        <div className="evidence-preview-meta">
+          {metaItems.map((item) => (
+            <span key={item} className="evidence-chip">
+              {plainTextPreview(item, 48)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {badges.length ? (
+        <div className="evidence-preview-meta">
+          {badges.map((item) => (
+            <span key={item} className="evidence-chip evidence-chip-soft">
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="evidence-preview-footer">
+        {preview?.evidence_id ? <span className="evidence-reference">Ref {preview.evidence_id}</span> : null}
+        {preview?.selection_reason ? <span className="muted-label">{plainTextPreview(preview.selection_reason, 26)}</span> : null}
+      </div>
+      {note ? <p className="evidence-preview-note">{note}</p> : null}
+    </div>
+  );
+}
+
 function timelineFromEvent(event: StreamEvent<Record<string, unknown>>): ActivityEntry | null {
   const now = event.emitted_at || new Date().toISOString();
   const data = event.data || {};
@@ -596,6 +748,7 @@ export default function App() {
     scheduled: null,
     watches: null,
     recentRuns: [],
+    desktopEvidence: [],
   });
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -757,17 +910,19 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
-    const [queue, scheduled, watches, runs] = await Promise.all([
+    const [queue, scheduled, watches, runs, desktopEvidence] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
       getRecentRuns(apiBaseUrl, sessionId, 10),
+      getDesktopEvidence(apiBaseUrl, 6),
     ]);
     setControlData({
       queue,
       scheduled,
       watches,
       recentRuns: runs.items || [],
+      desktopEvidence: desktopEvidence.recent_summaries || [],
     });
   }
 
@@ -1010,6 +1165,13 @@ export default function App() {
       ? `${runtimeEffort} (chat/final)`
       : runtimeEffort;
   const activeTask = sessionDetail?.operator?.active_task || status?.active_task || null;
+  const selectedDesktopEvidence = status?.desktop?.selected_evidence || null;
+  const checkpointDesktopEvidence = status?.desktop?.checkpoint_evidence || null;
+  const pendingApprovalEvidence = pendingApproval?.evidence_preview || checkpointDesktopEvidence || null;
+  const distinctCheckpointEvidence =
+    checkpointDesktopEvidence?.evidence_id && checkpointDesktopEvidence.evidence_id === selectedDesktopEvidence?.evidence_id
+      ? null
+      : checkpointDesktopEvidence;
   const title = sessionDetail?.title || "New conversation";
   const emptyState = !messages.length && !loadingConversation;
   const composerHint =
@@ -1314,6 +1476,15 @@ export default function App() {
             <>
               <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
               <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
+              <EvidencePreviewCard
+                title="Linked evidence"
+                preview={pendingApprovalEvidence}
+                emptyText={
+                  pendingApproval?.evidence_summary
+                    ? plainTextPreview(pendingApproval.evidence_summary, 180)
+                    : "No desktop evidence is linked to this checkpoint yet."
+                }
+              />
               <p className="approval-footnote">The operator is paused until you approve or reject this step.</p>
               <div className="approval-actions">
                 <button className="approve-button" disabled={Boolean(approving)} onClick={() => void handleApproval("approve")}>
@@ -1349,6 +1520,14 @@ export default function App() {
               <span className="stat-label">Page</span>
               <p>{plainTextPreview(status?.browser?.current_title || status?.browser?.current_url || "No live browser page.", 140)}</p>
             </div>
+          </div>
+          <div className="rail-evidence-stack">
+            <EvidencePreviewCard
+              title="Selected evidence"
+              preview={selectedDesktopEvidence}
+              emptyText="No desktop evidence is selected for the current task."
+            />
+            {distinctCheckpointEvidence ? <EvidencePreviewCard title="Checkpoint evidence" preview={distinctCheckpointEvidence} /> : null}
           </div>
         </section>
 
@@ -1403,6 +1582,41 @@ export default function App() {
             </header>
 
             <div className="details-grid">
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Desktop evidence</h4>
+                  <span className="muted-label">{controlData.desktopEvidence.length}</span>
+                </div>
+                <EvidencePreviewCard
+                  title="Selected for this task"
+                  preview={selectedDesktopEvidence}
+                  emptyText="No selected desktop evidence for the current task."
+                />
+                {distinctCheckpointEvidence ? <EvidencePreviewCard title="Linked checkpoint" preview={distinctCheckpointEvidence} /> : null}
+                <div className="mini-list evidence-mini-list">
+                  {controlData.desktopEvidence.map((item) => (
+                    <article
+                      key={item.evidence_id || item.timestamp || item.summary}
+                      className={clsx("mini-list-item", item.is_partial ? "tone-warning" : "tone-neutral")}
+                    >
+                      <div className="mini-list-title">
+                        {plainTextPreview(item.active_window_title || item.summary || item.evidence_id || "Desktop evidence", 56)}
+                        <span className="mini-list-time">{formatDateTime(item.timestamp)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(evidenceSummaryText(item), 132)}</div>
+                      <div className="evidence-list-footer">
+                        {item.evidence_id ? <span className="evidence-reference">Ref {item.evidence_id}</span> : null}
+                        {item.has_screenshot ? <span className="evidence-chip evidence-chip-soft">Screenshot</span> : null}
+                        {item.is_partial ? <span className="evidence-chip">Partial</span> : null}
+                      </div>
+                    </article>
+                  ))}
+                  {!controlData.desktopEvidence.length ? (
+                    <p className="secondary-copy">No recent desktop evidence has been retained for this operator session.</p>
+                  ) : null}
+                </div>
+              </section>
+
               <section className="details-card">
                 <div className="rail-card-header">
                   <h4>Recent runs</h4>

@@ -595,6 +595,12 @@ if 'runtimeStatus?: DesktopRuntimeStatus' not in desktop_api_source or 'logPath?
     raise SystemExit("Desktop UI API client is missing the expected runtime bootstrap metadata.")
 if 'DRAFTS_STORAGE_KEY' not in desktop_app_source or 'Jump to latest' not in desktop_app_source or 'code-copy-button' not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
     raise SystemExit("Desktop UI is missing the expected transcript/composer polish features.")
+if "getDesktopEvidence" not in desktop_api_source or "evidence_preview?: EvidenceSummary" not in desktop_api_source or "selected_evidence?: EvidenceSummary" not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing the expected desktop evidence summary typing and fetch helpers.")
+if "Linked evidence" not in desktop_app_source or "Selected evidence" not in desktop_app_source or "Desktop evidence" not in desktop_app_source:
+    raise SystemExit("Desktop UI App.tsx is missing the expected desktop evidence presentation surfaces.")
+if "evidence-preview" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8") or "evidence-list-footer" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
+    raise SystemExit("Desktop UI styles are missing the expected compact desktop evidence presentation classes.")
 print("[OK] desktop ui scaffold")
 
 if not _session_matches_query({"title": "Inspect repo", "status": "paused", "summary": "Needs approval", "pending_approval": {"kind": "browser_checkpoint"}}, "inspect paused"):

@@ -13,6 +13,41 @@ export type PendingApproval = {
   reason?: string;
   summary?: string;
   step?: string;
+  tool?: string;
+  target?: string;
+  evidence_summary?: string;
+  evidence_preview?: EvidenceSummary;
+};
+
+export type EvidenceSummary = {
+  evidence_id?: string;
+  timestamp?: string;
+  source_action?: string;
+  evidence_kind?: string;
+  reason?: string;
+  summary?: string;
+  active_window_title?: string;
+  active_window_class_name?: string;
+  active_window_process?: string;
+  target_window_title?: string;
+  window_count?: number;
+  monitor_count?: number;
+  screen_size?: string;
+  window_summary?: string;
+  screen_summary?: string;
+  has_screenshot?: boolean;
+  has_artifact?: boolean;
+  screenshot_scope?: string;
+  screenshot_backend?: string;
+  screenshot_path?: string;
+  bundle_path?: string;
+  ui_evidence_present?: boolean;
+  ui_control_count?: number;
+  observation_token?: string;
+  is_partial?: boolean;
+  recency_seconds?: number;
+  backend?: string;
+  selection_reason?: string;
 };
 
 export type SessionMessage = {
@@ -83,6 +118,23 @@ export type BrowserState = {
   last_successful_action?: string;
 };
 
+export type DesktopState = {
+  active_window_title?: string;
+  active_window_process?: string;
+  last_action?: string;
+  last_target_window?: string;
+  screenshot_path?: string;
+  evidence_id?: string;
+  evidence_summary?: string;
+  evidence_bundle_path?: string;
+  checkpoint_pending?: boolean;
+  checkpoint_tool?: string;
+  checkpoint_reason?: string;
+  checkpoint_evidence_id?: string;
+  selected_evidence?: EvidenceSummary;
+  checkpoint_evidence?: EvidenceSummary;
+};
+
 export type RuntimeConfig = {
   active_model?: string;
   reasoning_effort?: string;
@@ -120,6 +172,7 @@ export type StatusPayload = {
   latest_alert?: AlertItem;
   latest_run?: RunEntry;
   runtime?: RuntimeConfig;
+  desktop?: DesktopState;
 };
 
 export type AlertItem = {
@@ -237,6 +290,19 @@ export type EnsureLocalApiResult = {
   managedByDesktop: boolean;
   runtimeStatus?: DesktopRuntimeStatus;
   logPath?: string;
+};
+
+export type DesktopEvidencePayload = {
+  recent?: Array<Record<string, unknown>>;
+  recent_summaries?: EvidenceSummary[];
+  status?: {
+    root?: string;
+    count?: number;
+    latest?: Record<string, unknown>;
+    latest_summary?: EvidenceSummary;
+    available?: boolean;
+    reason?: string;
+  };
 };
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -377,6 +443,10 @@ export async function getAlerts(baseUrl: string, sessionId = "", limit = 8): Pro
     limit,
     session_id: sessionId || undefined,
   });
+}
+
+export async function getDesktopEvidence(baseUrl: string, limit = 8): Promise<DesktopEvidencePayload> {
+  return request<DesktopEvidencePayload>(baseUrl, "/desktop/evidence", undefined, { limit });
 }
 
 export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: RunEntry[] }> {
