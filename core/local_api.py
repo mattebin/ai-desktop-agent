@@ -162,6 +162,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
             "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
             "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
+            "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
@@ -234,6 +235,12 @@ def _compact_evidence_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "is_partial": bool(preview.get("is_partial", False)),
         "recency_seconds": _coerce_int(preview.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "selection_reason": _trim_text(preview.get("selection_reason", ""), limit=40),
+        "capture_mode": _trim_text(preview.get("capture_mode", ""), limit=40),
+        "importance": _trim_text(preview.get("importance", ""), limit=40),
+        "importance_reason": _trim_text(preview.get("importance_reason", ""), limit=120),
+        "task_id": _trim_text(preview.get("task_id", ""), limit=60),
+        "task_status": _trim_text(preview.get("task_status", ""), limit=40),
+        "checkpoint_pending": bool(preview.get("checkpoint_pending", False)),
     }
 
 

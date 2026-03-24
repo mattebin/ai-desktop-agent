@@ -997,6 +997,7 @@ class TaskState:
         checkpoint_evidence: Dict[str, Any] = {}
         selected_evidence_assessment: Dict[str, Any] = {}
         checkpoint_evidence_assessment: Dict[str, Any] = {}
+        recent_context_evidence: List[Dict[str, Any]] = []
         try:
             from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 
@@ -1028,11 +1029,19 @@ class TaskState:
                 require_screenshot=str(self.desktop_checkpoint_tool).strip() == "desktop_click_point",
                 max_age_seconds=120,
             )
+            recent_context_evidence = store.recent_context_summaries(
+                limit=3,
+                state_scope_id=self.state_scope_id,
+                task_id=str(getattr(self, "task_id", "")).strip() if hasattr(self, "task_id") else "",
+                active_window_title=self.desktop_active_window_title,
+                checkpoint_target=self.desktop_checkpoint_target or self.desktop_last_target_window,
+            )
         except Exception:
             selected_evidence = {}
             checkpoint_evidence = {}
             selected_evidence_assessment = {}
             checkpoint_evidence_assessment = {}
+            recent_context_evidence = []
 
         return {
             "windows": self._normalize_values(self.desktop_windows[-limit:], limit=limit, text_limit=180),
@@ -1055,6 +1064,7 @@ class TaskState:
             "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "selected_evidence": selected_evidence,
             "selected_evidence_assessment": selected_evidence_assessment,
+            "recent_context_evidence": recent_context_evidence,
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
             "checkpoint_tool": self.desktop_checkpoint_tool[:80],
@@ -1626,6 +1636,18 @@ class TaskState:
             )
             for line in evidence_grounding_lines + checkpoint_grounding_lines:
                 lines.append(line)
+            recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
+            if isinstance(recent_context_evidence, list) and recent_context_evidence:
+                lines.append("Recent desktop context:")
+                for item in recent_context_evidence[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    label = str(item.get("active_window_title", "") or item.get("summary", "")).strip()
+                    detail = str(item.get("summary", "")).strip()
+                    if label and detail and detail != label:
+                        lines.append(f"- {label}: {detail}")
+                    elif detail:
+                        lines.append(f"- {detail}")
             if desktop_activity["actions"]:
                 lines.append("Desktop action history:")
                 for action in desktop_activity["actions"]:
@@ -2438,6 +2460,15 @@ class TaskState:
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
             ):
                 lines.append(line)
+            recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
+            if isinstance(recent_context_evidence, list) and recent_context_evidence:
+                lines.append("Recent desktop context:")
+                for item in recent_context_evidence[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    summary = str(item.get("summary", "")).strip()
+                    if summary:
+                        lines.append(f"- {summary}")
             latest_recovery = desktop_activity.get("latest_recovery", {}) if isinstance(desktop_activity.get("latest_recovery", {}), dict) else {}
             if latest_recovery.get("state"):
                 recovery_line = f"- Desktop recovery state: {latest_recovery.get('state', '')}"

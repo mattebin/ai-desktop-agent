@@ -20,6 +20,7 @@ mods = [
     "core.browser_tasks",
     "core.chat_sessions",
     "core.config",
+    "core.desktop_capture_service",
     "core.desktop_evidence",
     "core.desktop_recovery",
     "core.execution_manager",
@@ -60,6 +61,7 @@ if failed:
 
 from core.alerts import AlertStore
 import core.desktop_evidence as desktop_evidence_module
+import core.desktop_capture_service as desktop_capture_service_module
 from core.desktop_evidence import (
     DesktopEvidenceStore,
     assess_desktop_evidence,
@@ -72,6 +74,8 @@ from core.desktop_evidence import (
 )
 from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
 from core.chat_sessions import ChatSessionManager
+from core.config import load_settings
+from core.desktop_capture_service import DesktopCaptureService
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _goal_requests_brief_answer, _goal_requests_single_recommendation
@@ -111,7 +115,9 @@ from tools.desktop import (
 )
 from tools.registry import get_tools
 
-controller = OperatorController()
+SMOKE_SETTINGS = {**load_settings(), "desktop_auto_capture_enabled": False}
+
+controller = OperatorController(settings=SMOKE_SETTINGS)
 snapshot = controller.get_snapshot()
 if not isinstance(snapshot, dict):
     raise SystemExit("OperatorController.get_snapshot() did not return a dict.")
@@ -145,6 +151,8 @@ if not isinstance(snapshot.get("task_control", {}), dict):
     raise SystemExit("OperatorController.get_snapshot() did not include task-control state.")
 if not isinstance(snapshot.get("infrastructure", {}), dict):
     raise SystemExit("OperatorController.get_snapshot() did not include infrastructure backend state.")
+if not isinstance(snapshot.get("infrastructure", {}).get("desktop_capture", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include desktop auto-capture infrastructure state.")
 runtime = snapshot.get("runtime", {})
 if runtime.get("active_model") != "gpt-5.4" or runtime.get("reasoning_effort") != "medium":
     raise SystemExit("OperatorController.get_snapshot() did not expose the expected runtime model configuration.")
@@ -512,7 +520,7 @@ except TimeoutError as exc:
         raise SystemExit("wait_for_local_api_status() timeout did not include the expected diagnostic fields.")
 print("[OK] local api client")
 
-cors_server = LocalOperatorApiServer(port=0)
+cors_server = LocalOperatorApiServer(port=0, settings=SMOKE_SETTINGS)
 cors_server.start_in_thread()
 cors_request = Request(
     f"http://127.0.0.1:{cors_server.port}/health",
@@ -540,11 +548,12 @@ print("[OK] local api cors")
 temp_evidence_root = Path("data/desktop_evidence_smoke")
 if temp_evidence_root.exists():
     shutil.rmtree(temp_evidence_root, ignore_errors=True)
-temp_evidence_store = DesktopEvidenceStore(temp_evidence_root, max_items=2)
+temp_evidence_store = DesktopEvidenceStore(temp_evidence_root, max_items=3)
 evidence_now = datetime.now().astimezone()
 first_timestamp = (evidence_now - timedelta(seconds=30)).isoformat(timespec="seconds")
 second_timestamp = (evidence_now - timedelta(seconds=20)).isoformat(timespec="seconds")
 third_timestamp = (evidence_now - timedelta(seconds=10)).isoformat(timespec="seconds")
+fourth_timestamp = evidence_now.isoformat(timespec="seconds")
 
 first_capture_path = temp_evidence_store.artifact_path("desk-smoke-1", extension=".png")
 first_capture_path.write_bytes(b"desktop evidence smoke 1")
@@ -597,6 +606,12 @@ first_bundle = build_desktop_evidence_bundle(
         "monitors": [{"left": 0, "top": 0, "width": 1920, "height": 1080}],
         "backend": "mss",
     },
+    capture_mode="manual",
+    importance="manual",
+    importance_reason="manual_capture",
+    state_scope_id="chat:desktop-evidence",
+    task_id="task-desktop-evidence",
+    task_status="running",
 )
 first_bundle["evidence_id"] = "desk-smoke-1"
 first_bundle["timestamp"] = first_timestamp
@@ -617,6 +632,12 @@ second_bundle = build_desktop_evidence_bundle(
     screenshot={},
     ui_evidence={"backend": "pywinauto", "target": "Partial Evidence Window", "controls": []},
     errors=["screenshot backend unavailable"],
+    capture_mode="auto",
+    importance="normal",
+    importance_reason="state_changed",
+    state_scope_id="chat:desktop-evidence",
+    task_id="task-desktop-evidence",
+    task_status="running",
 )
 second_bundle["evidence_id"] = "desk-smoke-2"
 second_bundle["timestamp"] = second_timestamp
@@ -638,15 +659,50 @@ third_bundle = build_desktop_evidence_bundle(
         "scope": "desktop",
         "bounds": {"x": 0, "y": 0, "width": 1920, "height": 1080},
     },
+    capture_mode="manual",
+    importance="checkpoint",
+    importance_reason="checkpoint_pending",
+    state_scope_id="chat:desktop-evidence",
+    task_id="task-desktop-evidence",
+    task_status="paused",
+    checkpoint_pending=True,
+    checkpoint_tool="desktop_click_point",
+    checkpoint_target="Approval Target Window",
 )
 third_bundle["evidence_id"] = "desk-smoke-3"
 third_bundle["timestamp"] = third_timestamp
 third_ref = temp_evidence_store.record_bundle(third_bundle)
-if temp_evidence_store.load_bundle("desk-smoke-1"):
-    raise SystemExit("DesktopEvidenceStore did not prune an older bundle when retention was exceeded.")
-if first_capture_path.exists():
-    raise SystemExit("DesktopEvidenceStore did not prune an older screenshot artifact when retention was exceeded.")
-if len(temp_evidence_store.recent_refs(limit=8)) != 2:
+fourth_capture_path = temp_evidence_store.artifact_path("desk-smoke-4", extension=".png")
+fourth_capture_path.write_bytes(b"desktop evidence smoke 4")
+fourth_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_auto_capture",
+    active_window={"title": "Background Window", "window_id": "0x00123459", "process_name": "explorer.exe"},
+    windows=[{"title": "Background Window", "window_id": "0x00123459", "process_name": "explorer.exe"}],
+    observation_token="desktop-evidence-smoke-4",
+    screenshot={
+        "backend": "mss",
+        "path": str(fourth_capture_path),
+        "scope": "active_window",
+        "bounds": {"x": 12, "y": 18, "width": 800, "height": 600},
+    },
+    capture_mode="auto",
+    importance="normal",
+    importance_reason="state_changed",
+    state_scope_id="chat:desktop-idle",
+    task_status="idle",
+)
+fourth_bundle["evidence_id"] = "desk-smoke-4"
+fourth_bundle["timestamp"] = fourth_timestamp
+temp_evidence_store.record_bundle(fourth_bundle)
+if not temp_evidence_store.load_bundle("desk-smoke-1"):
+    raise SystemExit("DesktopEvidenceStore did not preserve an older important/manual bundle when retention was exceeded.")
+if not first_capture_path.exists():
+    raise SystemExit("DesktopEvidenceStore did not preserve an older important/manual screenshot artifact when retention was exceeded.")
+if temp_evidence_store.load_bundle("desk-smoke-4"):
+    raise SystemExit("DesktopEvidenceStore did not prune the lower-priority automatic bundle when retention was exceeded.")
+if fourth_capture_path.exists():
+    raise SystemExit("DesktopEvidenceStore did not prune the lower-priority automatic screenshot artifact when retention was exceeded.")
+if len(temp_evidence_store.recent_refs(limit=8)) != 3:
     raise SystemExit("DesktopEvidenceStore did not enforce bounded recent evidence retention.")
 if temp_evidence_store.find_by_observation_token("desktop-evidence-smoke-3").get("evidence_id") != "desk-smoke-3":
     raise SystemExit("DesktopEvidenceStore did not resolve an evidence ref by observation token.")
@@ -662,9 +718,13 @@ if summary_second.get("reason") != "partial" or not summary_second.get("is_parti
     raise SystemExit("Desktop evidence summary did not preserve partial evidence state.")
 if compact_evidence_preview(summary_third).get("evidence_id") != "desk-smoke-3":
     raise SystemExit("compact_evidence_preview() did not preserve the expected evidence id.")
+if summary_first.get("capture_mode") != "manual" or summary_first.get("importance") != "manual":
+    raise SystemExit("Desktop evidence summary did not preserve manual capture retention metadata.")
+if summary_third.get("importance") != "checkpoint" or not summary_third.get("checkpoint_pending", False):
+    raise SystemExit("Desktop evidence summary did not preserve checkpoint capture metadata.")
 
 recent_summaries = temp_evidence_store.recent_summaries(limit=8)
-if len(recent_summaries) != 2:
+if len(recent_summaries) != 3:
     raise SystemExit("DesktopEvidenceStore did not expose the expected bounded recent summaries.")
 latest_selection = select_recent_evidence(recent_summaries, strategy="latest")
 if latest_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
@@ -692,6 +752,15 @@ task_selection = select_task_evidence(
 )
 if task_selection.get("selected", {}).get("evidence_id") != "desk-smoke-2":
     raise SystemExit("select_task_evidence() did not choose the task-linked evidence.")
+recent_context = temp_evidence_store.recent_context_summaries(
+    limit=3,
+    state_scope_id="chat:desktop-evidence",
+    task_id="task-desktop-evidence",
+    active_window_title="Approval Target Window",
+    checkpoint_target="Approval Target Window",
+)
+if not recent_context or recent_context[0].get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("DesktopEvidenceStore.recent_context_summaries() did not prioritize the checkpoint-bound recent desktop evidence.")
 
 investigation_assessment = assess_desktop_evidence(
     summary_second,
@@ -1076,7 +1145,7 @@ if "desktop_capture_screenshot" not in executed_recovery_tools:
 if any(tool not in {"desktop_inspect_window_state", "desktop_recover_window", "desktop_wait_for_window_ready", "desktop_capture_screenshot"} for tool in executed_recovery_tools):
     raise SystemExit(f"Desktop action recovery used unexpected grouped recovery tools: {executed_recovery_tools}")
 
-evidence_server = LocalOperatorApiServer(port=0)
+evidence_server = LocalOperatorApiServer(port=0, settings=SMOKE_SETTINGS)
 evidence_server.start_in_thread()
 try:
     with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence", timeout=5) as evidence_response:
@@ -1127,7 +1196,7 @@ try:
         if exc.code != 404:
             raise
 
-    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-1/artifact", timeout=5) as pruned_artifact_response:
+    with urlopen(f"http://127.0.0.1:{evidence_server.port}/desktop/evidence/desk-smoke-4/artifact", timeout=5) as pruned_artifact_response:
         pruned_payload = json.loads(pruned_artifact_response.read().decode("utf-8")).get("data", {}).get("artifact", {})
         if pruned_payload.get("availability_state") not in {"pruned", "not_found"}:
             raise SystemExit("Local API did not surface the expected pruned/missing state for a removed evidence artifact.")
@@ -1137,6 +1206,147 @@ finally:
     shutil.rmtree(temp_evidence_root, ignore_errors=True)
 
 print("[OK] desktop evidence layer")
+
+auto_capture_root = Path("data/desktop_auto_capture_smoke")
+shutil.rmtree(auto_capture_root, ignore_errors=True)
+auto_capture_root.mkdir(parents=True, exist_ok=True)
+original_capture_frame = desktop_capture_service_module.capture_desktop_evidence_frame
+original_record_capture = desktop_capture_service_module.record_captured_desktop_evidence
+capture_context = {
+    "state_scope_id": "chat:auto-capture-smoke",
+    "task_id": "task-auto-capture",
+    "task_status": "running",
+    "checkpoint_pending": False,
+    "checkpoint_tool": "",
+    "checkpoint_target": "",
+    "active_window_title": "Smoke Window",
+}
+capture_calls: List[Dict[str, Any]] = []
+record_calls: List[Dict[str, Any]] = []
+first_auto_path = auto_capture_root / "first.png"
+duplicate_auto_path = auto_capture_root / "duplicate.png"
+checkpoint_auto_path = auto_capture_root / "checkpoint.png"
+first_auto_path.write_bytes(b"first desktop capture")
+duplicate_auto_path.write_bytes(b"duplicate desktop capture")
+checkpoint_auto_path.write_bytes(b"checkpoint desktop capture")
+queued_captures = [
+    {
+        "ok": True,
+        "capture_label": "active window 'Smoke Window'",
+        "active_window": {"window_id": "0x00002001", "title": "Smoke Window", "process_name": "notepad.exe"},
+        "windows": [{"window_id": "0x00002001", "title": "Smoke Window"}],
+        "observation": {"observation_token": "auto-smoke-1"},
+        "screenshot": {"path": str(first_auto_path), "scope": "active_window", "backend": "mss"},
+        "evidence_bundle": {},
+        "evidence_ref": {},
+        "screenshot_path": str(first_auto_path),
+        "screenshot_scope": "active_window",
+        "capture_signature": "sig-a",
+        "target_window": {"window_id": "0x00002001", "title": "Smoke Window"},
+    },
+    {
+        "ok": True,
+        "capture_label": "active window 'Smoke Window'",
+        "active_window": {"window_id": "0x00002001", "title": "Smoke Window", "process_name": "notepad.exe"},
+        "windows": [{"window_id": "0x00002001", "title": "Smoke Window"}],
+        "observation": {"observation_token": "auto-smoke-2"},
+        "screenshot": {"path": str(duplicate_auto_path), "scope": "active_window", "backend": "mss"},
+        "evidence_bundle": {},
+        "evidence_ref": {},
+        "screenshot_path": str(duplicate_auto_path),
+        "screenshot_scope": "active_window",
+        "capture_signature": "sig-a",
+        "target_window": {"window_id": "0x00002001", "title": "Smoke Window"},
+    },
+    {
+        "ok": True,
+        "capture_label": "active window 'Smoke Window'",
+        "active_window": {"window_id": "0x00002001", "title": "Smoke Window", "process_name": "notepad.exe"},
+        "windows": [{"window_id": "0x00002001", "title": "Smoke Window"}],
+        "observation": {"observation_token": "auto-smoke-3"},
+        "screenshot": {"path": str(checkpoint_auto_path), "scope": "active_window", "backend": "mss"},
+        "evidence_bundle": {},
+        "evidence_ref": {},
+        "screenshot_path": str(checkpoint_auto_path),
+        "screenshot_scope": "active_window",
+        "capture_signature": "sig-b",
+        "target_window": {"window_id": "0x00002001", "title": "Smoke Window"},
+    },
+]
+
+
+def _fake_capture_desktop_evidence_frame(**kwargs):
+    capture_calls.append(dict(kwargs))
+    if not queued_captures:
+        return {"ok": False, "error": "no queued captures"}
+    return dict(queued_captures.pop(0))
+
+
+def _fake_record_captured_desktop_evidence(**kwargs):
+    record_calls.append(dict(kwargs))
+    bundle_metadata = kwargs.get("bundle_metadata", {}) if isinstance(kwargs.get("bundle_metadata", {}), dict) else {}
+    evidence_id = f"desk-auto-smoke-{len(record_calls)}"
+    return (
+        {
+            "evidence_id": evidence_id,
+            "summary": f"Recorded automatic capture {len(record_calls)}.",
+            "timestamp": third_timestamp,
+        },
+        {
+            "evidence_id": evidence_id,
+            "summary": f"Recorded automatic capture {len(record_calls)}.",
+            "timestamp": third_timestamp,
+            "reason": "collected",
+            "bundle_path": str(auto_capture_root / f"{evidence_id}.json"),
+            "capture_mode": bundle_metadata.get("capture_mode", ""),
+            "importance": bundle_metadata.get("importance", ""),
+        },
+    )
+
+
+desktop_capture_service_module.capture_desktop_evidence_frame = _fake_capture_desktop_evidence_frame
+desktop_capture_service_module.record_captured_desktop_evidence = _fake_record_captured_desktop_evidence
+try:
+    auto_capture_service = DesktopCaptureService(
+        {
+            "desktop_auto_capture_enabled": True,
+            "desktop_auto_capture_interval_seconds": 2,
+            "desktop_auto_capture_scope": "active_window",
+            "desktop_auto_capture_max_events": 12,
+        },
+        context_getter=lambda: dict(capture_context),
+    )
+    first_auto_capture = auto_capture_service.capture_once()
+    if not first_auto_capture.get("recorded", False) or len(record_calls) != 1:
+        raise SystemExit("DesktopCaptureService did not record the first automatic desktop capture.")
+    if record_calls[0].get("bundle_metadata", {}).get("importance_reason") != "initial_context":
+        raise SystemExit("DesktopCaptureService did not promote the first automatic desktop capture as initial context.")
+
+    duplicate_auto_capture = auto_capture_service.capture_once()
+    if duplicate_auto_capture.get("recorded", True) or duplicate_auto_capture.get("reason") != "duplicate_frame":
+        raise SystemExit("DesktopCaptureService did not suppress an unchanged duplicate automatic desktop capture.")
+    if duplicate_auto_path.exists():
+        raise SystemExit("DesktopCaptureService did not clean up the skipped duplicate automatic screenshot artifact.")
+
+    capture_context["checkpoint_pending"] = True
+    capture_context["checkpoint_tool"] = "desktop_click_point"
+    capture_context["checkpoint_target"] = "Smoke Window"
+    checkpoint_auto_capture = auto_capture_service.capture_once()
+    if not checkpoint_auto_capture.get("recorded", False) or len(record_calls) != 2:
+        raise SystemExit("DesktopCaptureService did not record a checkpoint-bound automatic desktop capture.")
+    if record_calls[1].get("bundle_metadata", {}).get("importance") != "checkpoint":
+        raise SystemExit("DesktopCaptureService did not promote checkpoint-bound automatic desktop captures.")
+    capture_status = auto_capture_service.status_snapshot()
+    if capture_status.get("metadata", {}).get("duplicates_skipped", 0) < 1:
+        raise SystemExit("DesktopCaptureService status did not expose duplicate-suppression accounting.")
+    if capture_status.get("latest", {}).get("evidence_id", "") != "desk-auto-smoke-2":
+        raise SystemExit("DesktopCaptureService status did not expose the latest automatic desktop capture.")
+finally:
+    desktop_capture_service_module.capture_desktop_evidence_frame = original_capture_frame
+    desktop_capture_service_module.record_captured_desktop_evidence = original_record_capture
+    shutil.rmtree(auto_capture_root, ignore_errors=True)
+
+print("[OK] desktop auto capture")
 
 project_venv_python = _project_venv_python(Path.cwd())
 if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):
@@ -1342,6 +1552,7 @@ print("[OK] local api event stream client")
 replay_server = LocalOperatorApiServer(
     port=0,
     settings={
+        **SMOKE_SETTINGS,
         "local_api_event_poll_seconds": 0.1,
         "local_api_event_heartbeat_seconds": 3,
         "local_api_event_replay_size": 20,

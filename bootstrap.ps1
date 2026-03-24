@@ -57,6 +57,10 @@ tool_timeout_seconds: 10
 emergency_stop_key: "f12"
 block_dangerous_shell: true
 max_iterations: 20
+desktop_auto_capture_enabled: true
+desktop_auto_capture_interval_seconds: 3
+desktop_auto_capture_scope: "active_window"
+desktop_auto_capture_max_events: 18
 "@ | Set-Content -Encoding UTF8 $SettingsPath
     Write-Host "Created default settings.yaml"
 }

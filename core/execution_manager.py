@@ -16,6 +16,7 @@ from core.alerts import (
     alert_counts,
     alert_summary,
 )
+from core.desktop_capture_service import DesktopCaptureService
 from core.file_watch_backend import FILE_WATCH_SUPPORTED_CONDITIONS, create_file_watch_backend
 from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID
@@ -395,6 +396,10 @@ class ExecutionManager:
         self.scheduler_poll_seconds = max(1, int(self.agent.settings.get("scheduler_poll_seconds", DEFAULT_SCHEDULER_POLL_SECONDS)))
         self.scheduler_backend = create_scheduler_backend(self.agent.settings)
         self.file_watch_backend = create_file_watch_backend(self.agent.settings)
+        self.desktop_capture_service = DesktopCaptureService(
+            self.agent.settings,
+            context_getter=self._desktop_capture_context,
+        )
 
         loaded = self.queue_store.load()
         self._tasks: List[Dict[str, Any]] = list(loaded.get("tasks", []))
@@ -445,6 +450,7 @@ class ExecutionManager:
                 self._persist_alerts_locked()
 
         self._start_scheduler_thread()
+        self.desktop_capture_service.start()
         if auto_start:
             self.start_next(auto_trigger=True)
 
@@ -456,6 +462,10 @@ class ExecutionManager:
             pass
         try:
             self.file_watch_backend.shutdown()
+        except Exception:
+            pass
+        try:
+            self.desktop_capture_service.shutdown()
         except Exception:
             pass
 
@@ -479,6 +489,21 @@ class ExecutionManager:
 
         self._scheduler_thread = threading.Thread(target=runner, name="operator-scheduler", daemon=True)
         self._scheduler_thread.start()
+
+    def _desktop_capture_context(self) -> Dict[str, Any]:
+        with self._lock:
+            active_task = self._active_task_locked()
+            active_task_id = str((active_task or {}).get("task_id", "")).strip()
+            state = self._state
+            return {
+                "state_scope_id": str(getattr(state, "state_scope_id", "")).strip(),
+                "task_id": active_task_id,
+                "task_status": str(getattr(state, "status", "")).strip(),
+                "checkpoint_pending": bool(getattr(state, "desktop_checkpoint_pending", False)),
+                "checkpoint_tool": str(getattr(state, "desktop_checkpoint_tool", "")).strip(),
+                "checkpoint_target": str(getattr(state, "desktop_checkpoint_target", "")).strip(),
+                "active_window_title": str(getattr(state, "desktop_active_window_title", "")).strip(),
+            }
 
     def _is_running(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
@@ -2591,6 +2616,7 @@ class ExecutionManager:
                 "recent_events": list(self._recent_file_watch_events[-12:]),
             },
             "desktop": desktop_status,
+            "desktop_capture": self.desktop_capture_service.status_snapshot(),
         }
 
     def get_snapshot(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:

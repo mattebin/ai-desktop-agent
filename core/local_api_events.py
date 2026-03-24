@@ -110,6 +110,16 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "reason": _trim_text(desktop.get("selected_evidence", {}).get("reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
             "selection_reason": _trim_text(desktop.get("selected_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
         },
+        "recent_context_evidence": [
+            {
+                "evidence_id": _trim_text(item.get("evidence_id", ""), limit=80),
+                "summary": _trim_text(item.get("summary", ""), limit=180),
+                "importance": _trim_text(item.get("importance", ""), limit=40),
+                "capture_mode": _trim_text(item.get("capture_mode", ""), limit=40),
+            }
+            for item in list(desktop.get("recent_context_evidence", []))[:3]
+            if isinstance(item, dict)
+        ],
         "selected_evidence_assessment": {
             "state": _trim_text(desktop.get("selected_evidence_assessment", {}).get("state", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),
             "reason": _trim_text(desktop.get("selected_evidence_assessment", {}).get("reason", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),

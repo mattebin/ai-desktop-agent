@@ -16,6 +16,7 @@ This project is now a serious local operator framework with:
 - optional local infrastructure backends for scheduling, file watching, desktop observation, and future UI evidence
 - a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
 - a compact desktop evidence summary/selection layer for recent evidence lookup
+- bounded automatic active-window capture into the same desktop evidence layer
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
 - a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
 - live eval coverage for core and realistic workflows
@@ -92,6 +93,8 @@ Current role:
 - support future approval grounding without adding new action capability in this pass
 
 The evidence layer now also exposes compact recent summaries, deterministic selection helpers, and bounded evidence sufficiency assessment for the most relevant recent desktop evidence bundle.
+
+The local runtime can now also record bounded automatic active-window captures into that same evidence store. Those frames are deduped when unchanged and promoted when task, checkpoint, or active-window context meaningfully changes, so older important screenshots can stay available as context instead of being replaced by a simple stream of duplicates.
 
 The desktop stack now also includes bounded recovery/readiness helpers so desktop tasks can diagnose and recover from messy window states without relying on one fragile foreground-only path.
 

@@ -60,6 +60,7 @@ BACKEND_REASON_CODES = {
     "restored",
     "shown",
     "retrying",
+    "duplicate_frame",
     "error",
 }
 
@@ -393,6 +394,14 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
         "recency_seconds": _coerce_int(value.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "backend": _trim_text(value.get("backend", ""), limit=120),
         "selection_reason": _normalize_reason(value.get("selection_reason", "selected"), default="selected"),
+        "capture_mode": _trim_text(value.get("capture_mode", ""), limit=40),
+        "importance": _trim_text(value.get("importance", ""), limit=40),
+        "importance_reason": _trim_text(value.get("importance_reason", ""), limit=120),
+        "state_scope_id": _trim_text(value.get("state_scope_id", ""), limit=120),
+        "task_id": _trim_text(value.get("task_id", ""), limit=60),
+        "task_status": _trim_text(value.get("task_status", ""), limit=40),
+        "checkpoint_pending": _coerce_bool(value.get("checkpoint_pending", False), False),
+        "checkpoint_tool": _trim_text(value.get("checkpoint_tool", ""), limit=80),
     }
 
 

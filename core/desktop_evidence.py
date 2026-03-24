@@ -70,6 +70,32 @@ def _coerce_int(value: Any, default: int, *, minimum: int = 0, maximum: int = 10
     return parsed
 
 
+def _normalize_capture_mode(value: Any) -> str:
+    text = _trim_text(value, limit=40).lower()
+    if text in {"auto", "manual", "checkpoint", "recovery"}:
+        return text
+    return ""
+
+
+def _normalize_importance(value: Any) -> str:
+    text = _trim_text(value, limit=40).lower()
+    if text in {"normal", "important", "checkpoint", "manual"}:
+        return text
+    return ""
+
+
+def _importance_rank(summary: Dict[str, Any]) -> int:
+    importance = _normalize_importance(summary.get("importance", ""))
+    capture_mode = _normalize_capture_mode(summary.get("capture_mode", ""))
+    if importance == "checkpoint":
+        return 4
+    if importance == "manual" or capture_mode == "manual":
+        return 3
+    if importance == "important":
+        return 2
+    return 1
+
+
 def _sanitize_controls(value: Any, *, limit: int = 12) -> List[Dict[str, Any]]:
     controls = value if isinstance(value, list) else []
     normalized: List[Dict[str, Any]] = []
@@ -139,6 +165,28 @@ def _sanitize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
     window_backend = _trim_text(bundle.get("window_backend", active_window.get("backend", "")), limit=60)
     screenshot_backend = _trim_text(bundle.get("screenshot_backend", normalized_screenshot.get("backend", "")), limit=60)
     ui_backend = _trim_text(bundle.get("ui_evidence_backend", normalized_ui.get("backend", "")), limit=60)
+    capture_mode = _normalize_capture_mode(
+        bundle.get("capture_mode", "manual" if source_action == "desktop_capture_screenshot" else "auto" if source_action == "desktop_auto_capture" else "")
+    )
+    importance = _normalize_importance(
+        bundle.get(
+            "importance",
+            "manual"
+            if capture_mode == "manual"
+            else "checkpoint"
+            if bundle.get("checkpoint_pending")
+            else "normal",
+        )
+    )
+    importance_reason = _trim_text(bundle.get("importance_reason", ""), limit=120)
+    state_scope_id = _trim_text(bundle.get("state_scope_id", ""), limit=120)
+    task_id = _trim_text(bundle.get("task_id", ""), limit=60)
+    task_status = _trim_text(bundle.get("task_status", ""), limit=40)
+    checkpoint_pending = bool(bundle.get("checkpoint_pending", False))
+    checkpoint_tool = _trim_text(bundle.get("checkpoint_tool", ""), limit=80)
+    checkpoint_target = _trim_text(bundle.get("checkpoint_target", ""), limit=180)
+    capture_signature = _trim_text(bundle.get("capture_signature", ""), limit=120)
+    active_window_id = _trim_text(active_window.get("window_id", ""), limit=40)
 
     return {
         "evidence_id": evidence_id,
@@ -158,6 +206,16 @@ def _sanitize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "window_backend": window_backend,
         "screenshot_backend": screenshot_backend,
         "ui_evidence_backend": ui_backend,
+        "capture_mode": capture_mode,
+        "importance": importance,
+        "importance_reason": importance_reason,
+        "state_scope_id": state_scope_id,
+        "task_id": task_id,
+        "task_status": task_status,
+        "checkpoint_pending": checkpoint_pending,
+        "checkpoint_tool": checkpoint_tool,
+        "checkpoint_target": checkpoint_target,
+        "active_window_id": active_window_id,
         "artifacts": {
             "bundle_path": bundle_path,
             "screenshot_path": _trim_text(normalized_screenshot.get("path", ""), limit=320),
@@ -166,6 +224,7 @@ def _sanitize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "metadata": {
             "partial": reason == "partial",
             "screen_monitor_count": int(normalized_screen.get("monitor_count", 0) or 0),
+            "capture_signature": capture_signature,
         },
     }
 
@@ -262,6 +321,8 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
         ),
         limit=240,
     )
+    capture_mode = _normalize_capture_mode(normalized.get("capture_mode", ""))
+    importance = _normalize_importance(normalized.get("importance", ""))
     return normalize_desktop_evidence_summary(
         {
             "evidence_id": normalized.get("evidence_id", ""),
@@ -292,6 +353,14 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
             "recency_seconds": recency_seconds,
             "backend": backend_label,
             "selection_reason": "selected",
+            "capture_mode": capture_mode,
+            "importance": importance,
+            "importance_reason": _trim_text(normalized.get("importance_reason", ""), limit=120),
+            "state_scope_id": _trim_text(normalized.get("state_scope_id", ""), limit=120),
+            "task_id": _trim_text(normalized.get("task_id", ""), limit=60),
+            "task_status": _trim_text(normalized.get("task_status", ""), limit=40),
+            "checkpoint_pending": bool(normalized.get("checkpoint_pending", False)),
+            "checkpoint_tool": _trim_text(normalized.get("checkpoint_tool", ""), limit=80),
         }
     )
 
@@ -316,6 +385,12 @@ def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "is_partial": bool(normalized.get("is_partial", False)),
         "recency_seconds": int(normalized.get("recency_seconds", 0) or 0),
         "selection_reason": normalized.get("selection_reason", ""),
+        "capture_mode": normalized.get("capture_mode", ""),
+        "importance": normalized.get("importance", ""),
+        "importance_reason": normalized.get("importance_reason", ""),
+        "task_id": normalized.get("task_id", ""),
+        "task_status": normalized.get("task_status", ""),
+        "checkpoint_pending": bool(normalized.get("checkpoint_pending", False)),
     }
 
 
@@ -701,6 +776,16 @@ def build_desktop_evidence_bundle(
     target_window: Dict[str, Any] | None = None,
     screen: Dict[str, Any] | None = None,
     errors: Iterable[str] | None = None,
+    capture_mode: str = "",
+    importance: str = "",
+    importance_reason: str = "",
+    state_scope_id: str = "",
+    task_id: str = "",
+    task_status: str = "",
+    checkpoint_pending: bool = False,
+    checkpoint_tool: str = "",
+    checkpoint_target: str = "",
+    capture_signature: str = "",
 ) -> Dict[str, Any]:
     normalized_screenshot = screenshot if isinstance(screenshot, dict) else {}
     normalized_ui = ui_evidence if isinstance(ui_evidence, dict) else {}
@@ -727,6 +812,16 @@ def build_desktop_evidence_bundle(
             "window_backend": str(active_window.get("backend", "")).strip(),
             "screenshot_backend": str(normalized_screenshot.get("backend", "")).strip(),
             "ui_evidence_backend": str(normalized_ui.get("backend", "")).strip(),
+            "capture_mode": capture_mode,
+            "importance": importance,
+            "importance_reason": importance_reason,
+            "state_scope_id": state_scope_id,
+            "task_id": task_id,
+            "task_status": task_status,
+            "checkpoint_pending": bool(checkpoint_pending),
+            "checkpoint_tool": checkpoint_tool,
+            "checkpoint_target": checkpoint_target,
+            "capture_signature": capture_signature,
             "errors": error_items,
         }
     )
@@ -828,10 +923,36 @@ class DesktopEvidenceStore:
             summary = summarize_evidence_bundle(normalized)
             refs = [item for item in self._read_index().get("bundles", []) if item.get("evidence_id") != evidence_id]
             refs.append(summary)
-            refs = refs[-self.max_items :]
+            refs = self._retain_recent_refs(refs)
             self._write_index(refs)
             self._prune_locked(refs)
             return normalize_desktop_evidence_ref(refs[-1] if refs else {})
+
+    def _retain_recent_refs(self, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized_refs = [normalize_desktop_evidence_summary(item) for item in refs if isinstance(item, dict)]
+        if len(normalized_refs) <= self.max_items:
+            return normalized_refs
+
+        pinned = [item for item in normalized_refs if _importance_rank(item) >= 2]
+        unpinned = [item for item in normalized_refs if _importance_rank(item) < 2]
+
+        kept: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for source in (pinned[-self.max_items :], unpinned[-self.max_items :]):
+            for item in source:
+                evidence_id = _trim_text(item.get("evidence_id", ""), limit=80)
+                if not evidence_id or evidence_id in seen_ids:
+                    continue
+                kept.append(item)
+                seen_ids.add(evidence_id)
+                if len(kept) >= self.max_items:
+                    break
+            if len(kept) >= self.max_items:
+                break
+
+        kept_ids = {_trim_text(item.get("evidence_id", ""), limit=80) for item in kept}
+        return [item for item in normalized_refs if _trim_text(item.get("evidence_id", ""), limit=80) in kept_ids][-self.max_items :]
 
     def _prune_locked(self, refs: List[Dict[str, Any]]):
         keep_bundle_names = {Path(item.get("bundle_path", "")).name for item in refs if item.get("bundle_path")}
@@ -879,6 +1000,68 @@ class DesktopEvidenceStore:
         safe_limit = max(1, int(limit or 1))
         items = summaries[-safe_limit:]
         return [normalize_desktop_evidence_summary(item) for item in items]
+
+    def recent_context_summaries(
+        self,
+        *,
+        limit: int = 4,
+        state_scope_id: str = "",
+        task_id: str = "",
+        active_window_title: str = "",
+        checkpoint_target: str = "",
+    ) -> List[Dict[str, Any]]:
+        summaries = list(self.recent_summaries(limit=self.max_items))
+        if not summaries:
+            return []
+
+        scope_lookup = _trim_text(state_scope_id, limit=120)
+        task_lookup = _trim_text(task_id, limit=60)
+        title_lookup = _trim_text(active_window_title, limit=180).lower()
+        checkpoint_lookup = _trim_text(checkpoint_target, limit=180).lower()
+
+        scored: List[tuple[tuple[int, int, int], Dict[str, Any]]] = []
+        for item in summaries:
+            score = 0
+            if scope_lookup and _trim_text(item.get("state_scope_id", ""), limit=120) == scope_lookup:
+                score += 6
+            if task_lookup and _trim_text(item.get("task_id", ""), limit=60) == task_lookup:
+                score += 8
+            active_title = _trim_text(item.get("active_window_title", ""), limit=180).lower()
+            target_title = _trim_text(item.get("target_window_title", ""), limit=180).lower()
+            if checkpoint_lookup and checkpoint_lookup in " ".join([active_title, target_title]):
+                score += 5
+            if title_lookup and title_lookup in " ".join([active_title, target_title]):
+                score += 3
+            if bool(item.get("checkpoint_pending", False)):
+                score += 4
+            if bool(item.get("has_screenshot", False)):
+                score += 2
+            score += _importance_rank(item)
+            if score <= 0:
+                continue
+            scored.append(
+                (
+                    (
+                        score,
+                        -int(item.get("recency_seconds", 0) or 0),
+                        1 if bool(item.get("has_screenshot", False)) else 0,
+                    ),
+                    item,
+                )
+            )
+
+        scored.sort(reverse=True, key=lambda item: item[0])
+        selected: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for _score, item in scored:
+            evidence_id = _trim_text(item.get("evidence_id", ""), limit=80)
+            if not evidence_id or evidence_id in seen_ids:
+                continue
+            seen_ids.add(evidence_id)
+            selected.append(compact_evidence_preview(item))
+            if len(selected) >= max(1, int(limit or 1)):
+                break
+        return selected
 
     def summary_for(self, evidence_id: str, *, now: datetime | None = None) -> Dict[str, Any]:
         lookup = _trim_text(evidence_id, limit=80)
@@ -978,10 +1161,14 @@ class DesktopEvidenceStore:
 
     def status_snapshot(self) -> Dict[str, Any]:
         refs = self._read_index().get("bundles", [])
+        important_count = sum(1 for item in refs if _importance_rank(item) >= 2)
+        auto_count = sum(1 for item in refs if _normalize_capture_mode(item.get("capture_mode", "")) == "auto")
         return {
             "root": str(self.root),
             "bundle_count": len(refs),
             "max_items": self.max_items,
+            "important_count": important_count,
+            "auto_capture_count": auto_count,
             "latest": normalize_desktop_evidence_ref(refs[-1] if refs else {}),
             "latest_summary": compact_evidence_preview(refs[-1] if refs else {}),
         }

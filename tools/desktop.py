@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import struct
 import threading
 import time
@@ -630,6 +631,7 @@ def _record_desktop_evidence(
     include_ui_evidence: bool = False,
     ui_limit: int = 8,
     errors: List[str] | None = None,
+    bundle_metadata: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     ui_result: Dict[str, Any] = {}
     collected_errors = list(errors or [])
@@ -650,6 +652,16 @@ def _record_desktop_evidence(
         target_window=target_window or {},
         screen=screen,
         errors=collected_errors,
+        capture_mode=str((bundle_metadata or {}).get("capture_mode", "")).strip(),
+        importance=str((bundle_metadata or {}).get("importance", "")).strip(),
+        importance_reason=str((bundle_metadata or {}).get("importance_reason", "")).strip(),
+        state_scope_id=str((bundle_metadata or {}).get("state_scope_id", "")).strip(),
+        task_id=str((bundle_metadata or {}).get("task_id", "")).strip(),
+        task_status=str((bundle_metadata or {}).get("task_status", "")).strip(),
+        checkpoint_pending=bool((bundle_metadata or {}).get("checkpoint_pending", False)),
+        checkpoint_tool=str((bundle_metadata or {}).get("checkpoint_tool", "")).strip(),
+        checkpoint_target=str((bundle_metadata or {}).get("checkpoint_target", "")).strip(),
+        capture_signature=str((bundle_metadata or {}).get("capture_signature", "")).strip(),
     )
     try:
         evidence_ref = get_desktop_evidence_store().record_bundle(bundle)
@@ -1267,6 +1279,225 @@ def _capture_path(args: Dict[str, Any], *, evidence_id: str = "") -> Path:
     return root / f"{safe_name}{extension}"
 
 
+def _safe_unlink(path: str | Path):
+    try:
+        candidate = Path(path)
+    except Exception:
+        return
+    try:
+        if candidate.exists() and candidate.is_file():
+            candidate.unlink()
+    except Exception:
+        return
+
+
+def _file_sha1(path: str | Path) -> str:
+    try:
+        candidate = Path(path)
+    except Exception:
+        return ""
+    if not candidate.exists() or not candidate.is_file():
+        return ""
+    digest = hashlib.sha1()
+    try:
+        with candidate.open("rb") as handle:
+            while True:
+                chunk = handle.read(65_536)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except Exception:
+        return ""
+    return digest.hexdigest()
+
+
+def capture_desktop_evidence_frame(
+    *,
+    scope: str = "active_window",
+    source_action: str = "desktop_capture_screenshot",
+    limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
+    capture_name: str = "",
+    include_ui_evidence: bool = False,
+    ui_limit: int = 8,
+    capture_mode: str = "",
+    importance: str = "",
+    importance_reason: str = "",
+    state_scope_id: str = "",
+    task_id: str = "",
+    task_status: str = "",
+    checkpoint_pending: bool = False,
+    checkpoint_tool: str = "",
+    checkpoint_target: str = "",
+    record_on_error: bool = True,
+    record_evidence: bool = True,
+) -> Dict[str, Any]:
+    requested_scope = str(scope or "active_window").strip().lower()
+    active_window = _active_window_info()
+    windows = _enum_windows(
+        limit=_coerce_int(limit, DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20)
+    )
+    evidence_id = get_desktop_evidence_store().next_evidence_id()
+    args: Dict[str, Any] = {}
+    if capture_name:
+        args["name"] = capture_name
+
+    if requested_scope == "desktop":
+        bounds = _virtual_screen_rect()
+        capture_label = "desktop"
+        target_window: Dict[str, Any] = {}
+        capture_scope = "desktop"
+    else:
+        capture_scope = "active_window"
+        if not active_window:
+            observation = _register_observation(active_window=active_window, windows=windows)
+            evidence_bundle: Dict[str, Any] = {}
+            evidence_ref: Dict[str, Any] = {}
+            if record_evidence and record_on_error:
+                evidence_bundle, evidence_ref = _record_desktop_evidence(
+                    source_action=source_action,
+                    active_window=active_window,
+                    windows=windows,
+                    observation_token=str(observation.get("observation_token", "")).strip(),
+                    include_ui_evidence=False,
+                    errors=["Could not capture the active window because no active window was detected."],
+                    bundle_metadata={
+                        "capture_mode": capture_mode,
+                        "importance": importance,
+                        "importance_reason": importance_reason,
+                        "state_scope_id": state_scope_id,
+                        "task_id": task_id,
+                        "task_status": task_status,
+                        "checkpoint_pending": checkpoint_pending,
+                        "checkpoint_tool": checkpoint_tool,
+                        "checkpoint_target": checkpoint_target,
+                    },
+                )
+            return {
+                "ok": False,
+                "error": "Could not capture the active window because no active window was detected.",
+                "capture_label": "active window",
+                "active_window": active_window,
+                "windows": windows,
+                "observation": observation,
+                "screenshot": {},
+                "evidence_bundle": evidence_bundle,
+                "evidence_ref": evidence_ref,
+                "screenshot_path": "",
+                "screenshot_scope": capture_scope,
+                "capture_signature": "",
+                "target_window": {},
+            }
+        bounds = dict(active_window.get("rect", {}))
+        capture_label = f"active window '{active_window.get('title', 'window')}'"
+        target_window = dict(active_window)
+
+    width = min(max(1, int(bounds.get("width", 0) or 0)), DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH)
+    height = min(max(1, int(bounds.get("height", 0) or 0)), DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT)
+    capture_x = int(bounds.get("x", 0))
+    capture_y = int(bounds.get("y", 0))
+    path = _capture_path(args, evidence_id=evidence_id)
+    capture_result = _capture_with_backend(
+        path,
+        x=capture_x,
+        y=capture_y,
+        width=width,
+        height=height,
+        scope=capture_scope,
+        active_window_title=str(active_window.get("title", "") or ""),
+    )
+    ok = bool(capture_result.get("ok", False))
+    error = str(capture_result.get("error", "") or "").strip()
+    capture_data = capture_result.get("data", {}) if isinstance(capture_result.get("data", {}), dict) else {}
+    captured_path = str(capture_data.get("path", "") or "").strip() or str(path)
+    capture_signature = _file_sha1(captured_path) if ok else ""
+    observation = _register_observation(
+        active_window=active_window,
+        windows=windows,
+        screenshot_path=captured_path if ok else "",
+        screenshot_scope=capture_scope,
+    )
+    evidence_bundle: Dict[str, Any] = {}
+    evidence_ref: Dict[str, Any] = {}
+    if record_evidence and (ok or record_on_error):
+        evidence_bundle, evidence_ref = _record_desktop_evidence(
+            source_action=source_action,
+            active_window=active_window,
+            windows=windows,
+            observation_token=str(observation.get("observation_token", "")).strip(),
+            screenshot={
+                **capture_data,
+                "path": captured_path if ok else "",
+                "scope": capture_scope,
+                "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
+                "active_window_title": str(active_window.get("title", "") or ""),
+            },
+            target_window=target_window,
+            include_ui_evidence=include_ui_evidence,
+            ui_limit=_coerce_int(ui_limit, 8, minimum=1, maximum=12),
+            errors=[error] if error else [],
+            bundle_metadata={
+                "capture_mode": capture_mode,
+                "importance": importance,
+                "importance_reason": importance_reason,
+                "state_scope_id": state_scope_id,
+                "task_id": task_id,
+                "task_status": task_status,
+                "checkpoint_pending": checkpoint_pending,
+                "checkpoint_tool": checkpoint_tool,
+                "checkpoint_target": checkpoint_target,
+                "capture_signature": capture_signature,
+            },
+        )
+    return {
+        "ok": ok,
+        "error": error,
+        "capture_label": capture_label,
+        "active_window": active_window,
+        "windows": windows,
+        "observation": observation,
+        "screenshot": {
+            **capture_data,
+            "path": captured_path if ok else "",
+            "scope": capture_scope,
+            "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
+            "active_window_title": str(active_window.get("title", "") or ""),
+        },
+        "evidence_bundle": evidence_bundle,
+        "evidence_ref": evidence_ref,
+        "screenshot_path": captured_path if ok else "",
+        "screenshot_scope": capture_scope,
+        "capture_signature": capture_signature,
+        "target_window": target_window,
+    }
+
+
+def record_captured_desktop_evidence(
+    *,
+    source_action: str,
+    active_window: Dict[str, Any],
+    windows: List[Dict[str, Any]],
+    observation: Dict[str, Any],
+    screenshot: Dict[str, Any],
+    target_window: Dict[str, Any] | None = None,
+    include_ui_evidence: bool = False,
+    ui_limit: int = 8,
+    errors: List[str] | None = None,
+    bundle_metadata: Dict[str, Any] | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    return _record_desktop_evidence(
+        source_action=source_action,
+        active_window=active_window,
+        windows=windows,
+        observation_token=str(observation.get("observation_token", "")).strip(),
+        screenshot=screenshot,
+        target_window=target_window or {},
+        include_ui_evidence=include_ui_evidence,
+        ui_limit=ui_limit,
+        errors=errors,
+        bundle_metadata=bundle_metadata,
+    )
+
+
 def desktop_list_windows(args: Dict[str, Any]) -> Dict[str, Any]:
     limit = _coerce_int(args.get("limit", DESKTOP_DEFAULT_WINDOW_LIMIT), DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20)
     windows = _enum_windows(limit=limit)
@@ -1424,92 +1655,35 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
     scope = str(args.get("scope", "active_window")).strip().lower()
-    active_window = _active_window_info()
-    windows = _enum_windows(limit=_coerce_int(args.get("limit", DESKTOP_DEFAULT_WINDOW_LIMIT), DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20))
-    evidence_id = get_desktop_evidence_store().next_evidence_id()
-
-    if scope == "desktop":
-        bounds = _virtual_screen_rect()
-        capture_label = "desktop"
-    else:
-        scope = "active_window"
-        if not active_window:
-            observation = _register_observation(active_window=active_window, windows=windows)
-            evidence_bundle, evidence_ref = _record_desktop_evidence(
-                source_action="desktop_capture_screenshot",
-                active_window=active_window,
-                windows=windows,
-                observation_token=str(observation.get("observation_token", "")).strip(),
-                include_ui_evidence=False,
-                errors=["Could not capture the active window because no active window was detected."],
-            )
-            return _desktop_result(
-                ok=False,
-                action="desktop_capture_screenshot",
-                summary="Could not capture the active window because no active window was detected.",
-                desktop_state=observation,
-                error="Could not capture the active window because no active window was detected.",
-                desktop_evidence=evidence_bundle,
-                desktop_evidence_ref=evidence_ref,
-            )
-        bounds = dict(active_window.get("rect", {}))
-        capture_label = f"active window '{active_window.get('title', 'window')}'"
-
-    width = min(max(1, int(bounds.get("width", 0) or 0)), DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH)
-    height = min(max(1, int(bounds.get("height", 0) or 0)), DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT)
-    capture_x = int(bounds.get("x", 0))
-    capture_y = int(bounds.get("y", 0))
-    path = _capture_path(args, evidence_id=evidence_id)
-    capture_result = _capture_with_backend(
-        path,
-        x=capture_x,
-        y=capture_y,
-        width=width,
-        height=height,
+    capture = capture_desktop_evidence_frame(
         scope=scope,
-        active_window_title=str(active_window.get("title", "") or ""),
-    )
-    ok = bool(capture_result.get("ok", False))
-    error = str(capture_result.get("error", "") or "").strip()
-    capture_data = capture_result.get("data", {}) if isinstance(capture_result.get("data", {}), dict) else {}
-    captured_path = str(capture_data.get("path", "") or "").strip() or str(path)
-    observation = _register_observation(
-        active_window=active_window,
-        windows=windows,
-        screenshot_path=captured_path if ok else "",
-        screenshot_scope=scope,
-    )
-    evidence_bundle, evidence_ref = _record_desktop_evidence(
         source_action="desktop_capture_screenshot",
-        active_window=active_window,
-        windows=windows,
-        observation_token=str(observation.get("observation_token", "")).strip(),
-        screenshot={
-            **capture_data,
-            "path": captured_path if ok else "",
-            "scope": scope,
-            "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
-            "active_window_title": str(active_window.get("title", "") or ""),
-        },
-        target_window=active_window if scope == "active_window" else {},
+        limit=_coerce_int(args.get("limit", DESKTOP_DEFAULT_WINDOW_LIMIT), DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20),
+        capture_name=str(args.get("name", "") or args.get("output_name", "")).strip(),
         include_ui_evidence=True,
         ui_limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=12),
-        errors=[error] if error else [],
+        capture_mode="manual",
+        importance="manual",
+        importance_reason="manual_capture",
     )
+    ok = bool(capture.get("ok", False))
+    observation = capture.get("observation", {}) if isinstance(capture.get("observation", {}), dict) else {}
+    evidence_bundle = capture.get("evidence_bundle", {}) if isinstance(capture.get("evidence_bundle", {}), dict) else {}
+    evidence_ref = capture.get("evidence_ref", {}) if isinstance(capture.get("evidence_ref", {}), dict) else {}
     if not ok:
         return _desktop_result(
             ok=False,
             action="desktop_capture_screenshot",
-            summary=f"Could not capture a screenshot of the {capture_label}.",
+            summary=f"Could not capture a screenshot of the {capture.get('capture_label', 'desktop')}.",
             desktop_state=observation,
-            error=error,
+            error=str(capture.get("error", "")).strip(),
             desktop_evidence=evidence_bundle,
             desktop_evidence_ref=evidence_ref,
         )
     return _desktop_result(
         ok=True,
         action="desktop_capture_screenshot",
-        summary=f"Captured a screenshot of the {capture_label}.",
+        summary=f"Captured a screenshot of the {capture.get('capture_label', 'desktop')}.",
         desktop_state=observation,
         desktop_evidence=evidence_bundle,
         desktop_evidence_ref=evidence_ref,

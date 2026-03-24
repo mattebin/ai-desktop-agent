@@ -19,6 +19,8 @@ It also includes an on-demand artifact-viewer path so retained screenshots can b
 
 The operator now uses the same compact selected/checkpoint desktop evidence as model-facing grounding for bounded desktop investigations and desktop approval preparation.
 
+The desktop runtime can now also take bounded automatic active-window screenshots while the local operator is running. Those automatic captures feed the same evidence store instead of a parallel cache.
+
 Desktop recovery and readiness now sit alongside the evidence layer so the operator can tell the difference between:
 
 - evidence is present but the window is minimized
@@ -56,6 +58,32 @@ Artifacts are retained under:
 
 Retention is bounded by `max_desktop_evidence_entries` in `config/settings.yaml`. Older bundle and capture artifacts are pruned automatically.
 
+Automatic captures are not retained with simple FIFO alone anymore:
+
+- manual captures are preserved preferentially
+- checkpoint-bound captures are preserved preferentially
+- task/window change captures can be promoted as important context
+- unchanged duplicate automatic frames are skipped
+
+This keeps the retained history more useful for later context and “what happened” reconstruction.
+
+## Automatic capture policy
+
+The current automatic capture layer is intentionally bounded.
+
+- it captures the active window, not the whole desktop by default
+- it runs on a bounded interval while the local operator runtime is active
+- it suppresses unchanged duplicate frames
+- it promotes captures when task, checkpoint, or active-window context changes
+- it reuses the same evidence bundle / summary / artifact / API flow as manual captures
+
+Current settings live in `config/settings.yaml`:
+
+- `desktop_auto_capture_enabled`
+- `desktop_auto_capture_interval_seconds`
+- `desktop_auto_capture_scope`
+- `desktop_auto_capture_max_events`
+
 ## Current non-goals
 
 - no OCR-heavy interpretation
@@ -63,6 +91,7 @@ Retention is bounded by `max_desktop_evidence_entries` in `config/settings.yaml`
 - no new desktop action capability
 - no broad desktop autonomy or navigation
 - no raw bundle/blob dumping into prompts
+- no continuous full-desktop video stream
 
 ## Evidence-aware reasoning rules
 
@@ -105,5 +134,8 @@ Current deterministic local coverage checks:
 - compact summary generation and selection heuristics
 - evidence sufficiency / refresh assessment
 - checkpoint and selected evidence grounding in state/API
+- automatic capture duplicate suppression
+- important/manual evidence retention under bounded pruning
+- recent desktop context summary selection
 - desktop recovery classification and strategy selection
 - bounded readiness / visual-stability diagnostics
