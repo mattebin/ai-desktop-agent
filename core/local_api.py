@@ -168,6 +168,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
             "checkpoint_scene": _compact_scene_payload(desktop.get("checkpoint_scene", {})),
             "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
+            "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
             "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
         "queue_counts": queue.get("counts", {}),
@@ -314,6 +315,28 @@ def _compact_scene_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "direct_image_helpful": bool(scene.get("direct_image_helpful", False)),
         "prefer_before_after": bool(scene.get("prefer_before_after", False)),
         "pending_tool": _trim_text(scene.get("pending_tool", ""), limit=80),
+    }
+
+
+def _compact_desktop_outcome(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    outcome = value if isinstance(value, dict) else {}
+    return {
+        "outcome": _trim_text(outcome.get("outcome", ""), limit=60),
+        "status": _trim_text(outcome.get("status", ""), limit=40),
+        "terminal": bool(outcome.get("terminal", False)),
+        "reason": _trim_text(outcome.get("reason", ""), limit=60),
+        "summary": _trim_text(outcome.get("summary", ""), limit=220),
+        "scene_class": _trim_text(outcome.get("scene_class", ""), limit=40),
+        "workflow_state": _trim_text(outcome.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(outcome.get("readiness_state", ""), limit=40),
+        "recovery_state": _trim_text(outcome.get("recovery_state", ""), limit=40),
+        "recovery_reason": _trim_text(outcome.get("recovery_reason", ""), limit=60),
+        "recovery_strategy": _trim_text(outcome.get("recovery_strategy", ""), limit=80),
+        "attempt_count": _coerce_int(outcome.get("attempt_count", 0), 0, minimum=0, maximum=16),
+        "max_attempts": _coerce_int(outcome.get("max_attempts", 0), 0, minimum=0, maximum=16),
+        "evidence_id": _trim_text(outcome.get("evidence_id", ""), limit=80),
+        "target_window_title": _trim_text(outcome.get("target_window_title", ""), limit=180),
+        "active_window_title": _trim_text(outcome.get("active_window_title", ""), limit=180),
     }
 
 

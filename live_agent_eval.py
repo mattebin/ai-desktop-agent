@@ -39,11 +39,12 @@ SCENARIO_NAMES = (
     "desktop_evidence_grounding",
     "desktop_recovery_grounding",
     "desktop_scene_reasoning",
+    "desktop_run_finalization",
 )
 TERMINAL_EVAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "superseded", "deferred"}
 AUTHORITATIVE_MESSAGE_KINDS = {"final", "result", "error"}
 BROWSER_SCENARIO_NAMES = {"workflow_execution", "approval_control", "continuity_quality"}
-DESKTOP_SCENARIO_NAMES = {"desktop_control", "desktop_bounded_stack", "desktop_evidence_grounding", "desktop_recovery_grounding", "desktop_scene_reasoning"}
+DESKTOP_SCENARIO_NAMES = {"desktop_control", "desktop_bounded_stack", "desktop_evidence_grounding", "desktop_recovery_grounding", "desktop_scene_reasoning", "desktop_run_finalization"}
 DESKTOP_RUNTIME_MODULES = ("mss", "pywinauto", "pywinctl", "psutil")
 EVAL_RUNTIME_ENV = "AI_OPERATOR_LIVE_EVAL_RUNTIME"
 
@@ -1394,12 +1395,27 @@ class DesktopFixtureHarness:
 
     def request_focus(self, target: str):
         normalized = str(target or "").strip().lower()
-        if normalized not in {"main", "sidecar"}:
+        if normalized not in {"main", "sidecar", "prompt"}:
             return
         try:
             self.focus_request_path.write_text(normalized, encoding="utf-8")
         except Exception:
             pass
+
+    def ensure_fixture_focus(self, target: str, *, timeout: float = 4.0) -> bool:
+        normalized = str(target or "").strip().lower()
+        if normalized not in {"main", "sidecar", "prompt"}:
+            return False
+        self.request_focus(normalized)
+        try:
+            self.wait_for_state(
+                lambda state: str(state.get("last_focus_handled", "")).strip().lower() == normalized,
+                timeout=timeout,
+                description=f"desktop fixture focus handled={normalized}",
+            )
+            return True
+        except Exception:
+            return False
 
     def request_command(self, command: str):
         normalized = str(command or "").strip().lower()
@@ -4707,6 +4723,371 @@ def run_desktop_scene_reasoning_scenario(context: EvalContext) -> Dict[str, Any]
     }
 
 
+def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any]:
+    name = "desktop_run_finalization"
+    scenario_dir, settings = _scenario_settings(context, name)
+    clear_inspect_project_cache()
+    phases: List[Dict[str, Any]] = []
+
+    with DesktopFixtureHarness(context, scenario_dir) as fixture, LocalApiHarness(settings) as api:
+        def _reject_paused_session(session_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+            api.reject(session_id=session_id)
+            return api.wait_for_status(session_id, {"blocked"}, timeout=timeout)
+
+        fixture.wait_for_state(
+            lambda state: bool(state.get("button_center")) and bool(state.get("entry_center")),
+            timeout=12.0,
+            description="desktop fixture coordinates",
+        )
+        button_center = fixture.read_state().get("button_center", {})
+        button_x = int(button_center.get("x", 0) or 0) if isinstance(button_center, dict) else 0
+        button_y = int(button_center.get("y", 0) or 0) if isinstance(button_center, dict) else 0
+        if button_x <= 0 or button_y <= 0:
+            raise RuntimeError(f"Desktop fixture button coordinates were invalid: {fixture.read_state()}")
+
+        if not fixture.ensure_fixture_focus("sidecar", timeout=4.0):
+            raise RuntimeError(f"Could not request sidecar fixture focus for '{fixture.sidecar_title}'.")
+        fixture.set_prompt_visible(False)
+        fixture.set_main_hidden(False)
+        fixture.set_main_minimized(False)
+
+        missing_session = api.create_session(title="Desktop run finalization missing eval").get("session", {}).get("session_id", "")
+        missing_runs_before = _session_runs(Path(settings["run_history_path"]), missing_session)
+        missing_title = f"Desktop Eval Missing {int(time.time() * 1000)}"
+        missing_goal = (
+            f"Inspect the desktop window titled '{missing_title}'. "
+            "If it is not visibly surfaced or recoverable through the bounded desktop path, stop and report that clearly instead of lingering. "
+            "Do not request approval for a non-actionable missing target."
+        )
+        missing_started = time.time()
+        missing_dispatch = api.send_message(missing_session, missing_goal)
+        missing_status = api.wait_for_status(missing_session, {"incomplete"}, timeout=90.0)
+        missing_detail = api.session_detail(missing_session)
+        missing_runs_after = _session_runs(Path(settings["run_history_path"]), missing_session)
+        missing_run = _latest_new_run(missing_runs_before, missing_runs_after)
+        missing_message = _authoritative_reply(missing_detail)
+        missing_tools = _tool_names_from_run(missing_run)
+        missing_desktop = missing_status.get("desktop", {}) if isinstance(missing_status.get("desktop", {}), dict) else {}
+        missing_outcome = missing_desktop.get("run_outcome", {}) if isinstance(missing_desktop.get("run_outcome", {}), dict) else {}
+        missing_checks = [
+            _build_check(
+                "missing_target_finalized_incomplete",
+                "execution",
+                missing_status.get("status") == "incomplete",
+                f"Status={missing_status.get('status')}",
+            ),
+            _build_check(
+                "missing_target_terminal_outcome_exposed",
+                "desktop",
+                bool(missing_outcome.get("terminal", False))
+                and str(missing_outcome.get("outcome", "")).strip() in {"unrecoverable_missing_target", "unrecoverable_tray_background"},
+                f"Desktop outcome={missing_outcome}",
+            ),
+            _build_check(
+                "missing_target_did_not_pause",
+                "desktop",
+                not bool(missing_status.get("pending_approval", {}).get("kind", "")),
+                f"Pending approval={missing_status.get('pending_approval', {})}",
+            ),
+            _build_check(
+                "missing_target_used_inspection_or_recovery",
+                "tool_choice",
+                "desktop_inspect_window_state" in missing_tools or "desktop_recover_window" in missing_tools,
+                f"Tools={missing_tools}",
+            ),
+            _build_check(
+                "missing_target_run_history_exposed_outcome",
+                "desktop",
+                str(missing_run.get("end_state", {}).get("desktop_outcome", "")).strip() == str(missing_outcome.get("outcome", "")).strip(),
+                f"Run end_state={missing_run.get('end_state', {})} desktop outcome={missing_outcome}",
+            ),
+        ]
+        missing_checks.extend(
+            _golden_final_answer_checks(
+                status="incomplete",
+                message=missing_message,
+                session_payload=missing_detail,
+                run=missing_run,
+                expected_terms={missing_title, "not", "window"},
+                require_next_step=True,
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_missing_target",
+                goal=missing_goal,
+                checks=missing_checks,
+                started_at=missing_started,
+                status=missing_status.get("status", ""),
+                reply_mode=str(missing_dispatch.get("reply_mode", "")).strip(),
+                final_message=missing_message,
+                run=missing_run,
+                snapshot=missing_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        hidden_state = fixture.set_main_hidden(True)
+        if not hidden_state.get("main_hidden", False):
+            raise RuntimeError(f"Desktop fixture did not hide the main window: {hidden_state}")
+        if not fixture.ensure_fixture_focus("sidecar", timeout=4.0):
+            raise RuntimeError(f"Could not request sidecar fixture focus for '{fixture.sidecar_title}'.")
+
+        hidden_session = api.create_session(title="Desktop run finalization hidden eval").get("session", {}).get("session_id", "")
+        hidden_runs_before = _session_runs(Path(settings["run_history_path"]), hidden_session)
+        hidden_goal = (
+            f"Inspect the desktop window titled '{fixture.main_title}'. "
+            "If it is not visibly surfaced, withdrawn, or only background-like, stop and report that clearly instead of lingering. "
+            "Only continue if the bounded desktop recovery path can make it visibly recoverable."
+        )
+        hidden_started = time.time()
+        hidden_dispatch = api.send_message(hidden_session, hidden_goal)
+        hidden_status = api.wait_for_status(hidden_session, {"completed", "incomplete"}, timeout=90.0)
+        hidden_detail = api.session_detail(hidden_session)
+        hidden_runs_after = _session_runs(Path(settings["run_history_path"]), hidden_session)
+        hidden_run = _latest_new_run(hidden_runs_before, hidden_runs_after)
+        hidden_message = _authoritative_reply(hidden_detail)
+        hidden_tools = _tool_names_from_run(hidden_run)
+        hidden_desktop = hidden_status.get("desktop", {}) if isinstance(hidden_status.get("desktop", {}), dict) else {}
+        hidden_outcome = hidden_desktop.get("run_outcome", {}) if isinstance(hidden_desktop.get("run_outcome", {}), dict) else {}
+        hidden_terminal_ok = hidden_status.get("status") in {"completed", "incomplete"} and not bool(hidden_status.get("pending_approval", {}).get("kind", ""))
+        hidden_incomplete_ok = (
+            hidden_status.get("status") == "incomplete"
+            and bool(hidden_outcome.get("terminal", False))
+            and str(hidden_outcome.get("outcome", "")).strip() in {
+                "unrecoverable_withdrawn",
+                "unrecoverable_tray_background",
+                "unrecoverable_missing_target",
+                "recovery_exhausted",
+            }
+        )
+        hidden_completed_ok = hidden_status.get("status") == "completed"
+        hidden_checks = [
+            _build_check(
+                "hidden_window_did_not_linger",
+                "execution",
+                hidden_terminal_ok,
+                f"Status={hidden_status.get('status')} pending={hidden_status.get('pending_approval', {})}",
+            ),
+            _build_check(
+                "hidden_window_outcome_coherent",
+                "desktop",
+                hidden_completed_ok or hidden_incomplete_ok,
+                f"Desktop outcome={hidden_outcome} message={hidden_message}",
+            ),
+            _build_check(
+                "hidden_window_used_recovery_path",
+                "tool_choice",
+                "desktop_inspect_window_state" in hidden_tools and any(tool in hidden_tools for tool in {"desktop_recover_window", "desktop_focus_window"}),
+                f"Tools={hidden_tools}",
+            ),
+            _build_check(
+                "hidden_window_run_history_terminal",
+                "desktop",
+                str(hidden_run.get("final_status", "")).strip().lower() in {"completed", "incomplete"},
+                f"Run={hidden_run}",
+            ),
+        ]
+        hidden_checks.extend(
+            _golden_final_answer_checks(
+                status=str(hidden_status.get("status", "")).strip().lower() or "incomplete",
+                message=hidden_message,
+                session_payload=hidden_detail,
+                run=hidden_run,
+                expected_terms={fixture.main_title},
+                require_next_step=hidden_status.get("status") == "incomplete",
+                forbidden_terms={"browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_hidden_withdrawn",
+                goal=hidden_goal,
+                checks=hidden_checks,
+                started_at=hidden_started,
+                status=hidden_status.get("status", ""),
+                reply_mode=str(hidden_dispatch.get("reply_mode", "")).strip(),
+                final_message=hidden_message,
+                run=hidden_run,
+                snapshot=hidden_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        fixture.set_main_hidden(False)
+        minimized_state = fixture.set_main_minimized(True)
+        if not minimized_state.get("main_minimized", False):
+            raise RuntimeError(f"Desktop fixture did not minimize the main window: {minimized_state}")
+        if not fixture.ensure_fixture_focus("sidecar", timeout=4.0):
+            raise RuntimeError(f"Could not request sidecar fixture focus for '{fixture.sidecar_title}'.")
+
+        minimized_session = api.create_session(title="Desktop run finalization minimized eval").get("session", {}).get("session_id", "")
+        minimized_runs_before = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_goal = (
+            f"Inspect the current state of the desktop window titled '{fixture.main_title}'. "
+            "If it is minimized or not the foreground window, recover it in a bounded way, capture a screenshot of the active recovered window, "
+            "and summarize briefly what state it reached."
+        )
+        minimized_started = time.time()
+        minimized_dispatch = api.send_message(minimized_session, minimized_goal)
+        minimized_status = api.wait_for_status(minimized_session, {"completed"}, timeout=90.0)
+        minimized_detail = api.session_detail(minimized_session)
+        minimized_runs_after = _session_runs(Path(settings["run_history_path"]), minimized_session)
+        minimized_run = _latest_new_run(minimized_runs_before, minimized_runs_after)
+        minimized_message = _authoritative_reply(minimized_detail)
+        minimized_tools = _tool_names_from_run(minimized_run)
+        minimized_desktop = minimized_status.get("desktop", {}) if isinstance(minimized_status.get("desktop", {}), dict) else {}
+        minimized_outcome = minimized_desktop.get("run_outcome", {}) if isinstance(minimized_desktop.get("run_outcome", {}), dict) else {}
+        minimized_checks = [
+            _build_check(
+                "minimized_completed_cleanly",
+                "execution",
+                minimized_status.get("status") == "completed",
+                f"Status={minimized_status.get('status')}",
+            ),
+            _build_check(
+                "minimized_active_window_recovered",
+                "desktop",
+                _contains(str(minimized_desktop.get("active_window_title", "")), fixture.main_title),
+                f"Desktop snapshot={minimized_desktop}",
+            ),
+            _build_check(
+                "minimized_run_outcome_completed",
+                "desktop",
+                str(minimized_outcome.get("outcome", "")).strip() == "completed",
+                f"Desktop outcome={minimized_outcome}",
+            ),
+            _build_check(
+                "minimized_used_recovery_and_capture",
+                "tool_choice",
+                any(tool in minimized_tools for tool in {"desktop_recover_window", "desktop_focus_window"})
+                and "desktop_capture_screenshot" in minimized_tools,
+                f"Tools={minimized_tools}",
+            ),
+        ]
+        minimized_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=minimized_message,
+                session_payload=minimized_detail,
+                run=minimized_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=90,
+                forbidden_terms={"approval", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_recoverable_minimized",
+                goal=minimized_goal,
+                checks=minimized_checks,
+                started_at=minimized_started,
+                status=minimized_status.get("status", ""),
+                reply_mode=str(minimized_dispatch.get("reply_mode", "")).strip(),
+                final_message=minimized_message,
+                run=minimized_run,
+                snapshot=minimized_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        fixture.set_main_minimized(False)
+        if not fixture.ensure_fixture_focus("sidecar", timeout=4.0):
+            raise RuntimeError(f"Could not request sidecar fixture focus for '{fixture.sidecar_title}'.")
+
+        approval_session = api.create_session(title="Desktop run finalization approval eval").get("session", {}).get("session_id", "")
+        approval_runs_before = _session_runs(Path(settings["run_history_path"]), approval_session)
+        approval_goal = (
+            f"Focus the desktop window titled '{fixture.main_title}', inspect the current bounded desktop state, "
+            f"and click the point ({button_x}, {button_y}). "
+            "Pause for explicit approval before performing the real click."
+        )
+        approval_started = time.time()
+        approval_dispatch = api.send_message(approval_session, approval_goal)
+        approval_status = api.wait_for_status(approval_session, {"paused"}, timeout=90.0)
+        approval_detail = api.session_detail(approval_session)
+        approval_runs_after = _session_runs(Path(settings["run_history_path"]), approval_session)
+        approval_run = _latest_new_run(approval_runs_before, approval_runs_after)
+        approval_message = _authoritative_reply(approval_detail)
+        approval_tools = _tool_names_from_run(approval_run)
+        approval_pending = approval_status.get("pending_approval", {}) if isinstance(approval_status.get("pending_approval", {}), dict) else {}
+        approval_outcome = approval_status.get("desktop", {}).get("run_outcome", {}) if isinstance(approval_status.get("desktop", {}).get("run_outcome", {}), dict) else {}
+        approval_checks = [
+            _build_check(
+                "approval_path_paused_cleanly",
+                "execution",
+                approval_status.get("status") == "paused",
+                f"Status={approval_status.get('status')}",
+            ),
+            _build_check(
+                "approval_path_still_pending_approval",
+                "approval",
+                str(approval_pending.get("kind", "")).strip() == "desktop_action"
+                and str(approval_pending.get("tool", "")).strip() == "desktop_click_point",
+                f"Pending approval={approval_pending}",
+            ),
+            _build_check(
+                "approval_run_outcome_not_prematurely_terminal",
+                "desktop",
+                str(approval_outcome.get("outcome", "")).strip() == "approval_needed"
+                and not bool(approval_outcome.get("terminal", False)),
+                f"Desktop outcome={approval_outcome}",
+            ),
+            _build_check(
+                "approval_path_kept_click_bounded",
+                "desktop",
+                int(fixture.read_state().get("click_count", 0) or 0) == 0,
+                f"Fixture state={fixture.read_state()}",
+            ),
+            _build_check(
+                "approval_path_used_screenshot_and_click",
+                "tool_choice",
+                "desktop_click_point" in approval_tools and "desktop_capture_screenshot" in approval_tools,
+                f"Tools={approval_tools}",
+            ),
+        ]
+        approval_checks.extend(
+            _golden_final_answer_checks(
+                status="paused",
+                message=approval_message,
+                session_payload=approval_detail,
+                run=approval_run,
+                expected_terms={"approval", "click", fixture.main_title},
+                require_next_step=True,
+                forbidden_terms={"already clicked", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_approval_needed",
+                goal=approval_goal,
+                checks=approval_checks,
+                started_at=approval_started,
+                status=approval_status.get("status", ""),
+                reply_mode=str(approval_dispatch.get("reply_mode", "")).strip(),
+                final_message=approval_message,
+                run=approval_run,
+                snapshot=approval_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        approval_rejected = _reject_paused_session(approval_session)
+        if approval_rejected.get("status") != "blocked":
+            raise RuntimeError(f"Desktop run finalization eval could not clear the paused checkpoint: {approval_rejected}")
+
+    combined_failures = [failure for phase in phases for failure in phase.get("prompt_failures", [])]
+    return {
+        "name": name,
+        "passed": not combined_failures,
+        "prompt_failures": combined_failures,
+        "phases": phases,
+        "scenario_dir": str(scenario_dir),
+    }
+
+
 def run_desktop_bounded_stack_scenario(context: EvalContext) -> Dict[str, Any]:
     subreports = [
         run_desktop_evidence_grounding_scenario(context),
@@ -4747,6 +5128,7 @@ SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "desktop_evidence_grounding": run_desktop_evidence_grounding_scenario,
     "desktop_recovery_grounding": run_desktop_recovery_grounding_scenario,
     "desktop_scene_reasoning": run_desktop_scene_reasoning_scenario,
+    "desktop_run_finalization": run_desktop_run_finalization_scenario,
 }
 
 

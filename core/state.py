@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.backend_schemas import normalize_desktop_run_outcome
 from core.browser_tasks import (
     browser_task_label,
     infer_browser_task_name,
@@ -135,6 +136,30 @@ def _desktop_scene_context_lines(label: str, scene: Dict[str, Any]) -> List[str]
     return lines
 
 
+def _desktop_run_outcome_context_lines(label: str, outcome: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(outcome, dict):
+        return lines
+    summary = str(outcome.get("summary", "")).strip()
+    if summary:
+        lines.append(f"- {label} desktop outcome: {summary}")
+    parts: List[str] = []
+    outcome_name = str(outcome.get("outcome", "")).strip()
+    status = str(outcome.get("status", "")).strip()
+    reason = str(outcome.get("reason", "")).strip()
+    if outcome_name:
+        parts.append(f"outcome={outcome_name}")
+    if status:
+        parts.append(f"status={status}")
+    if reason:
+        parts.append(f"reason={reason}")
+    if outcome.get("terminal", False):
+        parts.append("terminal=yes")
+    if parts:
+        lines.append(f"- {label} desktop outcome status: {'; '.join(parts)}")
+    return lines
+
+
 class TaskState:
     def __init__(
         self,
@@ -223,6 +248,7 @@ class TaskState:
         self.desktop_checkpoint_evidence_id: str = ""
         self.desktop_checkpoint_approval_status: str = ""
         self.desktop_checkpoint_resume_args: Dict[str, Any] = {}
+        self.desktop_run_outcome: Dict[str, Any] = {}
         if isinstance(session_state, dict):
             self._restore_session_state(session_state)
 
@@ -362,6 +388,7 @@ class TaskState:
         self.desktop_checkpoint_evidence_id = str(session_state.get("desktop_checkpoint_evidence_id", "")).strip()[:80]
         self.desktop_checkpoint_approval_status = str(session_state.get("desktop_checkpoint_approval_status", "")).strip()[:40]
         self.desktop_checkpoint_resume_args = self._normalize_checkpoint_args(session_state.get("desktop_checkpoint_resume_args", {}))
+        self.desktop_run_outcome = normalize_desktop_run_outcome(session_state.get("desktop_run_outcome", {}))
 
         try:
             self.browser_retry_count = max(0, int(session_state.get("browser_retry_count", 0)))
@@ -449,6 +476,7 @@ class TaskState:
             "desktop_checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "desktop_checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "desktop_checkpoint_resume_args": self._normalize_checkpoint_args(self.desktop_checkpoint_resume_args),
+            "desktop_run_outcome": normalize_desktop_run_outcome(self.desktop_run_outcome),
         }
 
     def _push_unique(self, target: List[str], value: str, limit: int = 30):
@@ -533,6 +561,12 @@ class TaskState:
 
     def clear_desktop_checkpoint(self):
         self._clear_desktop_checkpoint()
+
+    def clear_desktop_run_outcome(self):
+        self.desktop_run_outcome = {}
+
+    def set_desktop_run_outcome(self, outcome: Dict[str, Any] | None):
+        self.desktop_run_outcome = normalize_desktop_run_outcome(outcome)
 
     def set_browser_checkpoint(
         self,
@@ -1013,6 +1047,10 @@ class TaskState:
         elif result.get("workflow_resumed") or (approval_status == "approved" and self.desktop_checkpoint_tool and tool_name == self.desktop_checkpoint_tool):
             self._clear_desktop_checkpoint()
 
+        outcome = result.get("desktop_run_outcome", {}) if isinstance(result.get("desktop_run_outcome", {}), dict) else {}
+        if outcome:
+            self.set_desktop_run_outcome(outcome)
+
     def _collect_desktop_activity(self, limit: int = 4) -> Dict[str, Any]:
         actions = self._normalize_values(self.desktop_recent_actions[-limit:], limit=limit, text_limit=220)
         uncertainties: List[str] = []
@@ -1033,6 +1071,8 @@ class TaskState:
                         "reason": str(recovery.get("reason", "")).strip()[:60],
                         "summary": str(recovery.get("summary", "")).strip()[:220],
                         "strategy": str(recovery.get("strategy", "")).strip()[:60],
+                        "attempt_count": int(recovery.get("attempt_count", 0) or 0),
+                        "max_attempts": int(recovery.get("max_attempts", 0) or 0),
                     }
             if not latest_window_readiness:
                 readiness = result.get("window_readiness", {}) if isinstance(result.get("window_readiness", {}), dict) else {}
@@ -1224,6 +1264,7 @@ class TaskState:
             "checkpoint_vision": checkpoint_vision,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
+            "run_outcome": normalize_desktop_run_outcome(self.desktop_run_outcome),
             "latest_recovery": latest_recovery,
             "latest_window_readiness": latest_window_readiness,
             "latest_visual_stability": latest_visual_stability,
@@ -1831,7 +1872,19 @@ class TaskState:
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_vision", {}),
             )
-            for line in evidence_grounding_lines + checkpoint_grounding_lines + selected_scene_lines + checkpoint_scene_lines + selected_vision_lines + checkpoint_vision_lines:
+            outcome_lines = _desktop_run_outcome_context_lines(
+                "Current",
+                desktop_activity.get("run_outcome", {}),
+            )
+            for line in (
+                evidence_grounding_lines
+                + checkpoint_grounding_lines
+                + selected_scene_lines
+                + checkpoint_scene_lines
+                + selected_vision_lines
+                + checkpoint_vision_lines
+                + outcome_lines
+            ):
                 lines.append(line)
             recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
             if isinstance(recent_context_evidence, list) and recent_context_evidence:
@@ -2681,6 +2734,11 @@ class TaskState:
             for line in _desktop_vision_context_lines(
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_vision", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_run_outcome_context_lines(
+                "Current",
+                desktop_activity.get("run_outcome", {}),
             ):
                 lines.append(line)
             recent_context_evidence = desktop_activity.get("recent_context_evidence", [])

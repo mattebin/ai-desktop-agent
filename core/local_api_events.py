@@ -175,6 +175,7 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "summary": _trim_text(desktop.get("checkpoint_vision", {}).get("summary", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=220),
             "needs_direct_image": bool(desktop.get("checkpoint_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("checkpoint_vision", {}), dict) else False,
         },
+        "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
         "latest_recovery": {
             "state": _trim_text(desktop.get("latest_recovery", {}).get("state", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=40),
             "reason": _trim_text(desktop.get("latest_recovery", {}).get("reason", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=60),
@@ -244,6 +245,25 @@ def _compact_alert(alert: Dict[str, Any] | None) -> Dict[str, Any]:
         "run_id": _trim_text(alert.get("run_id", ""), limit=60),
         "session_id": _trim_text(alert.get("session_id", ""), limit=80),
         "state_scope_id": _trim_text(alert.get("state_scope_id", ""), limit=120),
+    }
+
+
+def _compact_desktop_outcome(outcome: Dict[str, Any] | None) -> Dict[str, Any]:
+    outcome = outcome if isinstance(outcome, dict) else {}
+    return {
+        "outcome": _trim_text(outcome.get("outcome", ""), limit=60),
+        "status": _trim_text(outcome.get("status", ""), limit=40),
+        "terminal": bool(outcome.get("terminal", False)),
+        "reason": _trim_text(outcome.get("reason", ""), limit=60),
+        "summary": _trim_text(outcome.get("summary", ""), limit=220),
+        "scene_class": _trim_text(outcome.get("scene_class", ""), limit=40),
+        "workflow_state": _trim_text(outcome.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(outcome.get("readiness_state", ""), limit=40),
+        "recovery_state": _trim_text(outcome.get("recovery_state", ""), limit=40),
+        "recovery_reason": _trim_text(outcome.get("recovery_reason", ""), limit=60),
+        "recovery_strategy": _trim_text(outcome.get("recovery_strategy", ""), limit=80),
+        "attempt_count": int(outcome.get("attempt_count", 0) or 0),
+        "max_attempts": int(outcome.get("max_attempts", 0) or 0),
     }
 
 

@@ -118,6 +118,36 @@ Responsibilities:
 
 This layer is plugin-friendly by design. Future app/workflow interpreters should register into the scene registry instead of patching loop logic directly.
 
+### 7. Desktop run lifecycle and terminal outcomes
+
+Primary files:
+
+- `core/loop.py`
+- `core/state.py`
+- `core/local_api.py`
+- `core/local_api_events.py`
+- `core/run_history.py`
+
+Responsibilities:
+
+- convert scene/recovery/evidence state into a bounded terminal desktop outcome when continuation is no longer appropriate
+- keep approval-needed desktop checkpoints non-terminal and explicit
+- expose a compact desktop run outcome through state, local API, event stream, and run history
+
+Current normalized desktop outcomes:
+
+- `completed`
+- `approval_needed`
+- `blocked`
+- `incomplete`
+- `needs_refresh`
+- `unrecoverable_missing_target`
+- `unrecoverable_tray_background`
+- `unrecoverable_withdrawn`
+- `recovery_exhausted`
+
+This is important for future bounded primitives. Step 3 primitives should plug into this outcome model instead of inventing their own retry/finalization behavior.
+
 ## Bounded matching model
 
 The matching subsystem is deliberately constrained.

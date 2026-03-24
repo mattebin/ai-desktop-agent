@@ -250,6 +250,8 @@ def _end_state(task_state) -> Dict[str, Any]:
     control_snapshot = task_state.get_control_snapshot() if hasattr(task_state, "get_control_snapshot") else {}
     behavior = control_snapshot.get("behavior", {}) if isinstance(control_snapshot, dict) else {}
     task_control = control_snapshot.get("task_control", {}) if isinstance(control_snapshot, dict) else {}
+    desktop = control_snapshot.get("desktop", {}) if isinstance(control_snapshot, dict) else {}
+    desktop_outcome = desktop.get("run_outcome", {}) if isinstance(desktop.get("run_outcome", {}), dict) else {}
     payload = {
         "state_scope_id": _trim_text(getattr(task_state, "state_scope_id", ""), limit=120),
         "status": _trim_text(getattr(task_state, "status", ""), limit=40),
@@ -265,6 +267,9 @@ def _end_state(task_state) -> Dict[str, Any]:
         "browser_checkpoint_pending": bool(getattr(task_state, "browser_checkpoint_pending", False)),
         "browser_current_url": _trim_text(getattr(task_state, "browser_current_url", ""), limit=220),
         "browser_current_title": _trim_text(getattr(task_state, "browser_current_title", ""), limit=160),
+        "desktop_outcome": _trim_text(desktop_outcome.get("outcome", ""), limit=60),
+        "desktop_outcome_reason": _trim_text(desktop_outcome.get("reason", ""), limit=60),
+        "desktop_outcome_status": _trim_text(desktop_outcome.get("status", ""), limit=40),
     }
     return {
         key: value

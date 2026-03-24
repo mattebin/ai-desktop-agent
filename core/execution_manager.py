@@ -1850,6 +1850,8 @@ class ExecutionManager:
         state = self.agent.load_task_state(task.get("goal", ""), state_scope_id=state_scope_id)
         state.state_scope_id = state_scope_id
         state.status = "running"
+        if hasattr(state, "clear_desktop_run_outcome"):
+            state.clear_desktop_run_outcome()
         self.agent.save_task_state(state, state_scope_id=state_scope_id)
         self._set_current_state_locked(state)
         task["status"] = "running"
@@ -2246,6 +2248,8 @@ class ExecutionManager:
                 self._refresh_summary(state)
                 state.status = "running"
                 state.set_task_control(event="approved", reason=note, resume_available=False)
+                if hasattr(state, "clear_desktop_run_outcome"):
+                    state.clear_desktop_run_outcome()
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
                 self._update_task_after_manual_action_locked(active_task, status="running", message=note, approval_needed=False, approval_reason="", state=state)
@@ -2275,6 +2279,8 @@ class ExecutionManager:
                 state.add_note(note)
                 state.status = "running"
                 state.set_task_control(event="approved", reason=note, resume_available=False)
+                if hasattr(state, "clear_desktop_run_outcome"):
+                    state.clear_desktop_run_outcome()
                 self._refresh_summary(state)
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
@@ -2443,6 +2449,18 @@ class ExecutionManager:
                 self._refresh_summary(state)
                 state.status = "blocked"
                 state.set_task_control(event="rejected", reason=message, resume_available=False)
+                if hasattr(state, "set_desktop_run_outcome"):
+                    state.set_desktop_run_outcome(
+                        {
+                            "outcome": "blocked",
+                            "status": "blocked",
+                            "terminal": True,
+                            "reason": "approval_needed",
+                            "summary": message,
+                            "target_window_title": getattr(state, "desktop_last_target_window", ""),
+                            "active_window_title": getattr(state, "desktop_active_window_title", ""),
+                        }
+                    )
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
                 reply_message = self._render_authoritative_manual_reply_locked(state, message)

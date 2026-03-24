@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List
 
 BACKEND_REASON_CODES = {
     "ok",
+    "completed",
+    "approval_needed",
     "available",
     "active",
     "scheduled",
@@ -88,6 +90,10 @@ BACKEND_REASON_CODES = {
     "image_selected",
     "image_pair_selected",
     "vision_required",
+    "recovery_exhausted",
+    "unrecoverable_missing_target",
+    "unrecoverable_tray_background",
+    "unrecoverable_withdrawn",
     "error",
 }
 
@@ -544,6 +550,50 @@ def normalize_desktop_vision_context(value: Dict[str, Any] | None) -> Dict[str, 
         "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
         "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
         "images": images,
+    }
+
+
+def normalize_desktop_run_outcome(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    outcome = _trim_text(value.get("outcome", ""), limit=60).lower() or "unknown"
+    if outcome not in {
+        "unknown",
+        "completed",
+        "approval_needed",
+        "blocked",
+        "incomplete",
+        "needs_refresh",
+        "unrecoverable_missing_target",
+        "unrecoverable_tray_background",
+        "unrecoverable_withdrawn",
+        "recovery_exhausted",
+    }:
+        outcome = "unknown"
+    status = _trim_text(value.get("status", ""), limit=40).lower() or "running"
+    if status not in {"running", "paused", "completed", "blocked", "incomplete"}:
+        status = "running"
+    return {
+        "outcome": outcome,
+        "status": status,
+        "terminal": _coerce_bool(value.get("terminal", status in {"completed", "blocked", "incomplete"}), status in {"completed", "blocked", "incomplete"}),
+        "reason": _normalize_reason(value.get("reason", outcome), default="ok" if outcome == "completed" else "error"),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "scene_class": _trim_text(value.get("scene_class", ""), limit=40).lower() or "unknown",
+        "workflow_state": _trim_text(value.get("workflow_state", ""), limit=40).lower() or "unknown",
+        "readiness_state": _trim_text(value.get("readiness_state", ""), limit=40).lower() or "unknown",
+        "evidence_state": _trim_text(value.get("evidence_state", ""), limit=40).lower(),
+        "evidence_reason": _normalize_reason(value.get("evidence_reason", ""), default="ok"),
+        "recovery_state": _trim_text(value.get("recovery_state", ""), limit=40).lower(),
+        "recovery_reason": _normalize_reason(value.get("recovery_reason", ""), default="ok"),
+        "recovery_strategy": _trim_text(value.get("recovery_strategy", ""), limit=80),
+        "attempt_count": _coerce_int(value.get("attempt_count", 0), 0, minimum=0, maximum=16),
+        "max_attempts": _coerce_int(value.get("max_attempts", 0), 0, minimum=0, maximum=16),
+        "scene_changed": _coerce_bool(value.get("scene_changed", False), False),
+        "checkpoint_pending": _coerce_bool(value.get("checkpoint_pending", False), False),
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
     }
 
 

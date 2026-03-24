@@ -606,6 +606,146 @@ def _desktop_selected_scene(task_state) -> dict:
         return {}
 
 
+def _desktop_activity_snapshot(task_state) -> dict:
+    try:
+        activity = task_state._collect_desktop_activity(limit=4)
+        return activity if isinstance(activity, dict) else {}
+    except Exception:
+        return {}
+
+
+def _desktop_build_run_outcome(
+    task_state,
+    *,
+    outcome: str,
+    status: str,
+    terminal: bool,
+    reason: str,
+    summary: str,
+):
+    from core.backend_schemas import normalize_desktop_run_outcome
+
+    activity = _desktop_activity_snapshot(task_state)
+    scene = activity.get("selected_scene", {}) if isinstance(activity.get("selected_scene", {}), dict) else {}
+    recovery = activity.get("latest_recovery", {}) if isinstance(activity.get("latest_recovery", {}), dict) else {}
+    assessment = (
+        activity.get("checkpoint_evidence_assessment", {})
+        if status == "paused"
+        else activity.get("selected_evidence_assessment", {})
+    )
+    if not isinstance(assessment, dict):
+        assessment = {}
+    return normalize_desktop_run_outcome(
+        {
+            "outcome": outcome,
+            "status": status,
+            "terminal": terminal,
+            "reason": reason,
+            "summary": summary,
+            "target_window_title": str(activity.get("checkpoint_target", "") or activity.get("last_target_window", "")).strip(),
+            "active_window_title": str(activity.get("active_window_title", "")).strip(),
+            "scene_class": str(scene.get("scene_class", "")).strip(),
+            "workflow_state": str(scene.get("workflow_state", "")).strip(),
+            "readiness_state": str(scene.get("readiness_state", "")).strip(),
+            "evidence_state": str(assessment.get("state", "")).strip(),
+            "evidence_reason": str(assessment.get("reason", "")).strip(),
+            "recovery_state": str(recovery.get("state", "")).strip(),
+            "recovery_reason": str(recovery.get("reason", "")).strip(),
+            "recovery_strategy": str(recovery.get("strategy", "")).strip(),
+            "attempt_count": int(recovery.get("attempt_count", 0) or 0),
+            "max_attempts": int(recovery.get("max_attempts", 0) or 0),
+            "scene_changed": bool(scene.get("scene_changed", False)),
+            "checkpoint_pending": bool(activity.get("checkpoint_pending", False)),
+            "evidence_id": str(activity.get("checkpoint_evidence_id", "") or activity.get("evidence_id", "")).strip(),
+            "timestamp": str(activity.get("evidence_timestamp", "") or activity.get("observed_at", "")).strip(),
+        }
+    )
+
+
+def _desktop_terminal_outcome(task_state, planner_goal: str) -> dict:
+    if not _goal_is_desktop_related(planner_goal, task_state):
+        return {}
+
+    activity = _desktop_activity_snapshot(task_state)
+    if not activity or bool(activity.get("checkpoint_pending", False)):
+        return {}
+
+    recovery = activity.get("latest_recovery", {}) if isinstance(activity.get("latest_recovery", {}), dict) else {}
+    process_context = activity.get("latest_process_context", {}) if isinstance(activity.get("latest_process_context", {}), dict) else {}
+    scene = activity.get("selected_scene", {}) if isinstance(activity.get("selected_scene", {}), dict) else {}
+    assessment = activity.get("selected_evidence_assessment", {}) if isinstance(activity.get("selected_evidence_assessment", {}), dict) else {}
+    recovery_state = str(recovery.get("state", "")).strip().lower()
+    recovery_reason = str(recovery.get("reason", "")).strip().lower()
+    scene_class = str(scene.get("scene_class", "")).strip().lower()
+    workflow_state = str(scene.get("workflow_state", "")).strip().lower()
+    attempt_count = int(recovery.get("attempt_count", 0) or 0)
+    max_attempts = int(recovery.get("max_attempts", 0) or 0)
+    exhausted = max_attempts > 0 and attempt_count >= max_attempts and recovery_state in {"missing", "needs_recovery", "waiting"}
+    background_candidate = bool(process_context.get("background_candidate", False) or process_context.get("running", False))
+    summary = str(recovery.get("summary", "") or scene.get("summary", "") or assessment.get("summary", "")).strip()
+
+    if recovery_reason == "target_withdrawn" and recovery_state == "missing":
+        return _desktop_build_run_outcome(
+            task_state,
+            outcome="unrecoverable_withdrawn",
+            status="incomplete",
+            terminal=True,
+            reason="unrecoverable_withdrawn",
+            summary=summary or "The target window appears withdrawn or tray-like and is not visibly recoverable in the current bounded desktop pass.",
+        )
+
+    if recovery_reason in {"tray_or_background_state"} and recovery_state == "missing":
+        return _desktop_build_run_outcome(
+            task_state,
+            outcome="unrecoverable_tray_background",
+            status="incomplete",
+            terminal=True,
+            reason="unrecoverable_tray_background",
+            summary=summary or "The target window is not visibly surfaced and appears to be only in the tray or background.",
+        )
+
+    if recovery_reason == "target_not_found" and recovery_state == "missing":
+        return _desktop_build_run_outcome(
+            task_state,
+            outcome="unrecoverable_tray_background" if background_candidate else "unrecoverable_missing_target",
+            status="incomplete",
+            terminal=True,
+            reason="unrecoverable_tray_background" if background_candidate else "unrecoverable_missing_target",
+            summary=summary or (
+                "The target process still appears alive, but the target window is not visibly surfaced."
+                if background_candidate
+                else "The target window is not visibly present and could not be found through the bounded desktop path."
+            ),
+        )
+
+    if exhausted or (
+        recovery_state in {"missing", "needs_recovery", "waiting"}
+        and recovery_reason in {"foreground_not_confirmed", "target_hidden", "target_minimized", "target_mismatch", "target_loading", "target_not_ready", "visual_state_unstable"}
+        and max_attempts > 0
+        and attempt_count >= max_attempts
+    ):
+        return _desktop_build_run_outcome(
+            task_state,
+            outcome="recovery_exhausted",
+            status="incomplete",
+            terminal=True,
+            reason="recovery_exhausted",
+            summary=summary or "The bounded desktop recovery budget is exhausted, so the operator should stop and report the current window state.",
+        )
+
+    if recovery_state == "missing" and scene_class == "background" and workflow_state in {"recovering", "blocked", "attention_needed"}:
+        return _desktop_build_run_outcome(
+            task_state,
+            outcome="unrecoverable_tray_background",
+            status="incomplete",
+            terminal=True,
+            reason="unrecoverable_tray_background",
+            summary=summary or "The target remains background-like and not visibly recoverable in the current bounded desktop pass.",
+        )
+
+    return {}
+
+
 def _desktop_goal_mentions_changed_state(planner_goal: str) -> bool:
     try:
         from core.desktop_evidence import _desktop_changed_state_goal
@@ -764,6 +904,48 @@ def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_
     )
 
 
+def _finalize_desktop_run_outcome(llm, task_state, outcome: dict, *, session_store=None):
+    if not isinstance(outcome, dict) or not str(outcome.get("outcome", "")).strip():
+        return None
+    task_state.set_desktop_run_outcome(outcome)
+    note = str(outcome.get("summary", "")).strip() or "Desktop run ended."
+    status = str(outcome.get("status", "")).strip() or "incomplete"
+    task_state.add_step(
+        {
+            "type": "system",
+            "status": status,
+            "message": note,
+            "tool": "desktop_run_outcome",
+            "result": {"desktop_run_outcome": dict(outcome)},
+        }
+    )
+    task_state.add_note(note)
+    recent_notes = task_state.memory_notes[-6:]
+    if recent_notes:
+        task_state.set_summary(" | ".join(recent_notes))
+    task_state.status = status
+    _persist_session_state(session_store, task_state)
+    return {
+        "ok": status == "completed",
+        "status": status,
+        "message": _finalize_message(llm, task_state),
+        "steps": task_state.steps,
+        "desktop_run_outcome": dict(outcome),
+    }
+
+
+def _maybe_finalize_desktop_terminal_outcome(llm, task_state, planner_goal: str, *, session_store=None):
+    outcome = _desktop_terminal_outcome(task_state, planner_goal)
+    if not outcome.get("terminal", False):
+        return None
+    return _finalize_desktop_run_outcome(
+        llm,
+        task_state,
+        outcome,
+        session_store=session_store,
+    )
+
+
 def _finalize_synthesized_desktop_pause(
     llm,
     task_state,
@@ -795,6 +977,16 @@ def _finalize_synthesized_desktop_pause(
         evidence_id=evidence_id,
         approval_status="not approved",
         resume_args=resume_args,
+    )
+    task_state.set_desktop_run_outcome(
+        _desktop_build_run_outcome(
+            task_state,
+            outcome="approval_needed",
+            status="paused",
+            terminal=False,
+            reason="approval_needed",
+            summary=note,
+        )
     )
     task_state.status = "paused"
     task_state.desktop_last_action = note[:220]
@@ -1306,6 +1498,16 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
     _persist_session_state(session_store, task_state)
 
     if result.get("paused", False):
+        task_state.set_desktop_run_outcome(
+            _desktop_build_run_outcome(
+                task_state,
+                outcome="approval_needed",
+                status="paused",
+                terminal=False,
+                reason="approval_needed",
+                summary=str(result.get("summary", "") or result.get("checkpoint_reason", "") or "Desktop approval is still required.").strip(),
+            )
+        )
         task_state.status = "paused"
         _persist_session_state(session_store, task_state)
         return {
@@ -1316,6 +1518,16 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         }
 
     if result.get("ok", False):
+        task_state.set_desktop_run_outcome(
+            _desktop_build_run_outcome(
+                task_state,
+                outcome="completed",
+                status="completed",
+                terminal=True,
+                reason="completed",
+                summary=str(result.get("summary", "") or result.get("message", "") or "Completed the approved bounded desktop step.").strip(),
+            )
+        )
         task_state.status = "completed"
         _persist_session_state(session_store, task_state)
         return {
@@ -1385,6 +1597,15 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
         if synthesized_desktop_pause is not None:
             return synthesized_desktop_pause
 
+        terminal_desktop_outcome = _maybe_finalize_desktop_terminal_outcome(
+            llm,
+            task_state,
+            planner_goal,
+            session_store=session_store,
+        )
+        if terminal_desktop_outcome is not None:
+            return terminal_desktop_outcome
+
         if _maybe_bootstrap_browser_open(tool_runtime, task_state, planner_goal, session_store=session_store):
             continue
 
@@ -1406,6 +1627,17 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
         )
 
         if plan.get("done"):
+            if _goal_is_desktop_related(planner_goal, task_state):
+                task_state.set_desktop_run_outcome(
+                    _desktop_build_run_outcome(
+                        task_state,
+                        outcome="completed",
+                        status="completed",
+                        terminal=True,
+                        reason="completed",
+                        summary="Completed the bounded desktop run from the current scene, evidence, and recovery context.",
+                    )
+                )
             task_state.status = "completed"
             _persist_session_state(session_store, task_state)
             return {
@@ -1443,6 +1675,17 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
         result = tool_runtime.execute(tool_name, args)
         _record_tool_result(task_state, tool_name, args, result)
         if result.get("paused", False):
+            if tool_name.startswith("desktop_"):
+                task_state.set_desktop_run_outcome(
+                    _desktop_build_run_outcome(
+                        task_state,
+                        outcome="approval_needed",
+                        status="paused",
+                        terminal=False,
+                        reason="approval_needed",
+                        summary=str(result.get("summary", "") or result.get("checkpoint_reason", "") or "Desktop approval is required before the next bounded action.").strip(),
+                    )
+                )
             task_state.status = "paused"
             _persist_session_state(session_store, task_state)
             return {
@@ -1464,6 +1707,14 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             if desktop_recovery.get("continue_loop", False):
                 continue
             return desktop_recovery
+        terminal_desktop_outcome = _maybe_finalize_desktop_terminal_outcome(
+            llm,
+            task_state,
+            planner_goal,
+            session_store=session_store,
+        )
+        if terminal_desktop_outcome is not None:
+            return terminal_desktop_outcome
         synthesized_pause = _maybe_pause_for_browser_checkpoint(
             llm,
             tool_runtime,
@@ -1488,6 +1739,25 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
                 return control_result
         _persist_session_state(session_store, task_state)
 
+    terminal_desktop_outcome = _maybe_finalize_desktop_terminal_outcome(
+        llm,
+        task_state,
+        planner_goal,
+        session_store=session_store,
+    )
+    if terminal_desktop_outcome is not None:
+        return terminal_desktop_outcome
+    if _goal_is_desktop_related(planner_goal, task_state):
+        task_state.set_desktop_run_outcome(
+            _desktop_build_run_outcome(
+                task_state,
+                outcome="incomplete",
+                status="incomplete",
+                terminal=True,
+                reason="recovery_exhausted",
+                summary="The bounded desktop run reached its iteration budget without a safe completion or actionable approval checkpoint.",
+            )
+        )
     task_state.status = "incomplete"
     _persist_session_state(session_store, task_state)
     return {

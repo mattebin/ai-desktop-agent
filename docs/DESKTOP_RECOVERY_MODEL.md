@@ -95,6 +95,29 @@ The recovery layer now participates in the real bounded desktop flow:
 - grouped desktop failure recovery can re-inspect, recover, wait briefly, and then refresh evidence once when needed
 - compact recovery/readiness diagnostics are exposed through state and local API snapshots
 
+## Terminal desktop outcomes
+
+The bounded desktop stack now stops explicitly when it already knows continued silent progress is not appropriate.
+
+Current terminal or near-terminal desktop outcomes include:
+
+- `completed`
+- `approval_needed`
+- `blocked`
+- `incomplete`
+- `unrecoverable_missing_target`
+- `unrecoverable_tray_background`
+- `unrecoverable_withdrawn`
+- `recovery_exhausted`
+
+Preferred behavior:
+
+- pause only for real actionable approvals
+- finalize as `incomplete` when the target is missing, withdrawn, tray/background-like, or otherwise not visibly recoverable in the current bounded pass
+- avoid leaving known non-actionable desktop runs stuck in `running`
+
+This is the foundation that the next bounded primitive should build on.
+
 ## Current live-validation boundary
 
 Recent focused live validation confirmed the improved minimized / wrong-foreground recovery path and evidence-backed screenshot capture path.

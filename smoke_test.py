@@ -87,7 +87,12 @@ from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _content_with_desktop_vision, _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer, _status_payload
 from core.local_api_client import LocalOperatorApiClient, wait_for_local_api_status
-from core.loop import _is_redundant_desktop_observation, _maybe_pause_for_desktop_action, _maybe_recover_desktop_action_failure
+from core.loop import (
+    _is_redundant_desktop_observation,
+    _maybe_finalize_desktop_terminal_outcome,
+    _maybe_pause_for_desktop_action,
+    _maybe_recover_desktop_action_failure,
+)
 from core.operator_behavior import classify_chat_turn, looks_like_simple_conversation_turn
 from core.operator_controller import OperatorController
 from core.run_history import RunHistoryStore
@@ -96,6 +101,7 @@ from core.session_store import DEFAULT_STATE_SCOPE_ID, SessionStore
 from core.state import TaskState
 from core.tool_runtime import ToolRuntime
 from core.watchers import WatchStore
+from core.backend_schemas import normalize_desktop_run_outcome
 from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks, _session_matches_query, _timeline_entry_from_event
 from live_agent_eval import (
     SCENARIO_NAMES,
@@ -1283,6 +1289,180 @@ if paused_snapshot.get("pending_approval", {}).get("evidence_preview", {}).get("
     raise SystemExit("Desktop approval synthesis did not retain checkpoint-linked evidence for the paused desktop checkpoint.")
 if paused_snapshot.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Desktop approval synthesis did not retain checkpoint evidence sufficiency for the paused desktop checkpoint.")
+if paused_snapshot.get("desktop", {}).get("run_outcome", {}).get("outcome") != "approval_needed":
+    raise SystemExit("Desktop approval synthesis did not expose an explicit approval-needed desktop run outcome.")
+if _status_payload(paused_snapshot).get("desktop", {}).get("run_outcome", {}).get("outcome") != "approval_needed":
+    raise SystemExit("Local API status compaction did not expose the approval-needed desktop run outcome.")
+
+missing_target_state = TaskState("Inspect the window titled 'Missing Desktop Window'")
+missing_target_result = {
+    "ok": False,
+    "summary": "Could not find a visible top-level window for 'Missing Desktop Window'. It may be closed, minimized to the tray, or only present in the background.",
+    "error": "Could not find a visible top-level window for 'Missing Desktop Window'. It may be closed, minimized to the tray, or only present in the background.",
+    "recovery": {
+        "state": "missing",
+        "reason": "target_not_found",
+        "summary": "Could not find a visible top-level window for 'Missing Desktop Window'. It may be closed, minimized to the tray, or only present in the background.",
+        "strategy": "report_missing_target",
+        "attempt_count": 1,
+        "max_attempts": 2,
+    },
+}
+missing_target_state.add_step(
+    {
+        "type": "tool",
+        "status": "failed",
+        "tool": "desktop_inspect_window_state",
+        "args": {"title": "Missing Desktop Window", "expected_window_title": "Missing Desktop Window"},
+        "result": missing_target_result,
+    }
+)
+missing_target_state.update_memory_from_tool("desktop_inspect_window_state", missing_target_result)
+missing_target_final = _maybe_finalize_desktop_terminal_outcome(
+    _DesktopApprovalStubLLM(),
+    missing_target_state,
+    missing_target_state.goal,
+)
+if not isinstance(missing_target_final, dict) or missing_target_final.get("status") != "incomplete":
+    raise SystemExit("Desktop terminal finalization did not convert a missing-target recovery outcome into a clean incomplete result.")
+if missing_target_state.get_control_snapshot().get("desktop", {}).get("run_outcome", {}).get("outcome") != "unrecoverable_missing_target":
+    raise SystemExit("Desktop terminal finalization did not expose the unrecoverable missing-target outcome in state.")
+
+tray_background_state = TaskState("Inspect the window titled 'Tray Backed Window'")
+tray_background_result = {
+    "ok": False,
+    "summary": "The target appears backgrounded, tray-like, or not visibly surfaced. Process check: pythonw.exe is running with status 'running'.",
+    "error": "The target appears backgrounded, tray-like, or not visibly surfaced. Process check: pythonw.exe is running with status 'running'.",
+    "process_context": {
+        "process_name": "pythonw.exe",
+        "status": "running",
+        "running": True,
+        "background_candidate": True,
+        "summary": "pythonw.exe is still running and looks like a background or tray candidate.",
+    },
+    "recovery": {
+        "state": "missing",
+        "reason": "tray_or_background_state",
+        "summary": "The target appears backgrounded, tray-like, or not visibly surfaced.",
+        "strategy": "report_missing_target",
+        "attempt_count": 1,
+        "max_attempts": 2,
+    },
+}
+tray_background_state.add_step(
+    {
+        "type": "tool",
+        "status": "failed",
+        "tool": "desktop_recover_window",
+        "args": {"title": "Tray Backed Window", "expected_window_title": "Tray Backed Window"},
+        "result": tray_background_result,
+    }
+)
+tray_background_state.update_memory_from_tool("desktop_recover_window", tray_background_result)
+tray_background_final = _maybe_finalize_desktop_terminal_outcome(
+    _DesktopApprovalStubLLM(),
+    tray_background_state,
+    tray_background_state.goal,
+)
+if not isinstance(tray_background_final, dict) or tray_background_final.get("status") != "incomplete":
+    raise SystemExit("Desktop terminal finalization did not convert a tray/background recovery outcome into a clean incomplete result.")
+if tray_background_state.get_control_snapshot().get("desktop", {}).get("run_outcome", {}).get("outcome") != "unrecoverable_tray_background":
+    raise SystemExit("Desktop terminal finalization did not expose the unrecoverable tray/background outcome in state.")
+
+withdrawn_state = TaskState("Inspect the window titled 'Withdrawn Desktop Window'")
+withdrawn_result = {
+    "ok": False,
+    "summary": "The target window looks withdrawn or tray-like and is not visibly recoverable in the current bounded desktop pass.",
+    "error": "The target window looks withdrawn or tray-like and is not visibly recoverable in the current bounded desktop pass.",
+    "recovery": {
+        "state": "missing",
+        "reason": "target_withdrawn",
+        "summary": "The target window looks withdrawn or tray-like and is not visibly recoverable in the current bounded desktop pass.",
+        "strategy": "report_missing_target",
+        "attempt_count": 1,
+        "max_attempts": 2,
+    },
+}
+withdrawn_state.add_step(
+    {
+        "type": "tool",
+        "status": "failed",
+        "tool": "desktop_recover_window",
+        "args": {"title": "Withdrawn Desktop Window", "expected_window_title": "Withdrawn Desktop Window"},
+        "result": withdrawn_result,
+    }
+)
+withdrawn_state.update_memory_from_tool("desktop_recover_window", withdrawn_result)
+withdrawn_final = _maybe_finalize_desktop_terminal_outcome(
+    _DesktopApprovalStubLLM(),
+    withdrawn_state,
+    withdrawn_state.goal,
+)
+if not isinstance(withdrawn_final, dict) or withdrawn_final.get("status") != "incomplete":
+    raise SystemExit("Desktop terminal finalization did not convert a withdrawn-window recovery outcome into a clean incomplete result.")
+if withdrawn_state.get_control_snapshot().get("desktop", {}).get("run_outcome", {}).get("outcome") != "unrecoverable_withdrawn":
+    raise SystemExit("Desktop terminal finalization did not expose the unrecoverable withdrawn outcome in state.")
+
+recovery_exhausted_state = TaskState("Recover the window titled 'Approval Target Window'")
+recovery_exhausted_result = {
+    "ok": False,
+    "summary": "The bounded recovery budget is exhausted, so the operator should stop and report the current window state.",
+    "error": "The bounded recovery budget is exhausted, so the operator should stop and report the current window state.",
+    "recovery": {
+        "state": "needs_recovery",
+        "reason": "foreground_not_confirmed",
+        "summary": "The bounded recovery budget is exhausted, so the operator should stop and report the current window state.",
+        "strategy": "stop_and_report",
+        "attempt_count": 2,
+        "max_attempts": 2,
+    },
+}
+recovery_exhausted_state.add_step(
+    {
+        "type": "tool",
+        "status": "failed",
+        "tool": "desktop_recover_window",
+        "args": {"title": "Approval Target Window", "expected_window_title": "Approval Target Window"},
+        "result": recovery_exhausted_result,
+    }
+)
+recovery_exhausted_state.update_memory_from_tool("desktop_recover_window", recovery_exhausted_result)
+recovery_exhausted_final = _maybe_finalize_desktop_terminal_outcome(
+    _DesktopApprovalStubLLM(),
+    recovery_exhausted_state,
+    recovery_exhausted_state.goal,
+)
+if not isinstance(recovery_exhausted_final, dict) or recovery_exhausted_final.get("status") != "incomplete":
+    raise SystemExit("Desktop terminal finalization did not stop cleanly after bounded recovery was exhausted.")
+if recovery_exhausted_state.get_control_snapshot().get("desktop", {}).get("run_outcome", {}).get("outcome") != "recovery_exhausted":
+    raise SystemExit("Desktop terminal finalization did not expose the recovery-exhausted outcome in state.")
+
+blocked_desktop_snapshot = _status_payload(
+    {
+        "status": "blocked",
+        "running": False,
+        "paused": False,
+        "goal": "Rejected paused desktop action",
+        "queue": {},
+        "browser": {},
+        "behavior": {},
+        "pending_approval": {},
+        "desktop": {
+            "run_outcome": normalize_desktop_run_outcome(
+                {
+                    "outcome": "blocked",
+                    "status": "blocked",
+                    "terminal": True,
+                    "reason": "approval_needed",
+                    "summary": "Rejected the paused desktop action instead of continuing.",
+                    "target_window_title": "Approval Target Window",
+                }
+            )
+        },
+    }
+)
+if blocked_desktop_snapshot.get("desktop", {}).get("run_outcome", {}).get("outcome") != "blocked":
+    raise SystemExit("Local API status compaction did not preserve the blocked desktop terminal outcome.")
 
 desktop_key_ready_state = TaskState("Press Enter in window titled 'Approval Target Window'")
 desktop_key_ready_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_capture_screenshot", "args": {}, "result": desktop_ready_result})
@@ -1845,6 +2025,7 @@ for expected_scenario in {
     "desktop_evidence_grounding",
     "desktop_recovery_grounding",
     "desktop_scene_reasoning",
+    "desktop_run_finalization",
     "desktop_bounded_stack",
 }:
     if expected_scenario not in SCENARIO_NAMES:
@@ -1879,8 +2060,8 @@ if "focus_request_path" not in live_eval_source or "def request_focus(" not in l
     raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
 if "command_request_path" not in live_eval_source or "def request_command(" not in live_eval_source or "def _handle_command(" not in live_eval_source:
     raise SystemExit("live_agent_eval is missing the expected desktop fixture recovery command harness support.")
-if "vision_selected_direct_image" not in live_eval_source or "desktop_scene_reasoning" not in live_eval_source or "desktop_press_key" not in live_eval_source:
-    raise SystemExit("live_agent_eval is missing the expected bounded desktop-stack validation coverage for scene reasoning, direct image grounding, or keyboard approvals.")
+if "vision_selected_direct_image" not in live_eval_source or "desktop_scene_reasoning" not in live_eval_source or "desktop_press_key" not in live_eval_source or "desktop_run_finalization" not in live_eval_source:
+    raise SystemExit("live_agent_eval is missing the expected bounded desktop-stack validation coverage for scene reasoning, direct image grounding, keyboard approvals, or desktop run finalization.")
 if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
     raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
 no_run_checks = _golden_final_answer_checks(
