@@ -17,6 +17,7 @@ This project is now a serious local operator framework with:
 - a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
 - a compact desktop evidence summary/selection layer for recent evidence lookup
 - bounded automatic active-window capture into the same desktop evidence layer
+- a bounded desktop scene interpretation layer for app/workflow/readiness understanding
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
 - a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
 - live eval coverage for core and realistic workflows
@@ -118,6 +119,26 @@ Those summaries now feed compact UI/client presentation too:
 - retained evidence artifacts can be viewed on demand from those summary surfaces without auto-expanding screenshots into the main experience
 
 Recent validation work also tightened the desktop live-eval wait path and confirmed the main screenshot-backed approval-grounding path locally plus in one bounded desktop-grounding live scenario, while leaving stale-evidence follow-up behavior as the next targeted validation slice.
+
+## Desktop scene interpretation layer
+
+The desktop evidence/viewing stack now also includes a bounded scene interpretation layer that can compactly classify:
+
+- probable scene/app class
+- probable workflow state
+- loading / ready / blocked / unstable state
+- dialog/prompt/fullscreen/background-like characteristics
+- meaningful scene changes across recent evidence history
+
+This layer plugs into:
+
+- bounded vision selection
+- desktop recovery/readiness reasoning
+- approval grounding
+- desktop-state answers
+- final desktop context packaging
+
+It does not replace the evidence store, and it does not introduce broad OCR-heavy automation. Its job is to make the existing evidence stack more understandable and more reusable for future bounded desktop capability.
 
 Current non-goals:
 

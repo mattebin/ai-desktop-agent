@@ -34,8 +34,11 @@ The evidence layer now also sits behind clearer subsystem seams:
 - bounded window/title matching
 - process/background diagnostics
 - readiness and control-state probing
+- scene interpretation
 - evidence summarization and selection
 - bounded direct-image packaging
+
+The scene interpretation layer now uses the same selected/checkpoint/recent evidence path to produce compact scene/app/workflow summaries instead of inventing a second desktop memory system.
 
 ## Current evidence sources
 

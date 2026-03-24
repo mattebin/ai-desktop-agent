@@ -133,6 +133,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
             "evidence_preview": _compact_evidence_payload(pending.get("evidence_preview", {})),
             "evidence_assessment": _compact_evidence_assessment(pending.get("evidence_assessment", {})),
+            "scene_preview": _compact_scene_payload(pending.get("scene_preview", {})),
             "vision_preview": _compact_vision_payload(pending.get("vision_preview", {})),
         },
         "active_task": snapshot.get("active_task", {}),
@@ -161,9 +162,11 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
             "selected_evidence": _compact_evidence_payload(desktop.get("selected_evidence", {})),
             "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
+            "selected_scene": _compact_scene_payload(desktop.get("selected_scene", {})),
             "selected_vision": _compact_vision_payload(desktop.get("selected_vision", {})),
             "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
             "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
+            "checkpoint_scene": _compact_scene_payload(desktop.get("checkpoint_scene", {})),
             "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
             "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
@@ -290,6 +293,27 @@ def _compact_vision_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "primary_evidence_id": _trim_text(vision.get("primary_evidence_id", ""), limit=80),
         "comparison_evidence_id": _trim_text(vision.get("comparison_evidence_id", ""), limit=80),
         "images": images,
+    }
+
+
+def _compact_scene_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    scene = value if isinstance(value, dict) else {}
+    return {
+        "scene_class": _trim_text(scene.get("scene_class", ""), limit=40),
+        "app_class": _trim_text(scene.get("app_class", ""), limit=40),
+        "workflow_state": _trim_text(scene.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(scene.get("readiness_state", ""), limit=40),
+        "presentation": _trim_text(scene.get("presentation", ""), limit=40),
+        "confidence": _trim_text(scene.get("confidence", ""), limit=20),
+        "confidence_score": _coerce_int(scene.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "reason": _trim_text(scene.get("reason", ""), limit=40),
+        "summary": _trim_text(scene.get("summary", ""), limit=220),
+        "transition_summary": _trim_text(scene.get("transition_summary", ""), limit=220),
+        "scene_changed": bool(scene.get("scene_changed", False)),
+        "change_reason": _trim_text(scene.get("change_reason", ""), limit=40),
+        "direct_image_helpful": bool(scene.get("direct_image_helpful", False)),
+        "prefer_before_after": bool(scene.get("prefer_before_after", False)),
+        "pending_tool": _trim_text(scene.get("pending_tool", ""), limit=80),
     }
 
 

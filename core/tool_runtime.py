@@ -300,12 +300,20 @@ class ToolRuntime:
             str(args.get(key, "")).strip()
             for key in ("title", "match", "window_id", "expected_window_title", "expected_window_id")
         )
+        checkpoint_target = str(getattr(task_state, "desktop_checkpoint_target", "")).strip()
+        remembered_target_title = checkpoint_target or str(getattr(task_state, "desktop_last_target_window", "")).strip()
 
         if getattr(task_state, "desktop_observation_token", ""):
             args.setdefault("observation_token", task_state.desktop_observation_token)
-        if getattr(task_state, "desktop_active_window_title", "") and not (targeted_window_tool and has_explicit_window_target):
+        if targeted_window_tool and not has_explicit_window_target and remembered_target_title:
+            args.setdefault("title", remembered_target_title)
+            args.setdefault("expected_window_title", remembered_target_title)
+            args.setdefault("exact", True)
+        elif getattr(task_state, "desktop_active_window_title", "") and not (targeted_window_tool and has_explicit_window_target):
             args.setdefault("expected_window_title", task_state.desktop_active_window_title)
-        if getattr(task_state, "desktop_active_window_id", "") and not (targeted_window_tool and has_explicit_window_target):
+        if getattr(task_state, "desktop_active_window_id", "") and not (
+            targeted_window_tool and (has_explicit_window_target or remembered_target_title)
+        ):
             args.setdefault("expected_window_id", task_state.desktop_active_window_id)
 
         if tool_name == "desktop_list_windows":
@@ -353,7 +361,6 @@ class ToolRuntime:
         checkpoint_pending = bool(getattr(task_state, "desktop_checkpoint_pending", False))
         checkpoint_tool = getattr(task_state, "desktop_checkpoint_tool", "")
         checkpoint_reason = getattr(task_state, "desktop_checkpoint_reason", "")
-        checkpoint_target = getattr(task_state, "desktop_checkpoint_target", "")
         checkpoint_args = getattr(task_state, "desktop_checkpoint_resume_args", {})
 
         if checkpoint_pending:

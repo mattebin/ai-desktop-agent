@@ -38,11 +38,12 @@ SCENARIO_NAMES = (
     "desktop_bounded_stack",
     "desktop_evidence_grounding",
     "desktop_recovery_grounding",
+    "desktop_scene_reasoning",
 )
 TERMINAL_EVAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "superseded", "deferred"}
 AUTHORITATIVE_MESSAGE_KINDS = {"final", "result", "error"}
 BROWSER_SCENARIO_NAMES = {"workflow_execution", "approval_control", "continuity_quality"}
-DESKTOP_SCENARIO_NAMES = {"desktop_control", "desktop_bounded_stack", "desktop_evidence_grounding", "desktop_recovery_grounding"}
+DESKTOP_SCENARIO_NAMES = {"desktop_control", "desktop_bounded_stack", "desktop_evidence_grounding", "desktop_recovery_grounding", "desktop_scene_reasoning"}
 DESKTOP_RUNTIME_MODULES = ("mss", "pywinauto", "pywinctl", "psutil")
 EVAL_RUNTIME_ENV = "AI_OPERATOR_LIVE_EVAL_RUNTIME"
 
@@ -848,8 +849,9 @@ from pathlib import Path
 state_path = Path(sys.argv[1])
 main_title = sys.argv[2]
 sidecar_title = sys.argv[3]
-focus_request_path = Path(sys.argv[4])
-command_request_path = Path(sys.argv[5])
+prompt_title = sys.argv[4]
+focus_request_path = Path(sys.argv[5])
+command_request_path = Path(sys.argv[6])
 
 runtime = {
     "click_count": 0,
@@ -860,6 +862,7 @@ runtime = {
     "last_command_handled": "",
     "main_hidden": False,
     "main_minimized": False,
+    "prompt_visible": False,
     "loading": False,
     "unstable": False,
     "unstable_tick": 0,
@@ -912,6 +915,8 @@ def _persist_state():
         "last_command_handled": runtime.get("last_command_handled", ""),
         "main_hidden": runtime.get("main_hidden", False),
         "main_minimized": runtime.get("main_minimized", False),
+        "prompt_title": prompt_title,
+        "prompt_visible": runtime.get("prompt_visible", False),
         "loading": runtime.get("loading", False),
         "unstable": runtime.get("unstable", False),
         "arm_loading_on_focus": runtime.get("arm_loading_on_focus", False),
@@ -921,8 +926,10 @@ def _persist_state():
         "click_count": runtime["click_count"],
         "button_center": _center(click_button),
         "entry_center": _center(notes_entry),
+        "prompt_primary_button_label": "Review now",
         "main_window_rect": _rect(root),
         "sidecar_window_rect": _rect(sidecar),
+        "prompt_window_rect": _rect(prompt_window),
     }
     _safe_write(payload)
     if runtime["alive"]:
@@ -967,6 +974,12 @@ def _focus_window(window, handled: str):
 
 def _focus_sidecar():
     _focus_window(sidecar, "sidecar")
+
+
+def _focus_prompt():
+    if not runtime.get("prompt_visible", False):
+        _show_prompt()
+    _focus_window(prompt_window, "prompt")
 
 
 def _focus_main():
@@ -1061,6 +1074,24 @@ def _pulse_unstable():
     root.after(900, lambda: _set_unstable(False))
 
 
+def _show_prompt():
+    try:
+        prompt_window.deiconify()
+        prompt_window.update_idletasks()
+        prompt_window.lift()
+    except Exception:
+        pass
+    runtime["prompt_visible"] = True
+
+
+def _hide_prompt():
+    try:
+        prompt_window.withdraw()
+    except Exception:
+        pass
+    runtime["prompt_visible"] = False
+
+
 def _handle_command(command):
     normalized = str(command or "").strip().lower()
     if not normalized:
@@ -1099,6 +1130,13 @@ def _handle_command(command):
             pass
         runtime["main_hidden"] = False
         runtime["main_minimized"] = False
+    elif normalized == "prompt_show":
+        _show_prompt()
+        _focus_prompt()
+    elif normalized == "prompt_hide":
+        _hide_prompt()
+    elif normalized == "prompt_focus":
+        _focus_prompt()
     elif normalized == "loading_on":
         _set_loading(True)
     elif normalized == "loading_off":
@@ -1129,6 +1167,8 @@ def _poll_focus_requests():
             _focus_main()
         elif requested == "sidecar":
             _focus_sidecar()
+        elif requested == "prompt":
+            _focus_prompt()
         _clear_focus_request()
     if runtime["alive"]:
         root.after(120, _poll_focus_requests)
@@ -1157,6 +1197,10 @@ def _on_close():
     _persist_state()
     try:
         sidecar.destroy()
+    except Exception:
+        pass
+    try:
+        prompt_window.destroy()
     except Exception:
         pass
     _clear_focus_request()
@@ -1210,6 +1254,35 @@ sidecar_label = tk.Label(
 sidecar_label.pack(fill="both", expand=True)
 sidecar.protocol("WM_DELETE_WINDOW", _on_close)
 
+prompt_window = tk.Toplevel(root)
+prompt_window.title(prompt_title)
+prompt_window.geometry("320x180+230+170")
+prompt_window.configure(bg="#fff8e6")
+prompt_window.withdraw()
+prompt_frame = tk.Frame(prompt_window, bg="#fff8e6", padx=14, pady=14)
+prompt_frame.pack(fill="both", expand=True)
+prompt_title_label = tk.Label(
+    prompt_frame,
+    text="Confirm Prompt",
+    font=("Segoe UI", 11, "bold"),
+    bg="#fff8e6",
+    fg="#503b16",
+)
+prompt_title_label.pack(anchor="w")
+prompt_body_label = tk.Label(
+    prompt_frame,
+    text="A review prompt is blocking the main workflow.",
+    justify="left",
+    font=("Segoe UI", 10),
+    bg="#fff8e6",
+    fg="#6b5120",
+    wraplength=280,
+)
+prompt_body_label.pack(anchor="w", pady=(8, 12))
+prompt_primary_button = tk.Button(prompt_frame, text="Review now", font=("Segoe UI", 10))
+prompt_primary_button.pack(anchor="w")
+prompt_window.protocol("WM_DELETE_WINDOW", _hide_prompt)
+
 root.after(250, _focus_sidecar)
 root.after(950, _focus_sidecar)
 root.after(1800, _focus_sidecar)
@@ -1227,6 +1300,7 @@ class DesktopFixtureHarness:
         suffix = str(int(time.time() * 1000))[-8:]
         self.main_title = f"Desktop Eval Main {suffix}"
         self.sidecar_title = f"Desktop Eval Sidecar {suffix}"
+        self.prompt_title = f"Desktop Eval Prompt {suffix}"
         self.state_path = scenario_dir / "desktop_fixture_state.json"
         self.script_path = scenario_dir / "desktop_fixture_app.py"
         self.focus_request_path = scenario_dir / "desktop_fixture_focus_request.txt"
@@ -1257,6 +1331,7 @@ class DesktopFixtureHarness:
                 str(self.state_path),
                 self.main_title,
                 self.sidecar_title,
+                self.prompt_title,
                 str(self.focus_request_path),
                 str(self.command_request_path),
             ],
@@ -1383,12 +1458,22 @@ class DesktopFixtureHarness:
             description="desktop fixture arm unstable pulse",
         )
 
+    def set_prompt_visible(self, enabled: bool = True, *, timeout: float = 4.0) -> Dict[str, Any]:
+        self.request_command("prompt_show" if enabled else "prompt_hide")
+        return self.wait_for_state(
+            lambda state: bool(state.get("prompt_visible", False)) == bool(enabled),
+            timeout=timeout,
+            description=f"desktop fixture prompt visible={enabled}",
+        )
+
     def _fixture_focus_target(self, title: str) -> str:
         normalized = str(title or "").strip().lower()
         if normalized == self.main_title.lower():
             return "main"
         if normalized == self.sidecar_title.lower():
             return "sidecar"
+        if normalized == self.prompt_title.lower():
+            return "prompt"
         return ""
 
     def ensure_active(self, title: str, *, timeout: float = 5.0) -> bool:
@@ -4303,10 +4388,330 @@ def run_desktop_recovery_grounding_scenario(context: EvalContext) -> Dict[str, A
     }
 
 
+def run_desktop_scene_reasoning_scenario(context: EvalContext) -> Dict[str, Any]:
+    name = "desktop_scene_reasoning"
+    scenario_dir, settings = _scenario_settings(context, name)
+    clear_inspect_project_cache()
+    phases: List[Dict[str, Any]] = []
+
+    with DesktopFixtureHarness(context, scenario_dir) as fixture, LocalApiHarness(settings) as api:
+        fixture.wait_for_state(
+            lambda state: bool(state.get("button_center")) and bool(state.get("entry_center")),
+            timeout=12.0,
+            description="desktop fixture coordinates",
+        )
+        if not fixture.ensure_active(fixture.sidecar_title, timeout=6.0):
+            raise RuntimeError(f"Could not focus the sidecar desktop fixture window '{fixture.sidecar_title}'.")
+
+        fixture.set_prompt_visible(False)
+        fixture.set_main_hidden(False)
+        fixture.set_main_minimized(True)
+        fixture.arm_loading_on_focus()
+
+        loading_session = api.create_session(title="Desktop scene loading eval").get("session", {}).get("session_id", "")
+        loading_runs_before = _session_runs(Path(settings["run_history_path"]), loading_session)
+        loading_goal = (
+            f"Inspect the desktop scene for the window titled '{fixture.main_title}'. "
+            "If it is minimized, not foreground, or still loading, recover it in a bounded way and wait until it is ready. "
+            "Then capture a screenshot of the active window and answer briefly what state it reached."
+        )
+        loading_started = time.time()
+        loading_dispatch = api.send_message(loading_session, loading_goal)
+        loading_status = api.wait_for_status(loading_session, {"completed"})
+        loading_detail = api.session_detail(loading_session)
+        loading_runs_after = _session_runs(Path(settings["run_history_path"]), loading_session)
+        loading_run = _latest_new_run(loading_runs_before, loading_runs_after)
+        loading_message = _authoritative_reply(loading_detail)
+        loading_tools = _tool_names_from_run(loading_run)
+        loading_desktop = loading_status.get("desktop", {}) if isinstance(loading_status.get("desktop", {}), dict) else {}
+        loading_scene = loading_desktop.get("selected_scene", {}) if isinstance(loading_desktop.get("selected_scene", {}), dict) else {}
+        loading_checks = [
+            _build_check(
+                "loading_scene_completed",
+                "execution",
+                loading_status.get("status") == "completed",
+                f"Status={loading_status.get('status')}",
+            ),
+            _build_check(
+                "loading_scene_used_wait_or_recovery",
+                "tool_choice",
+                "desktop_inspect_window_state" in loading_tools
+                and any(tool in loading_tools for tool in {"desktop_recover_window", "desktop_focus_window", "desktop_wait_for_window_ready"}),
+                f"Tools={loading_tools}",
+            ),
+            _build_check(
+                "loading_scene_captured_screenshot",
+                "tool_choice",
+                "desktop_capture_screenshot" in loading_tools,
+                f"Tools={loading_tools}",
+            ),
+            _build_check(
+                "loading_scene_interpreted_ready",
+                "desktop",
+                loading_scene.get("readiness_state") == "ready" and loading_scene.get("workflow_state") in {"ready", "reviewable"},
+                f"Scene={loading_scene}",
+            ),
+            _build_check(
+                "loading_scene_transition_recorded",
+                "desktop",
+                bool(str(loading_scene.get("transition_summary", "")).strip()) or bool(loading_scene.get("scene_changed", False)),
+                f"Scene={loading_scene}",
+            ),
+        ]
+        loading_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=loading_message,
+                session_payload=loading_detail,
+                run=loading_run,
+                expected_terms={fixture.main_title, "ready"},
+                forbidden_terms={"approval gate", "browser workflow"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_loading_to_ready",
+                goal=loading_goal,
+                checks=loading_checks,
+                started_at=loading_started,
+                status=loading_status.get("status", ""),
+                reply_mode=str(loading_dispatch.get("reply_mode", "")).strip(),
+                final_message=loading_message,
+                run=loading_run,
+                snapshot=loading_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        fixture.set_prompt_visible(True)
+        if not fixture.ensure_active(fixture.prompt_title, timeout=6.0):
+            raise RuntimeError(f"Could not focus the desktop prompt fixture window '{fixture.prompt_title}'.")
+
+        prompt_session = api.create_session(title="Desktop scene prompt eval").get("session", {}).get("session_id", "")
+        prompt_runs_before = _session_runs(Path(settings["run_history_path"]), prompt_session)
+        prompt_goal = (
+            "Inspect the current desktop scene and answer briefly whether a prompt or dialog is blocking the workflow. "
+            "Also say the primary visible action label on the prompt. Use the current bounded desktop evidence if it is already sufficient; "
+            "otherwise capture a bounded screenshot and answer from the most relevant desktop evidence."
+        )
+        prompt_started = time.time()
+        prompt_dispatch = api.send_message(prompt_session, prompt_goal)
+        prompt_status = api.wait_for_status(prompt_session, {"completed"})
+        prompt_detail = api.session_detail(prompt_session)
+        prompt_runs_after = _session_runs(Path(settings["run_history_path"]), prompt_session)
+        prompt_run = _latest_new_run(prompt_runs_before, prompt_runs_after)
+        prompt_message = _authoritative_reply(prompt_detail)
+        prompt_tools = _tool_names_from_run(prompt_run)
+        prompt_desktop = prompt_status.get("desktop", {}) if isinstance(prompt_status.get("desktop", {}), dict) else {}
+        prompt_scene = prompt_desktop.get("selected_scene", {}) if isinstance(prompt_desktop.get("selected_scene", {}), dict) else {}
+        prompt_vision = prompt_desktop.get("selected_vision", {}) if isinstance(prompt_desktop.get("selected_vision", {}), dict) else {}
+        prompt_checks = [
+            _build_check(
+                "prompt_scene_completed",
+                "execution",
+                prompt_status.get("status") == "completed",
+                f"Status={prompt_status.get('status')}",
+            ),
+            _build_check(
+                "prompt_scene_used_screenshot",
+                "tool_choice",
+                "desktop_capture_screenshot" in prompt_tools,
+                f"Tools={prompt_tools}",
+            ),
+            _build_check(
+                "prompt_scene_classified",
+                "desktop",
+                prompt_scene.get("scene_class") in {"prompt", "dialog"} or prompt_scene.get("reason") in {"prompt_like", "dialog_like"},
+                f"Scene={prompt_scene}",
+            ),
+            _build_check(
+                "prompt_scene_requested_direct_image",
+                "desktop",
+                bool(prompt_vision.get("needs_direct_image", False)),
+                f"Vision={prompt_vision}",
+            ),
+            _build_check(
+                "prompt_scene_answer_used_visual_detail",
+                "final_answer",
+                _contains(prompt_message, "Review now"),
+                f"Final message={prompt_message}",
+            ),
+        ]
+        prompt_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=prompt_message,
+                session_payload=prompt_detail,
+                run=prompt_run,
+                expected_terms={"Review now", "prompt"},
+                require_brief=True,
+                brief_word_limit=90,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_prompt_dialog_reasoning",
+                goal=prompt_goal,
+                checks=prompt_checks,
+                started_at=prompt_started,
+                status=prompt_status.get("status", ""),
+                reply_mode=str(prompt_dispatch.get("reply_mode", "")).strip(),
+                final_message=prompt_message,
+                run=prompt_run,
+                snapshot=prompt_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        prompt_follow_runs_before = _session_runs(Path(settings["run_history_path"]), prompt_session)
+        prompt_follow_goal = (
+            "Using the current bounded desktop evidence if it is already sufficient, answer briefly whether the prompt is still blocking the workflow "
+            "and what the primary visible action label is. Refresh only if the evidence is stale or insufficient."
+        )
+        prompt_follow_started = time.time()
+        prompt_follow_dispatch = api.send_message(prompt_session, prompt_follow_goal)
+        prompt_follow_status = api.wait_for_status(prompt_session, {"completed"})
+        prompt_follow_detail = api.session_detail(prompt_session)
+        prompt_follow_runs_after = _session_runs(Path(settings["run_history_path"]), prompt_session)
+        prompt_follow_run = _latest_new_run(prompt_follow_runs_before, prompt_follow_runs_after)
+        prompt_follow_message = _authoritative_reply(prompt_follow_detail)
+        prompt_follow_tools = _tool_names_from_run(prompt_follow_run)
+        prompt_follow_checks = [
+            _build_check(
+                "prompt_follow_completed",
+                "execution",
+                prompt_follow_status.get("status") == "completed",
+                f"Status={prompt_follow_status.get('status')}",
+            ),
+            _build_check(
+                "prompt_follow_reused_scene_evidence",
+                "desktop",
+                "desktop_capture_screenshot" not in prompt_follow_tools,
+                f"Tools={prompt_follow_tools}",
+            ),
+            _build_check(
+                "prompt_follow_answer_still_grounded",
+                "final_answer",
+                _contains(prompt_follow_message, "Review now"),
+                f"Final message={prompt_follow_message}",
+            ),
+        ]
+        prompt_follow_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=prompt_follow_message,
+                session_payload=prompt_follow_detail,
+                run=prompt_follow_run,
+                expected_terms={"Review now", "prompt"},
+                require_brief=True,
+                brief_word_limit=80,
+                forbidden_terms={"approval", "workflow execution"},
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_prompt_reuse",
+                goal=prompt_follow_goal,
+                checks=prompt_follow_checks,
+                started_at=prompt_follow_started,
+                status=prompt_follow_status.get("status", ""),
+                reply_mode=str(prompt_follow_dispatch.get("reply_mode", "")).strip(),
+                final_message=prompt_follow_message,
+                run=prompt_follow_run,
+                snapshot=prompt_follow_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+        fixture.set_prompt_visible(False)
+        if not fixture.ensure_active(fixture.sidecar_title, timeout=6.0):
+            raise RuntimeError(f"Could not refocus the sidecar desktop fixture window '{fixture.sidecar_title}'.")
+
+        foreground_session = api.create_session(title="Desktop scene foreground eval").get("session", {}).get("session_id", "")
+        foreground_runs_before = _session_runs(Path(settings["run_history_path"]), foreground_session)
+        foreground_goal = (
+            f"The desktop scene may have changed and the window titled '{fixture.main_title}' may no longer be foreground. "
+            "If the current bounded desktop evidence is stale or no longer matches, inspect and recover the right window in a bounded way, "
+            "capture a screenshot of the active recovered window, and answer briefly which window is active now and what changed."
+        )
+        foreground_started = time.time()
+        foreground_dispatch = api.send_message(foreground_session, foreground_goal)
+        foreground_status = api.wait_for_status(foreground_session, {"completed"})
+        foreground_detail = api.session_detail(foreground_session)
+        foreground_runs_after = _session_runs(Path(settings["run_history_path"]), foreground_session)
+        foreground_run = _latest_new_run(foreground_runs_before, foreground_runs_after)
+        foreground_message = _authoritative_reply(foreground_detail)
+        foreground_tools = _tool_names_from_run(foreground_run)
+        foreground_desktop = foreground_status.get("desktop", {}) if isinstance(foreground_status.get("desktop", {}), dict) else {}
+        foreground_scene = foreground_desktop.get("selected_scene", {}) if isinstance(foreground_desktop.get("selected_scene", {}), dict) else {}
+        foreground_checks = [
+            _build_check(
+                "foreground_scene_completed",
+                "execution",
+                foreground_status.get("status") == "completed",
+                f"Status={foreground_status.get('status')}",
+            ),
+            _build_check(
+                "foreground_scene_used_recovery_path",
+                "tool_choice",
+                any(tool in foreground_tools for tool in {"desktop_recover_window", "desktop_focus_window"})
+                and "desktop_capture_screenshot" in foreground_tools,
+                f"Tools={foreground_tools}",
+            ),
+            _build_check(
+                "foreground_scene_now_main",
+                "desktop",
+                _contains(str(foreground_status.get("desktop", {}).get("active_window_title", "")), fixture.main_title),
+                f"Desktop snapshot={foreground_status.get('desktop', {})}",
+            ),
+            _build_check(
+                "foreground_scene_change_recorded",
+                "desktop",
+                bool(foreground_scene.get("scene_changed", False)) or bool(str(foreground_scene.get("transition_summary", "")).strip()),
+                f"Scene={foreground_scene}",
+            ),
+        ]
+        foreground_checks.extend(
+            _golden_final_answer_checks(
+                status="completed",
+                message=foreground_message,
+                session_payload=foreground_detail,
+                run=foreground_run,
+                expected_terms={fixture.main_title},
+                require_brief=True,
+                brief_word_limit=90,
+            )
+        )
+        phases.append(
+            _phase_report(
+                name=f"{name}_foreground_recovery_changed_scene",
+                goal=foreground_goal,
+                checks=foreground_checks,
+                started_at=foreground_started,
+                status=foreground_status.get("status", ""),
+                reply_mode=str(foreground_dispatch.get("reply_mode", "")).strip(),
+                final_message=foreground_message,
+                run=foreground_run,
+                snapshot=foreground_status,
+                extra={"scenario_dir": str(scenario_dir)},
+            )
+        )
+
+    combined_failures = [failure for phase in phases for failure in phase.get("prompt_failures", [])]
+    return {
+        "name": name,
+        "passed": not combined_failures,
+        "prompt_failures": combined_failures,
+        "phases": phases,
+        "scenario_dir": str(scenario_dir),
+    }
+
+
 def run_desktop_bounded_stack_scenario(context: EvalContext) -> Dict[str, Any]:
     subreports = [
         run_desktop_evidence_grounding_scenario(context),
         run_desktop_recovery_grounding_scenario(context),
+        run_desktop_scene_reasoning_scenario(context),
         run_desktop_control_scenario(context),
     ]
     combined_failures = [failure for report in subreports for failure in report.get("prompt_failures", [])]
@@ -4341,6 +4746,7 @@ SCENARIO_RUNNERS: Dict[str, ScenarioRunner] = {
     "desktop_bounded_stack": run_desktop_bounded_stack_scenario,
     "desktop_evidence_grounding": run_desktop_evidence_grounding_scenario,
     "desktop_recovery_grounding": run_desktop_recovery_grounding_scenario,
+    "desktop_scene_reasoning": run_desktop_scene_reasoning_scenario,
 }
 
 

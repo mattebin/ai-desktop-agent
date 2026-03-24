@@ -12,6 +12,7 @@ from core.backend_schemas import (
     normalize_desktop_evidence_ref,
     normalize_desktop_evidence_assessment,
     normalize_desktop_evidence_artifact,
+    normalize_desktop_scene,
     normalize_desktop_evidence_summary,
     normalize_desktop_vision_context,
     normalize_desktop_vision_image,
@@ -337,6 +338,10 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
             "active_window_title": active_title,
             "active_window_class_name": _trim_text(active_window.get("class_name", ""), limit=120),
             "active_window_process": _trim_text(active_window.get("process_name", ""), limit=120),
+            "active_window_rect": active_window.get("rect", {}) if isinstance(active_window.get("rect", {}), dict) else {},
+            "active_window_visible": bool(active_window.get("is_visible", False)),
+            "active_window_minimized": bool(active_window.get("is_minimized", False)),
+            "active_window_maximized": bool(active_window.get("is_maximized", False)),
             "target_window_title": target_title,
             "window_count": int(normalized.get("window_count", 0) or 0),
             "monitor_count": int(screen.get("monitor_count", 0) or 0),
@@ -356,6 +361,7 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
             "recency_seconds": recency_seconds,
             "backend": backend_label,
             "selection_reason": "selected",
+            "capture_signature": _trim_text(normalized.get("capture_signature", ""), limit=120),
             "capture_mode": capture_mode,
             "importance": importance,
             "importance_reason": _trim_text(normalized.get("importance_reason", ""), limit=120),
@@ -380,6 +386,7 @@ def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "active_window_title": normalized.get("active_window_title", ""),
         "active_window_process": normalized.get("active_window_process", ""),
         "target_window_title": normalized.get("target_window_title", ""),
+        "capture_signature": normalized.get("capture_signature", ""),
         "has_screenshot": bool(normalized.get("has_screenshot", False)),
         "has_artifact": bool(normalized.get("has_artifact", False)),
         "screenshot_scope": normalized.get("screenshot_scope", ""),
@@ -661,12 +668,16 @@ def select_desktop_vision_context(
     prompt_text: str = "",
     assessment: Dict[str, Any] | None = None,
     checkpoint_assessment: Dict[str, Any] | None = None,
+    selected_scene: Dict[str, Any] | None = None,
+    checkpoint_scene: Dict[str, Any] | None = None,
     prefer_before_after: bool = False,
 ) -> Dict[str, Any]:
     selected = normalize_desktop_evidence_summary(selected_summary if isinstance(selected_summary, dict) else {})
     checkpoint = normalize_desktop_evidence_summary(checkpoint_summary if isinstance(checkpoint_summary, dict) else {})
     assessment = normalize_desktop_evidence_assessment(assessment if isinstance(assessment, dict) else {})
     checkpoint_assessment = normalize_desktop_evidence_assessment(checkpoint_assessment if isinstance(checkpoint_assessment, dict) else {})
+    selected_scene = normalize_desktop_scene(selected_scene if isinstance(selected_scene, dict) else {})
+    checkpoint_scene = normalize_desktop_scene(checkpoint_scene if isinstance(checkpoint_scene, dict) else {})
     recents = [
         normalize_desktop_evidence_summary(item)
         for item in list(recent_summaries or [])
@@ -687,8 +698,17 @@ def select_desktop_vision_context(
                 primary = item
                 break
 
-    visual_goal = _desktop_visual_goal(prompt_lower)
-    changed_state_goal = prefer_before_after or _desktop_changed_state_goal(prompt_lower)
+    primary_scene = checkpoint_scene if purpose_text == "desktop_approval" and checkpoint_scene.get("primary_evidence_id") else selected_scene
+    if not primary_scene.get("primary_evidence_id") and checkpoint_scene.get("primary_evidence_id"):
+        primary_scene = checkpoint_scene
+
+    visual_goal = _desktop_visual_goal(prompt_lower) or bool(primary_scene.get("modal_like", False) or primary_scene.get("prompt_like", False))
+    changed_state_goal = (
+        prefer_before_after
+        or (bool(prompt_lower) and bool(primary_scene.get("prefer_before_after", False)))
+        or (bool(prompt_lower) and bool(primary_scene.get("scene_changed", False)))
+        or _desktop_changed_state_goal(prompt_lower)
+    )
     image_required = False
     reason = "summary_only"
     summary_text = "Compact desktop evidence summaries were sufficient for this desktop turn."
@@ -711,6 +731,13 @@ def select_desktop_vision_context(
         image_required = True
         reason = "direct_image_needed"
         summary_text = "Attached the most relevant screenshot because compact metadata alone was only partially conclusive."
+    elif prompt_lower and primary_scene.get("direct_image_helpful", False) and _artifact_summary(primary):
+        image_required = True
+        reason = "direct_image_needed"
+        summary_text = _trim_text(
+            primary_scene.get("summary", "") or "Attached the most relevant screenshot because the interpreted desktop scene still benefits from direct visual grounding.",
+            limit=220,
+        )
 
     images: List[Dict[str, Any]] = []
     primary_reason = "checkpoint" if primary.get("evidence_id") == checkpoint.get("evidence_id") and checkpoint.get("evidence_id") else "selected"
@@ -780,6 +807,19 @@ def _title_match_score(summary: Dict[str, Any], text: str) -> int:
     active_match = describe_title_match(query, summary.get("active_window_title", ""), exact=False)
     target_match = describe_title_match(query, summary.get("target_window_title", ""), exact=False)
     return max(int(active_match.get("score", 0) or 0), int(target_match.get("score", 0) or 0))
+
+
+def _strict_title_match(summary: Dict[str, Any], text: str) -> bool:
+    query = " ".join(str(text or "").strip().lower().split())
+    if not query:
+        return False
+    for key in ("active_window_title", "target_window_title"):
+        candidate = " ".join(str(summary.get(key, "") or "").strip().lower().split())
+        if not candidate:
+            continue
+        if query == candidate or query in candidate or candidate in query:
+            return True
+    return False
 
 
 def _rank_recent_summaries(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -918,12 +958,39 @@ def select_task_evidence(
     active_window_title: str = "",
     target_window_title: str = "",
 ) -> Dict[str, Any]:
+    strict_target = _trim_text(target_window_title, limit=180)
     if _trim_text(task_evidence_id, limit=80):
-        return select_recent_evidence(summaries, strategy="task", evidence_id=task_evidence_id)
+        result = select_recent_evidence(summaries, strategy="task", evidence_id=task_evidence_id)
+        selected = result.get("selected", {}) if isinstance(result.get("selected", {}), dict) else {}
+        if not strict_target or _strict_title_match(selected, strict_target):
+            return result
     if _trim_text(observation_token, limit=120):
         result = select_recent_evidence(summaries, strategy="task", observation_token=observation_token)
-        if result.get("selected"):
+        selected = result.get("selected", {}) if isinstance(result.get("selected", {}), dict) else {}
+        if selected and (not strict_target or _strict_title_match(selected, strict_target)):
             return result
+    if strict_target:
+        items = [
+            item
+            for item in _recent_first_summaries(summaries)
+            if _strict_title_match(item, strict_target)
+        ]
+        if items:
+            items.sort(
+                key=lambda item: (
+                    0 if bool(item.get("has_screenshot", False)) else 1,
+                    int(item.get("recency_seconds", 0) or 0),
+                    item.get("timestamp", ""),
+                )
+            )
+            selected = dict(items[0])
+            selected["selection_reason"] = "strict_target_match"
+            return {
+                "strategy": "task_target",
+                "reason": "strict_target_match",
+                "selected": normalize_desktop_evidence_summary(selected),
+                "candidate_count": len(items),
+            }
     if _trim_text(active_window_title, limit=180) or _trim_text(target_window_title, limit=180):
         result = select_recent_evidence(
             summaries,
@@ -1322,6 +1389,8 @@ class DesktopEvidenceStore:
         prompt_text: str = "",
         assessment: Dict[str, Any] | None = None,
         checkpoint_assessment: Dict[str, Any] | None = None,
+        selected_scene: Dict[str, Any] | None = None,
+        checkpoint_scene: Dict[str, Any] | None = None,
         prefer_before_after: bool = False,
     ) -> Dict[str, Any]:
         return select_desktop_vision_context(
@@ -1332,6 +1401,8 @@ class DesktopEvidenceStore:
             prompt_text=prompt_text,
             assessment=assessment,
             checkpoint_assessment=checkpoint_assessment,
+            selected_scene=selected_scene,
+            checkpoint_scene=checkpoint_scene,
             prefer_before_after=prefer_before_after,
         )
 

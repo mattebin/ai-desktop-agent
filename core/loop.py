@@ -538,6 +538,17 @@ def _desktop_has_inspection_context(task_state) -> bool:
 
 
 def _desktop_target_window_ready(task_state, planner_goal: str) -> bool:
+    try:
+        selected_scene = task_state._collect_desktop_activity(limit=4).get("selected_scene", {})
+    except Exception:
+        selected_scene = {}
+    if isinstance(selected_scene, dict):
+        readiness_state = str(selected_scene.get("readiness_state", "")).strip().lower()
+        workflow_state = str(selected_scene.get("workflow_state", "")).strip().lower()
+        if readiness_state in {"loading", "not_ready", "unstable", "background", "missing"}:
+            return False
+        if workflow_state in {"loading", "recovering", "blocked", "attention_needed"}:
+            return False
     latest_recovery = _desktop_latest_recovery(task_state)
     latest_state = str(latest_recovery.get("state", "")).strip().lower()
     if latest_state == "ready":
@@ -586,6 +597,25 @@ def _desktop_evidence_assessment(
         return {}
 
 
+def _desktop_selected_scene(task_state) -> dict:
+    try:
+        desktop_activity = task_state._collect_desktop_activity(limit=4)
+        scene = desktop_activity.get("selected_scene", {})
+        return scene if isinstance(scene, dict) else {}
+    except Exception:
+        return {}
+
+
+def _desktop_goal_mentions_changed_state(planner_goal: str) -> bool:
+    try:
+        from core.desktop_evidence import _desktop_changed_state_goal
+
+        return _desktop_changed_state_goal(str(planner_goal or "").strip().lower())
+    except Exception:
+        text = str(planner_goal or "").strip().lower()
+        return any(term in text for term in {"changed", "before", "after", "compare", "what happened"})
+
+
 def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) -> bool:
     if tool_name not in _DESKTOP_INSPECT_TOOLS:
         return False
@@ -607,6 +637,11 @@ def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) 
         require_screenshot=require_screenshot,
     )
     if not assessment.get("sufficient", False):
+        return False
+    selected_scene = _desktop_selected_scene(task_state)
+    if bool(selected_scene.get("scene_changed", False)) and _desktop_goal_mentions_changed_state(planner_goal):
+        return False
+    if str(selected_scene.get("reason", "")).strip().lower() in {"scene_ambiguous", "loading_scene", "blocked_scene"}:
         return False
     if require_screenshot and not str(getattr(task_state, "desktop_last_screenshot_path", "")).strip():
         return False
@@ -678,6 +713,27 @@ def _maybe_prepare_desktop_recovery_context(
         target_window_title=_goal_desktop_window_title(planner_goal),
         require_screenshot=require_screenshot,
     )
+    selected_scene = _desktop_selected_scene(task_state)
+    if str(selected_scene.get("readiness_state", "")).strip().lower() in {"loading", "not_ready", "unstable"}:
+        _, waited_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            "desktop_wait_for_window_ready",
+            seed_args,
+            planner_goal,
+            session_store=session_store,
+        )
+        executed_any = True
+        latest_recovery = waited_result.get("recovery", {}) if isinstance(waited_result.get("recovery", {}), dict) else latest_recovery
+        recovery_state = str(latest_recovery.get("state", "")).strip().lower()
+        if recovery_state != "ready":
+            return None
+        selected_assessment = _desktop_evidence_assessment(
+            task_state,
+            purpose="desktop_action_prepare",
+            target_window_title=_goal_desktop_window_title(planner_goal),
+            require_screenshot=require_screenshot,
+        )
     if not selected_assessment.get("sufficient", False):
         _, capture_result = _execute_desktop_tool_step(
             tool_runtime,

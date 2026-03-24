@@ -12,9 +12,11 @@ from core.desktop_evidence import (
     build_desktop_evidence_bundle,
     collect_display_metadata,
     get_desktop_evidence_store,
+    summarize_evidence_bundle,
 )
 from core.desktop_matching import select_window_candidate
 from core.desktop_recovery import classify_window_recovery_state, select_window_recovery_strategy
+from core.desktop_scene import interpret_desktop_scene
 from tools.desktop_backends import (
     create_screenshot_backend,
     create_ui_evidence_backend,
@@ -696,6 +698,28 @@ def _inspect_window_state_internal(
     recovery_summary = str(recovery_view.get("summary", "")).strip()
     if process_summary and process_summary not in recovery_summary:
         recovery_view["summary"] = f"{recovery_summary} Process check: {process_summary}".strip()
+    evidence_summary = summarize_evidence_bundle(evidence_bundle) if evidence_bundle else {}
+    try:
+        recent_summaries = get_desktop_evidence_store().recent_context_summaries(
+            limit=3,
+            active_window_title=str((target_window or active_window).get("title", "")).strip(),
+            checkpoint_target=str(args.get("title", "") or args.get("match", "")).strip(),
+        )
+    except Exception:
+        recent_summaries = []
+    scene = interpret_desktop_scene(
+        selected_summary=evidence_summary,
+        recent_summaries=recent_summaries,
+        purpose="desktop_investigation",
+        prompt_text="",
+        assessment={},
+        recovery=recovery_view,
+        readiness=readiness,
+        visual_stability=visual_stability,
+        process_context=process_context,
+        pending_tool="",
+        checkpoint_pending=False,
+    )
     return {
         "target_window": target_window,
         "candidates": candidates,
@@ -710,6 +734,7 @@ def _inspect_window_state_internal(
         "process_context": process_context,
         "match_info": match_info,
         "recovery": recovery_view,
+        "scene": scene,
     }
 
 
@@ -1027,6 +1052,7 @@ def _desktop_result(
     window_readiness: Dict[str, Any] | None = None,
     visual_stability: Dict[str, Any] | None = None,
     process_context: Dict[str, Any] | None = None,
+    scene: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     state = desktop_state if isinstance(desktop_state, dict) else {}
     evidence = desktop_evidence if isinstance(desktop_evidence, dict) else {}
@@ -1036,6 +1062,7 @@ def _desktop_result(
     readiness = window_readiness if isinstance(window_readiness, dict) else {}
     stability = visual_stability if isinstance(visual_stability, dict) else {}
     process_view = process_context if isinstance(process_context, dict) else {}
+    scene_view = scene if isinstance(scene, dict) else {}
     return {
         "ok": bool(ok),
         "action": action,
@@ -1070,6 +1097,7 @@ def _desktop_result(
         "window_readiness": readiness,
         "visual_stability": stability,
         "process_context": process_view,
+        "scene": scene_view,
         "recovery": recovery_view,
         "recovery_attempts": [dict(item) for item in list(recovery_attempts or [])[:6] if isinstance(item, dict)],
     }
@@ -1709,6 +1737,7 @@ def desktop_inspect_window_state(args: Dict[str, Any]) -> Dict[str, Any]:
         window_readiness=inspected.get("readiness", {}),
         visual_stability=inspected.get("visual_stability", {}),
         process_context=inspected.get("process_context", {}),
+        scene=inspected.get("scene", {}),
     )
 
 
@@ -1731,6 +1760,7 @@ def desktop_wait_for_window_ready(args: Dict[str, Any]) -> Dict[str, Any]:
         window_readiness=waited.get("readiness", {}),
         visual_stability=waited.get("visual_stability", {}),
         process_context=waited.get("process_context", {}),
+        scene=waited.get("scene", {}),
     )
 
 
@@ -1754,6 +1784,7 @@ def desktop_recover_window(args: Dict[str, Any]) -> Dict[str, Any]:
         window_readiness=recovered.get("readiness", {}),
         visual_stability=recovered.get("visual_stability", {}),
         process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
     )
 
 
@@ -1782,6 +1813,7 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
         window_readiness=recovered.get("readiness", {}),
         visual_stability=recovered.get("visual_stability", {}),
         process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
     )
 
 

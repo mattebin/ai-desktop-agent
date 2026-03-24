@@ -100,6 +100,24 @@ Responsibilities:
 - bounded image count
 - explicit approval/checkpoint grounding
 
+### 6. Scene interpretation
+
+Primary files:
+
+- `core/desktop_scene.py`
+- `core/state.py`
+- `core/desktop_evidence.py`
+
+Responsibilities:
+
+- classify the probable scene/app/workflow state
+- detect prompt/dialog/fullscreen/background-like characteristics
+- interpret bounded loading/ready/blocked/unstable state
+- compare recent evidence history for compact scene-change / transition summaries
+- tell the bounded vision selector when direct image grounding is worth using
+
+This layer is plugin-friendly by design. Future app/workflow interpreters should register into the scene registry instead of patching loop logic directly.
+
 ## Bounded matching model
 
 The matching subsystem is deliberately constrained.
@@ -148,6 +166,7 @@ Future bounded desktop capabilities should plug into one of these seams:
 - capture
 - readiness/control-state probing
 - evidence selection
+- scene interpretation
 - direct vision packaging
 - explicit action primitives
 

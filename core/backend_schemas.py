@@ -68,6 +68,21 @@ BACKEND_REASON_CODES = {
     "capture_backend_fallback",
     "capture_backend_unavailable",
     "readiness_probe_limited",
+    "scene_interpreted",
+    "scene_ambiguous",
+    "scene_changed",
+    "scene_unchanged",
+    "workflow_transition",
+    "loading_scene",
+    "ready_scene",
+    "blocked_scene",
+    "modal_like",
+    "dialog_like",
+    "prompt_like",
+    "fullscreen_like",
+    "background_like",
+    "app_inferred",
+    "history_corroborated",
     "summary_only",
     "direct_image_needed",
     "image_selected",
@@ -374,6 +389,7 @@ def normalize_desktop_evidence_ref(value: Dict[str, Any] | None) -> Dict[str, An
 def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str, Any]:
     value = value if isinstance(value, dict) else {}
     screen_size = value.get("screen_size", {}) if isinstance(value.get("screen_size", {}), dict) else {}
+    active_window_rect = value.get("active_window_rect", {}) if isinstance(value.get("active_window_rect", {}), dict) else {}
     return {
         "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
         "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
@@ -384,6 +400,15 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
         "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
         "active_window_class_name": _trim_text(value.get("active_window_class_name", ""), limit=120),
         "active_window_process": _trim_text(value.get("active_window_process", ""), limit=120),
+        "active_window_rect": {
+            "x": _coerce_int(active_window_rect.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(active_window_rect.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(active_window_rect.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(active_window_rect.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "active_window_visible": _coerce_bool(value.get("active_window_visible", False), False),
+        "active_window_minimized": _coerce_bool(value.get("active_window_minimized", False), False),
+        "active_window_maximized": _coerce_bool(value.get("active_window_maximized", False), False),
         "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
         "window_count": _coerce_int(value.get("window_count", 0), 0, minimum=0, maximum=128),
         "monitor_count": _coerce_int(value.get("monitor_count", 0), 0, minimum=0, maximum=16),
@@ -406,6 +431,7 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
         "recency_seconds": _coerce_int(value.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "backend": _trim_text(value.get("backend", ""), limit=120),
         "selection_reason": _normalize_reason(value.get("selection_reason", "selected"), default="selected"),
+        "capture_signature": _trim_text(value.get("capture_signature", ""), limit=120),
         "capture_mode": _trim_text(value.get("capture_mode", ""), limit=40),
         "importance": _trim_text(value.get("importance", ""), limit=40),
         "importance_reason": _trim_text(value.get("importance_reason", ""), limit=120),
@@ -518,6 +544,70 @@ def normalize_desktop_vision_context(value: Dict[str, Any] | None) -> Dict[str, 
         "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
         "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
         "images": images,
+    }
+
+
+def normalize_desktop_scene(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    scene_class = _trim_text(value.get("scene_class", ""), limit=40).lower() or "unknown"
+    if scene_class not in {"unknown", "missing", "background", "app_window", "dialog", "prompt", "fullscreen"}:
+        scene_class = "unknown"
+    workflow_state = _trim_text(value.get("workflow_state", ""), limit=40).lower() or "unknown"
+    if workflow_state not in {
+        "unknown",
+        "inspecting",
+        "ready",
+        "reviewable",
+        "loading",
+        "settling",
+        "recovering",
+        "blocked",
+        "approval_pending",
+        "attention_needed",
+    }:
+        workflow_state = "unknown"
+    readiness_state = _trim_text(value.get("readiness_state", ""), limit=40).lower() or "unknown"
+    if readiness_state not in {"unknown", "ready", "loading", "not_ready", "unstable", "blocked", "background", "stale", "missing"}:
+        readiness_state = "unknown"
+    presentation = _trim_text(value.get("presentation", ""), limit=40).lower() or "unknown"
+    if presentation not in {"unknown", "windowed", "dialog_like", "prompt_like", "fullscreen_like", "background_like"}:
+        presentation = "unknown"
+    confidence = _trim_text(value.get("confidence", ""), limit=20).lower() or "low"
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    signals = [_trim_text(item, limit=120) for item in list(value.get("signals", []) or [])[:8] if _trim_text(item, limit=120)]
+    interpreters = [_trim_text(item, limit=60) for item in list(value.get("interpreters", []) or [])[:8] if _trim_text(item, limit=60)]
+    return {
+        "scene_class": scene_class,
+        "app_class": _trim_text(value.get("app_class", ""), limit=40).lower() or "unknown",
+        "workflow_state": workflow_state,
+        "readiness_state": readiness_state,
+        "presentation": presentation,
+        "confidence": confidence,
+        "confidence_score": _coerce_int(value.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "reason": _normalize_reason(value.get("reason", "scene_interpreted"), default="scene_interpreted"),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "history_summary": _trim_text(value.get("history_summary", ""), limit=220),
+        "transition_summary": _trim_text(value.get("transition_summary", ""), limit=220),
+        "scene_changed": _coerce_bool(value.get("scene_changed", False), False),
+        "change_reason": _normalize_reason(value.get("change_reason", "scene_unchanged"), default="scene_unchanged"),
+        "direct_image_helpful": _coerce_bool(value.get("direct_image_helpful", False), False),
+        "prefer_before_after": _coerce_bool(value.get("prefer_before_after", False), False),
+        "loading": _coerce_bool(value.get("loading", False), False),
+        "modal_like": _coerce_bool(value.get("modal_like", False), False),
+        "prompt_like": _coerce_bool(value.get("prompt_like", False), False),
+        "fullscreen_like": _coerce_bool(value.get("fullscreen_like", False), False),
+        "background_like": _coerce_bool(value.get("background_like", False), False),
+        "unstable": _coerce_bool(value.get("unstable", False), False),
+        "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
+        "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "active_window_process": _trim_text(value.get("active_window_process", ""), limit=120),
+        "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
+        "pending_tool": _trim_text(value.get("pending_tool", ""), limit=80),
+        "checkpoint_pending": _coerce_bool(value.get("checkpoint_pending", False), False),
+        "signals": signals,
+        "interpreters": interpreters,
     }
 
 

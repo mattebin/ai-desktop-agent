@@ -103,6 +103,38 @@ def _desktop_vision_context_lines(label: str, vision: Dict[str, Any]) -> List[st
     return lines
 
 
+def _desktop_scene_context_lines(label: str, scene: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(scene, dict):
+        return lines
+    summary = str(scene.get("summary", "")).strip()
+    if summary:
+        lines.append(f"- {label} scene: {summary}")
+    transition = str(scene.get("transition_summary", "")).strip()
+    if transition:
+        lines.append(f"- {label} scene transition: {transition}")
+    readiness = str(scene.get("readiness_state", "")).strip()
+    workflow = str(scene.get("workflow_state", "")).strip()
+    confidence = str(scene.get("confidence", "")).strip()
+    reason = str(scene.get("reason", "")).strip()
+    parts: List[str] = []
+    if readiness:
+        parts.append(f"readiness={readiness}")
+    if workflow:
+        parts.append(f"workflow={workflow}")
+    if confidence:
+        parts.append(f"confidence={confidence}")
+    if reason:
+        parts.append(f"reason={reason}")
+    if scene.get("scene_changed", False):
+        parts.append("changed=yes")
+    if scene.get("direct_image_helpful", False):
+        parts.append("direct_image=helpful")
+    if parts:
+        lines.append(f"- {label} scene status: {'; '.join(parts)}")
+    return lines
+
+
 class TaskState:
     def __init__(
         self,
@@ -867,6 +899,7 @@ class TaskState:
             return
 
         desktop_state = result.get("desktop_state", {}) if isinstance(result.get("desktop_state", {}), dict) else {}
+        args = self._latest_step_args()
         active_window = result.get("active_window", desktop_state.get("active_window", {}))
         if not isinstance(active_window, dict):
             active_window = {}
@@ -944,9 +977,20 @@ class TaskState:
             self.desktop_last_key_sequence = key_sequence_preview[:80]
 
         checkpoint_target = str(result.get("checkpoint_target", "")).strip()
-        if checkpoint_target:
-            self.desktop_last_target_window = checkpoint_target[:180]
-        elif active_title:
+        target_window = result.get("target_window", {}) if isinstance(result.get("target_window", {}), dict) else {}
+        recovery = result.get("recovery", {}) if isinstance(result.get("recovery", {}), dict) else {}
+        recovery_target = recovery.get("target_window", {}) if isinstance(recovery.get("target_window", {}), dict) else {}
+        explicit_target = (
+            checkpoint_target
+            or str(target_window.get("title", "")).strip()
+            or str(recovery_target.get("title", "")).strip()
+            or str(args.get("title", "")).strip()
+            or str(args.get("expected_window_title", "")).strip()
+            or str(args.get("match", "")).strip()
+        )
+        if explicit_target:
+            self.desktop_last_target_window = explicit_target[:180]
+        elif active_title and not self.desktop_last_target_window:
             self.desktop_last_target_window = active_title[:180]
 
         paused = bool(result.get("paused", False))
@@ -1033,16 +1077,22 @@ class TaskState:
         selected_evidence_assessment: Dict[str, Any] = {}
         checkpoint_evidence_assessment: Dict[str, Any] = {}
         recent_context_evidence: List[Dict[str, Any]] = []
+        selected_scene: Dict[str, Any] = {}
+        checkpoint_scene: Dict[str, Any] = {}
         selected_vision: Dict[str, Any] = {}
         checkpoint_vision: Dict[str, Any] = {}
         try:
             from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
+            from core.desktop_scene import interpret_desktop_scene
 
             store = get_desktop_evidence_store()
+            preferred_active_window_title = ""
+            if not self.desktop_last_target_window:
+                preferred_active_window_title = self.desktop_active_window_title
             selected_result = store.select_summary(
                 task_evidence_id=self.desktop_last_evidence_id,
                 observation_token=self.desktop_observation_token,
-                active_window_title=self.desktop_active_window_title,
+                active_window_title=preferred_active_window_title,
                 target_window_title=self.desktop_last_target_window,
             )
             checkpoint_result = store.select_summary(
@@ -1073,6 +1123,36 @@ class TaskState:
                 active_window_title=self.desktop_active_window_title,
                 checkpoint_target=self.desktop_checkpoint_target or self.desktop_last_target_window,
             )
+            selected_scene = interpret_desktop_scene(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_investigation",
+                prompt_text="",
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                recovery=latest_recovery,
+                readiness=latest_window_readiness,
+                visual_stability=latest_visual_stability,
+                process_context=latest_process_context,
+                pending_tool=str(self.desktop_checkpoint_tool).strip(),
+                checkpoint_pending=self.desktop_checkpoint_pending,
+            )
+            checkpoint_scene = interpret_desktop_scene(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_approval",
+                prompt_text="",
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                recovery=latest_recovery,
+                readiness=latest_window_readiness,
+                visual_stability=latest_visual_stability,
+                process_context=latest_process_context,
+                pending_tool=str(self.desktop_checkpoint_tool).strip(),
+                checkpoint_pending=self.desktop_checkpoint_pending,
+            )
             selected_vision = store.select_vision_context(
                 selected_summary=selected_result.get("selected", {}),
                 checkpoint_summary=checkpoint_result.get("selected", {}),
@@ -1081,7 +1161,9 @@ class TaskState:
                 prompt_text="",
                 assessment=selected_evidence_assessment,
                 checkpoint_assessment=checkpoint_evidence_assessment,
-                prefer_before_after=False,
+                selected_scene=selected_scene,
+                checkpoint_scene=checkpoint_scene,
+                prefer_before_after=bool(selected_scene.get("prefer_before_after", False)),
             )
             checkpoint_vision = store.select_vision_context(
                 selected_summary=selected_result.get("selected", {}),
@@ -1091,7 +1173,9 @@ class TaskState:
                 prompt_text="",
                 assessment=selected_evidence_assessment,
                 checkpoint_assessment=checkpoint_evidence_assessment,
-                prefer_before_after=False,
+                selected_scene=selected_scene,
+                checkpoint_scene=checkpoint_scene,
+                prefer_before_after=bool(checkpoint_scene.get("prefer_before_after", False)),
             )
         except Exception:
             selected_evidence = {}
@@ -1099,6 +1183,8 @@ class TaskState:
             selected_evidence_assessment = {}
             checkpoint_evidence_assessment = {}
             recent_context_evidence = []
+            selected_scene = {}
+            checkpoint_scene = {}
             selected_vision = {}
             checkpoint_vision = {}
 
@@ -1124,6 +1210,7 @@ class TaskState:
             "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "selected_evidence": selected_evidence,
             "selected_evidence_assessment": selected_evidence_assessment,
+            "selected_scene": selected_scene,
             "selected_vision": selected_vision,
             "recent_context_evidence": recent_context_evidence,
             "checkpoint_pending": self.desktop_checkpoint_pending,
@@ -1133,6 +1220,7 @@ class TaskState:
             "checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "checkpoint_evidence": checkpoint_evidence,
             "checkpoint_evidence_assessment": checkpoint_evidence_assessment,
+            "checkpoint_scene": checkpoint_scene,
             "checkpoint_vision": checkpoint_vision,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
@@ -1166,6 +1254,8 @@ class TaskState:
                 prompt_text=prompt_text,
                 assessment=desktop_activity.get("selected_evidence_assessment", {}),
                 checkpoint_assessment=desktop_activity.get("checkpoint_evidence_assessment", {}),
+                selected_scene=desktop_activity.get("selected_scene", {}),
+                checkpoint_scene=desktop_activity.get("checkpoint_scene", {}),
                 prefer_before_after=prefer_before_after,
             )
         except Exception:
@@ -1725,6 +1815,14 @@ class TaskState:
                 desktop_activity.get("checkpoint_evidence", {}),
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
             )
+            selected_scene_lines = _desktop_scene_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_scene", {}),
+            )
+            checkpoint_scene_lines = _desktop_scene_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_scene", {}),
+            )
             selected_vision_lines = _desktop_vision_context_lines(
                 "Selected desktop",
                 desktop_activity.get("selected_vision", {}),
@@ -1733,7 +1831,7 @@ class TaskState:
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_vision", {}),
             )
-            for line in evidence_grounding_lines + checkpoint_grounding_lines + selected_vision_lines + checkpoint_vision_lines:
+            for line in evidence_grounding_lines + checkpoint_grounding_lines + selected_scene_lines + checkpoint_scene_lines + selected_vision_lines + checkpoint_vision_lines:
                 lines.append(line)
             recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
             if isinstance(recent_context_evidence, list) and recent_context_evidence:
@@ -2353,6 +2451,7 @@ class TaskState:
             "evidence_summary": "",
             "evidence_preview": {},
             "evidence_assessment": {},
+            "scene_preview": {},
             "target_files": [],
         }
         if browser_activity.get("checkpoint_pending"):
@@ -2368,6 +2467,7 @@ class TaskState:
                 "evidence_summary": "",
                 "evidence_preview": {},
                 "evidence_assessment": {},
+                "scene_preview": {},
                 "target_files": [],
             }
         elif desktop_activity.get("checkpoint_pending"):
@@ -2390,6 +2490,7 @@ class TaskState:
                 "evidence_summary": str(desktop_activity.get("checkpoint_evidence", {}).get("summary", "")).strip(),
                 "evidence_preview": desktop_activity.get("checkpoint_evidence", {}),
                 "evidence_assessment": desktop_activity.get("checkpoint_evidence_assessment", {}),
+                "scene_preview": desktop_activity.get("checkpoint_scene", {}),
                 "vision_preview": desktop_activity.get("checkpoint_vision", {}),
                 "target_files": [],
             }
@@ -2560,6 +2661,16 @@ class TaskState:
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_evidence", {}),
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_scene_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_scene", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_scene_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_scene", {}),
             ):
                 lines.append(line)
             for line in _desktop_vision_context_lines(

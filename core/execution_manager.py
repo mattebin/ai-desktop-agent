@@ -1763,25 +1763,72 @@ class ExecutionManager:
                 return self._consume_control_request_locked(task_id)
 
         def runner():
-            result = self.agent.run_state(
-                state,
-                planning_goal=planning_goal,
-                history_start_index=history_start_index,
-                run_source=run_source,
-                session_id=session_id,
-                control_callback=control_callback,
-            )
             auto_start_next = False
-            with self._lock:
-                self._set_current_state_locked(state)
-                self._set_last_result(result)
-                self._control_requests.pop(task_id, None)
-                task = self._find_task_locked(task_id)
-                if task is not None:
-                    self._update_task_from_result_locked(task, state, result)
-                    auto_start_next = not task.get("paused", False) and self._has_queued_tasks_locked()
-                self._worker = None
-                self._persist_all_locked()
+            result: Dict[str, Any] = {}
+            try:
+                result = self.agent.run_state(
+                    state,
+                    planning_goal=planning_goal,
+                    history_start_index=history_start_index,
+                    run_source=run_source,
+                    session_id=session_id,
+                    control_callback=control_callback,
+                )
+                with self._lock:
+                    self._set_current_state_locked(state)
+                    self._set_last_result(result)
+                    self._control_requests.pop(task_id, None)
+                    task = self._find_task_locked(task_id)
+                    if task is not None:
+                        self._update_task_from_result_locked(task, state, result)
+                        auto_start_next = not task.get("paused", False) and self._has_queued_tasks_locked()
+                    self._worker = None
+                    self._persist_all_locked()
+            except Exception as exc:
+                failure_message = f"Execution manager post-processing failed: {type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._control_requests.pop(task_id, None)
+                    state.status = "blocked"
+                    state.add_step(
+                        {
+                            "type": "system",
+                            "status": "failed",
+                            "message": failure_message,
+                            "tool": "execution_manager",
+                        }
+                    )
+                    state.add_note(failure_message)
+                    self._refresh_summary(state)
+                    try:
+                        self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                    except Exception:
+                        pass
+                    self._set_current_state_locked(state)
+                    task = self._find_task_locked(task_id)
+                    if task is not None:
+                        task["status"] = "blocked"
+                        task["last_message"] = _trim_text(failure_message, limit=280)
+                        task["approval_needed"] = False
+                        task["approval_reason"] = ""
+                        task["paused"] = False
+                        task["ended_at"] = _iso_timestamp()
+                        if str(result.get("run_id", "")).strip():
+                            task["run_id"] = _trim_text(result.get("run_id", ""), limit=60)
+                    if self._active_task_id == task_id:
+                        self._active_task_id = ""
+                    self._set_last_result(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "message": failure_message,
+                            "error": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "run_id": _trim_text(result.get("run_id", ""), limit=60),
+                            "steps": state.steps,
+                        }
+                    )
+                    self._worker = None
+                    self._persist_all_locked()
 
             if auto_start_next:
                 self.start_next(auto_trigger=True)

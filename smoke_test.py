@@ -24,6 +24,7 @@ mods = [
     "core.desktop_evidence",
     "core.desktop_matching",
     "core.desktop_recovery",
+    "core.desktop_scene",
     "core.execution_manager",
     "core.file_watch_backend",
     "core.local_api",
@@ -77,10 +78,11 @@ from core.desktop_evidence import (
 )
 from core.desktop_matching import select_window_candidate, titles_compatible
 from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
+from core.desktop_scene import interpret_desktop_scene, list_scene_interpreters, register_scene_interpreter
 from core.chat_sessions import ChatSessionManager
 from core.config import load_settings
 from core.desktop_capture_service import DesktopCaptureService
-from core.execution_manager import ScheduledTaskStore, TaskQueueStore
+from core.execution_manager import ExecutionManager, ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _content_with_desktop_vision, _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer, _status_payload
@@ -162,6 +164,61 @@ runtime = snapshot.get("runtime", {})
 if runtime.get("active_model") != "gpt-5.4" or runtime.get("reasoning_effort") != "medium":
     raise SystemExit("OperatorController.get_snapshot() did not expose the expected runtime model configuration.")
 print("[OK] operator controller snapshot")
+
+postprocess_smoke_root = Path("data") / "smoke_execution_manager_postprocess"
+shutil.rmtree(postprocess_smoke_root, ignore_errors=True)
+postprocess_smoke_root.mkdir(parents=True, exist_ok=True)
+
+
+class _PostprocessSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def run_state(self, state: TaskState, **kwargs):
+        state.status = "completed"
+        state.add_note("Execution manager postprocess smoke completed.")
+        return {"ok": True, "status": "completed", "message": "Stub completed.", "steps": state.steps}
+
+
+postprocess_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(postprocess_smoke_root / "session_state.json"),
+    "run_history_path": str(postprocess_smoke_root / "run_history.json"),
+    "queue_state_path": str(postprocess_smoke_root / "task_queue.json"),
+    "scheduled_task_state_path": str(postprocess_smoke_root / "scheduled_tasks.json"),
+    "watch_state_path": str(postprocess_smoke_root / "watch_state.json"),
+    "alert_state_path": str(postprocess_smoke_root / "alert_history.json"),
+    "desktop_evidence_root": str(postprocess_smoke_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+postprocess_manager = ExecutionManager(agent=_PostprocessSmokeAgent(postprocess_settings))
+postprocess_manager._update_task_from_result_locked = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("smoke postprocess failure"))
+try:
+    started = postprocess_manager.start_goal("execution manager postprocess smoke")
+    if not started.get("ok", False):
+        raise SystemExit("ExecutionManager smoke could not start the post-processing failure guard task.")
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        worker = postprocess_manager._worker
+        if worker is None or not worker.is_alive():
+            break
+        time.sleep(0.1)
+    if postprocess_manager._worker is not None and postprocess_manager._worker.is_alive():
+        raise SystemExit("ExecutionManager did not clear a worker that failed during post-processing.")
+    if not postprocess_manager._tasks or postprocess_manager._tasks[0].get("status") != "blocked":
+        raise SystemExit("ExecutionManager did not mark the task blocked after a post-processing failure.")
+    if postprocess_manager._last_result.get("status") != "blocked":
+        raise SystemExit("ExecutionManager did not preserve a blocked last-result snapshot after a post-processing failure.")
+finally:
+    postprocess_manager.shutdown()
+    shutil.rmtree(postprocess_smoke_root, ignore_errors=True)
+print("[OK] execution manager postprocess guard")
 
 scheduler_backend = create_scheduler_backend({"scheduler_backend": "apscheduler"})
 scheduler_backend.sync_scheduled_tasks(
@@ -917,6 +974,15 @@ task_selection = select_task_evidence(
 )
 if task_selection.get("selected", {}).get("evidence_id") != "desk-smoke-2":
     raise SystemExit("select_task_evidence() did not choose the task-linked evidence.")
+drift_task_selection = select_task_evidence(
+    recent_summaries,
+    task_evidence_id="desk-smoke-2",
+    observation_token="desktop-evidence-smoke-2",
+    active_window_title="Partial Evidence Window",
+    target_window_title="Approval Target Window",
+)
+if drift_task_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_task_evidence() did not prefer explicit target-matching evidence when the latest task evidence drifted to another active window.")
 recent_context = temp_evidence_store.recent_context_summaries(
     limit=3,
     state_scope_id="chat:desktop-evidence",
@@ -1077,6 +1143,25 @@ if "Selected desktop evidence assessment:" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact selected desktop evidence grounding lines.")
 if "Desktop process context: notepad.exe" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact desktop process grounding lines.")
+desktop_target_state = TaskState("Inspect the window titled 'Approval Target Window'")
+desktop_target_state.desktop_last_evidence_id = "desk-smoke-2"
+desktop_target_state.desktop_observation_token = "desktop-evidence-smoke-2"
+desktop_target_state.desktop_active_window_title = "Partial Evidence Window"
+desktop_target_state.desktop_active_window_process = "pythonw.exe"
+desktop_target_state.desktop_last_target_window = "Approval Target Window"
+desktop_target_activity = desktop_target_state._collect_desktop_activity(limit=4)
+if desktop_target_activity.get("selected_evidence", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("TaskState did not keep selected desktop evidence anchored to the intended target window when the current active evidence drifted.")
+prepared_targeted_args = tool_runtime.prepare_args(
+    "desktop_inspect_window_state",
+    {},
+    desktop_target_state,
+    planning_goal="Inspect the window titled 'Approval Target Window'",
+)
+if prepared_targeted_args.get("title") != "Approval Target Window" or prepared_targeted_args.get("expected_window_title") != "Approval Target Window":
+    raise SystemExit("ToolRuntime did not preserve the remembered bounded desktop target when preparing targeted desktop tool args.")
+if prepared_targeted_args.get("expected_window_id"):
+    raise SystemExit("ToolRuntime incorrectly seeded a targeted desktop lookup with the current active window id.")
 
 desktop_checkpoint_summary_state = TaskState("desktop checkpoint evidence smoke")
 desktop_checkpoint_summary_state.update_memory_from_tool(
@@ -1483,6 +1568,129 @@ finally:
 
 print("[OK] desktop evidence layer")
 
+scene_interpreters = list_scene_interpreters()
+if "generic_scene" not in scene_interpreters.get("generic", []) or "workflow_phase" not in scene_interpreters.get("workflow", []):
+    raise SystemExit("Desktop scene interpreters did not register the expected default interpreter set.")
+register_scene_interpreter("app", "smoke_plugin", lambda scene, context: {"signals": ["smoke_plugin_signal"]})
+if "smoke_plugin" not in list_scene_interpreters().get("app", []):
+    raise SystemExit("Desktop scene interpreter registration did not preserve plugin-style extensibility.")
+
+scene_image_path = Path("data") / "scene_smoke_capture.png"
+scene_image_path.parent.mkdir(parents=True, exist_ok=True)
+scene_image_path.write_bytes(b"scene smoke capture")
+previous_scene_summary = {
+    "evidence_id": "scene-prev",
+    "summary": "Desktop Eval Prompt was loading.",
+    "active_window_title": "Desktop Eval Prompt",
+    "active_window_process": "outlook.exe",
+    "active_window_rect": {"x": 100, "y": 100, "width": 320, "height": 180},
+    "screen_size": {"width": 1920, "height": 1080},
+    "active_window_visible": True,
+    "has_screenshot": True,
+    "screenshot_path": str(scene_image_path),
+    "capture_signature": "scene-prev",
+}
+current_prompt_summary = {
+    "evidence_id": "scene-current",
+    "summary": "Desktop Eval Prompt is visible and blocking the workflow.",
+    "active_window_title": "Desktop Eval Prompt",
+    "active_window_process": "outlook.exe",
+    "active_window_rect": {"x": 120, "y": 120, "width": 320, "height": 180},
+    "screen_size": {"width": 1920, "height": 1080},
+    "active_window_visible": True,
+    "has_screenshot": True,
+    "has_artifact": True,
+    "screenshot_scope": "active_window",
+    "screenshot_path": str(scene_image_path),
+    "capture_signature": "scene-current",
+}
+prompt_scene = interpret_desktop_scene(
+    selected_summary=current_prompt_summary,
+    recent_summaries=[previous_scene_summary],
+    purpose="desktop_investigation",
+    prompt_text="What is the primary visible action label on the prompt?",
+    assessment={"state": "partial", "reason": "partial_but_answerable", "sufficient": True},
+    recovery={"state": "ready", "reason": "recovery_succeeded", "summary": "Window is ready."},
+    readiness={"state": "ready", "ready": True, "summary": "Window is ready."},
+    visual_stability={"state": "stable", "stable": True, "summary": "Stable."},
+    process_context={"process_name": "outlook.exe", "running": True, "present": True},
+)
+if prompt_scene.get("scene_class") not in {"prompt", "dialog"} or not prompt_scene.get("direct_image_helpful", False):
+    raise SystemExit(f"Desktop scene interpretation did not classify prompt/dialog-like evidence correctly: {prompt_scene}")
+if not prompt_scene.get("scene_changed", False) or not prompt_scene.get("prefer_before_after", False):
+    raise SystemExit(f"Desktop scene interpretation did not preserve scene-change/workflow history for prompt-like evidence: {prompt_scene}")
+
+fullscreen_scene = interpret_desktop_scene(
+    selected_summary={
+        "evidence_id": "scene-fullscreen",
+        "summary": "Browser window visible.",
+        "active_window_title": "Project Dashboard",
+        "active_window_process": "chrome.exe",
+        "active_window_rect": {"x": 0, "y": 0, "width": 1910, "height": 1040},
+        "active_window_maximized": True,
+        "screen_size": {"width": 1920, "height": 1080},
+        "has_screenshot": True,
+        "capture_signature": "fullscreen-scene",
+    },
+    purpose="desktop_investigation",
+    readiness={"state": "ready", "ready": True},
+    visual_stability={"state": "stable", "stable": True},
+    process_context={"process_name": "chrome.exe", "running": True, "present": True},
+)
+if not fullscreen_scene.get("fullscreen_like", False) or fullscreen_scene.get("scene_class") != "fullscreen":
+    raise SystemExit(f"Desktop scene interpretation did not preserve fullscreen/windowed classification: {fullscreen_scene}")
+
+background_scene = interpret_desktop_scene(
+    selected_summary={
+        "evidence_id": "scene-background",
+        "summary": "Target looks backgrounded.",
+        "active_window_title": "Desktop Eval Main",
+        "active_window_process": "python.exe",
+        "screen_size": {"width": 1920, "height": 1080},
+    },
+    purpose="desktop_investigation",
+    recovery={"state": "missing", "reason": "tray_or_background_state", "summary": "Target may be tray-like."},
+    process_context={"process_name": "python.exe", "running": True, "present": True, "background_candidate": True},
+)
+if background_scene.get("scene_class") != "background" or not background_scene.get("background_like", False):
+    raise SystemExit(f"Desktop scene interpretation did not preserve tray/background classification: {background_scene}")
+
+scene_vision = select_desktop_vision_context(
+    selected_summary=current_prompt_summary,
+    recent_summaries=[previous_scene_summary],
+    purpose="desktop_investigation",
+    prompt_text="What is the primary visible action label on the prompt?",
+    assessment={"state": "partial", "reason": "partial_but_answerable", "sufficient": True},
+    selected_scene=prompt_scene,
+)
+if not scene_vision.get("needs_direct_image", False) or scene_vision.get("mode") not in {"single_image", "before_after_pair"}:
+    raise SystemExit(f"Desktop scene-aware vision selection did not request bounded image grounding when summaries were insufficient: {scene_vision}")
+
+scene_status = _status_payload(
+    {
+        "status": "running",
+        "running": True,
+        "paused": False,
+        "desktop": {
+            "selected_scene": prompt_scene,
+            "checkpoint_scene": prompt_scene,
+        },
+        "pending_approval": {
+            "scene_preview": prompt_scene,
+        },
+        "queue": {},
+        "browser": {},
+        "behavior": {},
+    }
+)
+if scene_status.get("desktop", {}).get("selected_scene", {}).get("scene_class", "") not in {"prompt", "dialog"}:
+    raise SystemExit("Local API status payload did not expose selected desktop scene summaries.")
+if scene_status.get("pending_approval", {}).get("scene_preview", {}).get("reason", "") not in {"prompt_like", "dialog_like"}:
+    raise SystemExit("Local API status payload did not expose compact checkpoint scene previews.")
+
+scene_image_path.unlink(missing_ok=True)
+print("[OK] desktop scene interpretation")
+
 auto_capture_root = Path("data/desktop_auto_capture_smoke")
 shutil.rmtree(auto_capture_root, ignore_errors=True)
 auto_capture_root.mkdir(parents=True, exist_ok=True)
@@ -1636,6 +1844,7 @@ for expected_scenario in {
     "desktop_control",
     "desktop_evidence_grounding",
     "desktop_recovery_grounding",
+    "desktop_scene_reasoning",
     "desktop_bounded_stack",
 }:
     if expected_scenario not in SCENARIO_NAMES:
@@ -1670,8 +1879,8 @@ if "focus_request_path" not in live_eval_source or "def request_focus(" not in l
     raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
 if "command_request_path" not in live_eval_source or "def request_command(" not in live_eval_source or "def _handle_command(" not in live_eval_source:
     raise SystemExit("live_agent_eval is missing the expected desktop fixture recovery command harness support.")
-if "vision_selected_direct_image" not in live_eval_source or "desktop_bounded_stack" not in live_eval_source or "desktop_press_key" not in live_eval_source:
-    raise SystemExit("live_agent_eval is missing the expected bounded desktop-stack validation coverage for direct image reasoning or keyboard approvals.")
+if "vision_selected_direct_image" not in live_eval_source or "desktop_scene_reasoning" not in live_eval_source or "desktop_press_key" not in live_eval_source:
+    raise SystemExit("live_agent_eval is missing the expected bounded desktop-stack validation coverage for scene reasoning, direct image grounding, or keyboard approvals.")
 if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
     raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
 no_run_checks = _golden_final_answer_checks(

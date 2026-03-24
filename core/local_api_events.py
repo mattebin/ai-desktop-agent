@@ -64,6 +64,13 @@ def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
             "sufficient": bool(pending.get("evidence_assessment", {}).get("sufficient", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(pending.get("evidence_assessment", {}).get("needs_refresh", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
         },
+        "scene_preview": {
+            "scene_class": _trim_text(pending.get("scene_preview", {}).get("scene_class", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(pending.get("scene_preview", {}).get("workflow_state", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "reason": _trim_text(pending.get("scene_preview", {}).get("reason", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "summary": _trim_text(pending.get("scene_preview", {}).get("summary", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=220),
+            "direct_image_helpful": bool(pending.get("scene_preview", {}).get("direct_image_helpful", False)) if isinstance(pending.get("scene_preview", {}), dict) else False,
+        },
     }
 
 
@@ -127,6 +134,14 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "sufficient": bool(desktop.get("selected_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(desktop.get("selected_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
         },
+        "selected_scene": {
+            "scene_class": _trim_text(desktop.get("selected_scene", {}).get("scene_class", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(desktop.get("selected_scene", {}).get("workflow_state", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_scene", {}).get("reason", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_scene", {}).get("summary", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=220),
+            "scene_changed": bool(desktop.get("selected_scene", {}).get("scene_changed", False)) if isinstance(desktop.get("selected_scene", {}), dict) else False,
+            "direct_image_helpful": bool(desktop.get("selected_scene", {}).get("direct_image_helpful", False)) if isinstance(desktop.get("selected_scene", {}), dict) else False,
+        },
         "selected_vision": {
             "mode": _trim_text(desktop.get("selected_vision", {}).get("mode", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
             "reason": _trim_text(desktop.get("selected_vision", {}).get("reason", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
@@ -145,6 +160,14 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "summary": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=220),
             "sufficient": bool(desktop.get("checkpoint_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(desktop.get("checkpoint_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
+        },
+        "checkpoint_scene": {
+            "scene_class": _trim_text(desktop.get("checkpoint_scene", {}).get("scene_class", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(desktop.get("checkpoint_scene", {}).get("workflow_state", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_scene", {}).get("reason", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_scene", {}).get("summary", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=220),
+            "scene_changed": bool(desktop.get("checkpoint_scene", {}).get("scene_changed", False)) if isinstance(desktop.get("checkpoint_scene", {}), dict) else False,
+            "direct_image_helpful": bool(desktop.get("checkpoint_scene", {}).get("direct_image_helpful", False)) if isinstance(desktop.get("checkpoint_scene", {}), dict) else False,
         },
         "checkpoint_vision": {
             "mode": _trim_text(desktop.get("checkpoint_vision", {}).get("mode", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
