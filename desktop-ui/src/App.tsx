@@ -79,7 +79,7 @@ const THEME_STORAGE_KEY = "ai-operator:theme";
 const DRAFTS_STORAGE_KEY = "ai-operator:drafts";
 const NEW_SESSION_DRAFT_KEY = "__new__";
 const TRANSCRIPT_BOTTOM_THRESHOLD = 120;
-const COMPOSER_MAX_HEIGHT = 220;
+const COMPOSER_MAX_HEIGHT = 180;
 
 const STREAM_EVENTS = [
   "stream.hello",
@@ -396,6 +396,204 @@ function approvalSummary(pending?: PendingApproval | null): string {
     return "";
   }
   return pending.reason || pending.summary || pending.step || pending.kind;
+}
+
+function UiIcon({
+  name,
+  className,
+}: {
+  name:
+    | "brand"
+    | "menu"
+    | "refresh"
+    | "theme-light"
+    | "theme-dark"
+    | "new"
+    | "chat"
+    | "approval"
+    | "task"
+    | "alert"
+    | "activity"
+    | "evidence"
+    | "details";
+  className?: string;
+}) {
+  const common = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    className: clsx("ui-icon", className),
+    "aria-hidden": true,
+  };
+
+  switch (name) {
+    case "brand":
+      return (
+        <svg {...common}>
+          <path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z" />
+          <path d="M8.5 10.5 12 8l3.5 2.5v3L12 16l-3.5-2.5v-3Z" />
+        </svg>
+      );
+    case "menu":
+      return (
+        <svg {...common}>
+          <path d="M5 7h14" />
+          <path d="M5 12h14" />
+          <path d="M5 17h14" />
+        </svg>
+      );
+    case "refresh":
+      return (
+        <svg {...common}>
+          <path d="M20 11a8 8 0 1 0 2 5.5" />
+          <path d="M20 4v7h-7" />
+        </svg>
+      );
+    case "theme-light":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2.5v2.5" />
+          <path d="M12 19v2.5" />
+          <path d="m4.9 4.9 1.8 1.8" />
+          <path d="m17.3 17.3 1.8 1.8" />
+          <path d="M2.5 12H5" />
+          <path d="M19 12h2.5" />
+          <path d="m4.9 19.1 1.8-1.8" />
+          <path d="m17.3 6.7 1.8-1.8" />
+        </svg>
+      );
+    case "theme-dark":
+      return (
+        <svg {...common}>
+          <path d="M20 14.3A7.5 7.5 0 0 1 9.7 4 8.5 8.5 0 1 0 20 14.3Z" />
+        </svg>
+      );
+    case "new":
+      return (
+        <svg {...common}>
+          <path d="M12 5v14" />
+          <path d="M5 12h14" />
+        </svg>
+      );
+    case "chat":
+      return (
+        <svg {...common}>
+          <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5v-6Z" />
+        </svg>
+      );
+    case "approval":
+      return (
+        <svg {...common}>
+          <path d="M12 3 6 5.8v5.4c0 4 2.6 7.7 6 9 3.4-1.3 6-5 6-9V5.8L12 3Z" />
+          <path d="m9.5 12 1.8 1.8 3.2-3.6" />
+        </svg>
+      );
+    case "task":
+      return (
+        <svg {...common}>
+          <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" />
+        </svg>
+      );
+    case "alert":
+      return (
+        <svg {...common}>
+          <path d="M12 4a4 4 0 0 0-4 4v2.6c0 .7-.2 1.4-.6 2L6 15h12l-1.4-2.4a4 4 0 0 1-.6-2V8a4 4 0 0 0-4-4Z" />
+          <path d="M10 18a2 2 0 0 0 4 0" />
+        </svg>
+      );
+    case "activity":
+      return (
+        <svg {...common}>
+          <path d="M3 12h4l2-5 4 10 2-5h6" />
+        </svg>
+      );
+    case "evidence":
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="m8 14 2.5-2.5 2 2 2.5-3 3 3.5" />
+          <circle cx="9" cy="9.5" r="1" />
+        </svg>
+      );
+    case "details":
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="M10 9h6" />
+          <path d="M10 12h6" />
+          <path d="M10 15h4" />
+          <path d="M7.5 9h.01" />
+          <path d="M7.5 12h.01" />
+          <path d="M7.5 15h.01" />
+        </svg>
+      );
+  }
+}
+
+function SectionTitle({
+  icon,
+  children,
+}: {
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+}) {
+  return (
+    <span className="section-title">
+      <UiIcon name={icon} />
+      <span>{children}</span>
+    </span>
+  );
+}
+
+function CompactMenu({
+  label,
+  icon,
+  children,
+}: {
+  label: string;
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="compact-menu">
+      <summary className="ghost-button compact-menu-trigger">
+        <UiIcon name={icon} />
+        <span>{label}</span>
+      </summary>
+      <div className="compact-menu-popover">{children}</div>
+    </details>
+  );
+}
+
+function CompactMenuButton({
+  icon,
+  children,
+  onClick,
+}: {
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className="compact-menu-item"
+      type="button"
+      onClick={(event) => {
+        onClick();
+        const details = event.currentTarget.closest("details");
+        if (details instanceof HTMLDetailsElement) {
+          details.open = false;
+        }
+      }}
+    >
+      <UiIcon name={icon} />
+      <span>{children}</span>
+    </button>
+  );
 }
 
 function hasEvidencePreview(preview?: EvidenceSummary | null): boolean {
@@ -859,7 +1057,7 @@ export default function App() {
       return;
     }
     textarea.style.height = "0px";
-    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 118), COMPOSER_MAX_HEIGHT);
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 92), COMPOSER_MAX_HEIGHT);
     textarea.style.height = `${nextHeight}px`;
   }, [draft, selectedSessionId]);
 
@@ -1395,31 +1593,47 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-header">
-          <div>
-            <div className="eyebrow">AI Operator</div>
-            <h1>Chat-first local operator</h1>
+        <div className="sidebar-top">
+          <div className="sidebar-brand">
+            <div className="brand-mark">
+              <UiIcon name="brand" />
+            </div>
+            <div>
+              <div className="eyebrow">AI Operator</div>
+              <h1>Local operator</h1>
+              <p className="sidebar-subtitle">Chat-first desktop control surface</p>
+            </div>
           </div>
-          <div className="sidebar-header-actions">
-            <button
-              className="ghost-button theme-toggle"
-              onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
-              type="button"
-            >
-              {themeMode === "light" ? "Dark mode" : "Light mode"}
+          <div className="sidebar-actions">
+            <button className="sidebar-primary-button" onClick={() => void handleNewChat()} disabled={sending} type="button">
+              <UiIcon name="new" />
+              <span>New chat</span>
             </button>
-            <button className="ghost-button" onClick={() => void handleNewChat()} disabled={sending}>
-              New chat
-            </button>
+            <CompactMenu label="Workspace" icon="menu">
+              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
+                {detailsOpen ? "Hide details" : "Show details"}
+              </CompactMenuButton>
+              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
+                {bootState === "ready" ? "Refresh data" : "Retry startup"}
+              </CompactMenuButton>
+              <CompactMenuButton
+                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
+                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+              >
+                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              </CompactMenuButton>
+            </CompactMenu>
           </div>
         </div>
 
         <label className="search-box">
-          <span>Search conversations</span>
+          <span className="search-box-label">
+            <SectionTitle icon="chat">Conversations</SectionTitle>
+          </span>
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter by title, summary, status..."
+            placeholder="Filter title, status, summary..."
           />
         </label>
 
@@ -1436,8 +1650,8 @@ export default function App() {
               </div>
               <p className="session-preview">{sessionPreviewText(session)}</p>
               <div className="session-card-footer">
-                <span>{session.message_count || 0} messages</span>
-                {session.pending_approval?.kind ? <span className="approval-dot">Approval needed</span> : <span>{formatDateTime(session.updated_at)}</span>}
+                <span>{formatDateTime(session.updated_at) || "Just now"}</span>
+                {session.pending_approval?.kind ? <span className="approval-dot">Needs approval</span> : <span>{session.message_count || 0} msgs</span>}
               </div>
             </button>
           ))}
@@ -1447,16 +1661,12 @@ export default function App() {
 
       <main className="chat-layout">
         <header className="chat-header">
-          <div>
+          <div className="chat-header-main">
             <div className="chat-title-row">
               <h2>{title}</h2>
               <span className={clsx("status-pill", `tone-${statusTone(sessionDetail?.status || status?.status)}`)}>
                 {sessionDetail?.status || status?.status || "idle"}
               </span>
-              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
-              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
-              {runtimeModel ? <span className="meta-pill">Model: {runtimeModel}</span> : null}
-              {runtimeEffortLabel ? <span className="meta-pill">Reasoning: {runtimeEffortLabel}</span> : null}
             </div>
             <p className="chat-subtitle">
               {pendingApproval?.kind
@@ -1466,16 +1676,29 @@ export default function App() {
                     220,
                   )}
             </p>
+            <div className="chat-meta-row">
+              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
+              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
+              {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
+              {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
+              <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
+            </div>
           </div>
           <div className="chat-header-actions">
-            <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
-            <span className="meta-pill">Theme: {themeMode}</span>
-            <button className="ghost-button" onClick={() => setDetailsOpen((current) => !current)}>
-              {detailsOpen ? "Hide details" : "Show details"}
-            </button>
-            <button className="ghost-button" onClick={() => void handleRefresh()}>
-              {bootState === "ready" ? "Refresh" : "Retry"}
-            </button>
+            <CompactMenu label="View" icon="menu">
+              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
+                {detailsOpen ? "Hide details" : "Show details"}
+              </CompactMenuButton>
+              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
+                {bootState === "ready" ? "Refresh data" : "Retry startup"}
+              </CompactMenuButton>
+              <CompactMenuButton
+                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
+                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+              >
+                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              </CompactMenuButton>
+            </CompactMenu>
           </div>
         </header>
 
@@ -1571,7 +1794,7 @@ export default function App() {
       <aside className="right-rail">
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Approval</h3>
+            <h3><SectionTitle icon="approval">Approval</SectionTitle></h3>
             {pendingApproval?.kind ? <span className="approval-dot">Needed</span> : <span className="muted-label">Clear</span>}
           </div>
           {pendingApproval?.kind ? (
@@ -1606,7 +1829,7 @@ export default function App() {
 
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Active task</h3>
+            <h3><SectionTitle icon="task">Active task</SectionTitle></h3>
             <span className={clsx("status-pill", `tone-${statusTone(activeTask?.status || status?.status)}`)}>
               {activeTask?.status || status?.status || "idle"}
             </span>
@@ -1646,7 +1869,7 @@ export default function App() {
 
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Recent alerts</h3>
+            <h3><SectionTitle icon="alert">Recent alerts</SectionTitle></h3>
             <span className="muted-label">{alerts.length}</span>
           </div>
           <div className="mini-list">
@@ -1662,7 +1885,7 @@ export default function App() {
 
         <section className="rail-card rail-card-grow">
           <div className="rail-card-header">
-            <h3>Live activity</h3>
+            <h3><SectionTitle icon="activity">Live activity</SectionTitle></h3>
             <span className="muted-label">{activity.length}</span>
           </div>
           <div className="mini-list">
@@ -1697,7 +1920,7 @@ export default function App() {
             <div className="details-grid">
               <section className="details-card">
                 <div className="rail-card-header">
-                  <h4>Desktop evidence</h4>
+                  <h4><SectionTitle icon="evidence">Desktop evidence</SectionTitle></h4>
                   <span className="muted-label">{controlData.desktopEvidence.length}</span>
                 </div>
                 <EvidencePreviewCard

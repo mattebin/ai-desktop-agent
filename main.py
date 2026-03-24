@@ -18,13 +18,14 @@ def main():
     args = parser.parse_args()
 
     settings = load_settings()
-    start_emergency_stop_listener()
 
     if args.api:
         host = str(args.api_host).strip() or str(settings.get("local_api_host", DEFAULT_LOCAL_API_HOST)).strip() or DEFAULT_LOCAL_API_HOST
         port = int(args.api_port if args.api_port >= 0 else settings.get("local_api_port", DEFAULT_LOCAL_API_PORT) or DEFAULT_LOCAL_API_PORT)
         serve_local_api(host=host, port=port, settings=settings)
         return
+
+    start_emergency_stop_listener()
 
     if args.ui:
         from control_ui import launch_control_ui

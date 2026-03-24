@@ -304,6 +304,7 @@ export type EnsureLocalApiResult = {
   managedByDesktop: boolean;
   runtimeStatus?: DesktopRuntimeStatus;
   logPath?: string;
+  backendLogPath?: string;
 };
 
 export type DesktopEvidencePayload = {
@@ -372,8 +373,34 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit, que
   return payload.data as T;
 }
 
+function normalizeInvokeError(error: unknown): string {
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+  return "Tauri bootstrap failed.";
+}
+
+async function waitForLocalOperator(baseUrl: string, timeoutMs = 20000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    try {
+      await request<Record<string, unknown>>(baseUrl, "/health");
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "The local operator is not reachable yet.";
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    }
+  }
+  throw new Error(lastError || `Failed to fetch ${buildUrl(baseUrl, "/health")}`);
+}
+
 export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
   let tauriError = "";
+  let bootResult: EnsureLocalApiResult | null = null;
   try {
     const result = await invoke<{
       baseUrl?: string;
@@ -381,20 +408,30 @@ export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
       managedByDesktop?: boolean;
       runtimeStatus?: DesktopRuntimeStatus;
       logPath?: string;
+      backendLogPath?: string;
     }>("ensure_local_api");
-    return {
+    bootResult = {
       baseUrl: normalizeBaseUrl(result.baseUrl || DEFAULT_API_BASE_URL),
       started: Boolean(result.started),
       managedByDesktop: Boolean(result.managedByDesktop),
       runtimeStatus: result.runtimeStatus,
       logPath: result.logPath,
+      backendLogPath: result.backendLogPath,
     };
+    await waitForLocalOperator(bootResult.baseUrl);
+    return bootResult;
   } catch (error) {
-    tauriError = error instanceof Error ? error.message : "Tauri bootstrap failed.";
+    tauriError = normalizeInvokeError(error);
+    if (bootResult?.baseUrl) {
+      const logNote = [bootResult.logPath ? `Runtime log: ${bootResult.logPath}.` : "", bootResult.backendLogPath ? `Backend log: ${bootResult.backendLogPath}.` : ""]
+        .filter(Boolean)
+        .join(" ");
+      throw new Error(`Local operator startup failed for ${bootResult.baseUrl}. ${tauriError}${logNote ? ` ${logNote}` : ""}`.trim());
+    }
   }
 
   try {
-    await request<Record<string, unknown>>(DEFAULT_API_BASE_URL, "/health");
+    await waitForLocalOperator(DEFAULT_API_BASE_URL, 6000);
     return {
       baseUrl: normalizeBaseUrl(DEFAULT_API_BASE_URL),
       started: false,
@@ -403,7 +440,7 @@ export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
   } catch (error) {
     const httpError = error instanceof Error ? error.message : "HTTP fallback failed.";
     if (tauriError) {
-      throw new Error(`Unable to reach the local operator. ${tauriError} ${httpError}`.trim());
+      throw new Error(`Unable to reach the local operator. Desktop bootstrap: ${tauriError} HTTP fallback: ${httpError}`.trim());
     }
     throw error;
   }
