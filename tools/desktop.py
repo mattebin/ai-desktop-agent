@@ -19,6 +19,7 @@ from tools.desktop_backends import (
     create_ui_evidence_backend,
     create_window_backend,
     describe_backends,
+    probe_process_context,
     probe_visual_stability,
     probe_window_readiness,
 )
@@ -617,6 +618,16 @@ def _visual_stability_for_window(window: Dict[str, Any], *, samples: int = 3, in
     return result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
 
 
+def _process_context_for_window(window: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(window, dict):
+        return {}
+    result = probe_process_context(
+        pid=_coerce_int(window.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        process_name=str(window.get("process_name", "")).strip(),
+    )
+    return result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+
+
 def _inspect_window_state_internal(
     args: Dict[str, Any],
     *,
@@ -641,6 +652,7 @@ def _inspect_window_state_internal(
         if include_visual_stability
         else {}
     )
+    process_context = _process_context_for_window(target_window or active_window)
     observation = _register_observation(active_window=active_window, windows=visible_windows)
     errors = [lookup_error] if lookup_error else []
     evidence_bundle, evidence_ref = _record_desktop_evidence(
@@ -672,6 +684,10 @@ def _inspect_window_state_internal(
     )
     recovery_view = dict(recovery)
     recovery_view.update(recovery_strategy)
+    process_summary = str(process_context.get("summary", "")).strip()
+    recovery_summary = str(recovery_view.get("summary", "")).strip()
+    if process_summary and process_summary not in recovery_summary:
+        recovery_view["summary"] = f"{recovery_summary} Process check: {process_summary}".strip()
     return {
         "target_window": target_window,
         "candidates": candidates,
@@ -683,6 +699,7 @@ def _inspect_window_state_internal(
         "evidence_ref": evidence_ref,
         "readiness": readiness,
         "visual_stability": visual_stability,
+        "process_context": process_context,
         "recovery": recovery_view,
     }
 
@@ -692,6 +709,24 @@ def _latest_evidence_ref_for_observation(token: str) -> Dict[str, Any]:
         return get_desktop_evidence_store().find_by_observation_token(token)
     except Exception:
         return {}
+
+
+def _evidence_ref_has_screenshot(evidence_ref: Dict[str, Any] | None) -> bool:
+    ref = evidence_ref if isinstance(evidence_ref, dict) else {}
+    if bool(ref.get("has_screenshot", False) or ref.get("has_artifact", False)):
+        return True
+    evidence_id = str(ref.get("evidence_id", "")).strip()
+    if not evidence_id:
+        return False
+    try:
+        bundle = get_desktop_evidence_store().load_bundle(evidence_id)
+    except Exception:
+        bundle = {}
+    if not isinstance(bundle, dict):
+        return False
+    screenshot = bundle.get("screenshot", {}) if isinstance(bundle.get("screenshot", {}), dict) else {}
+    artifacts = bundle.get("artifacts", {}) if isinstance(bundle.get("artifacts", {}), dict) else {}
+    return bool(str(screenshot.get("path", "")).strip() or str(artifacts.get("screenshot_path", "")).strip())
 
 
 def _record_desktop_evidence(
@@ -977,6 +1012,7 @@ def _desktop_result(
     recovery_attempts: List[Dict[str, Any]] | None = None,
     window_readiness: Dict[str, Any] | None = None,
     visual_stability: Dict[str, Any] | None = None,
+    process_context: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     state = desktop_state if isinstance(desktop_state, dict) else {}
     evidence = desktop_evidence if isinstance(desktop_evidence, dict) else {}
@@ -985,6 +1021,7 @@ def _desktop_result(
     recovery_view = recovery if isinstance(recovery, dict) else {}
     readiness = window_readiness if isinstance(window_readiness, dict) else {}
     stability = visual_stability if isinstance(visual_stability, dict) else {}
+    process_view = process_context if isinstance(process_context, dict) else {}
     return {
         "ok": bool(ok),
         "action": action,
@@ -1018,6 +1055,7 @@ def _desktop_result(
         "target_window": target,
         "window_readiness": readiness,
         "visual_stability": stability,
+        "process_context": process_view,
         "recovery": recovery_view,
         "recovery_attempts": [dict(item) for item in list(recovery_attempts or [])[:6] if isinstance(item, dict)],
     }
@@ -1656,6 +1694,7 @@ def desktop_inspect_window_state(args: Dict[str, Any]) -> Dict[str, Any]:
         recovery=recovery,
         window_readiness=inspected.get("readiness", {}),
         visual_stability=inspected.get("visual_stability", {}),
+        process_context=inspected.get("process_context", {}),
     )
 
 
@@ -1677,6 +1716,7 @@ def desktop_wait_for_window_ready(args: Dict[str, Any]) -> Dict[str, Any]:
         recovery=recovery,
         window_readiness=waited.get("readiness", {}),
         visual_stability=waited.get("visual_stability", {}),
+        process_context=waited.get("process_context", {}),
     )
 
 
@@ -1699,6 +1739,7 @@ def desktop_recover_window(args: Dict[str, Any]) -> Dict[str, Any]:
         recovery_attempts=recovered.get("recovery_attempts", []),
         window_readiness=recovered.get("readiness", {}),
         visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
     )
 
 
@@ -1726,6 +1767,7 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
         recovery_attempts=recovered.get("recovery_attempts", []),
         window_readiness=recovered.get("readiness", {}),
         visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
     )
 
 
@@ -1866,6 +1908,18 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
     )
     checkpoint_target = active_window.get("title", "") or "active window"
     if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop clicking needs a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_click_point",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                point={"x": x, "y": y},
+                desktop_evidence_ref=evidence_ref,
+            )
         return _pause_desktop_action(
             action="desktop_click_point",
             summary=f"Approval required before clicking ({x}, {y}) in '{checkpoint_target}'.",
@@ -2125,6 +2179,18 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
     )
     checkpoint_target = field_label
     if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop typing needs a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_type_text",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                typed_text_preview=_trim_text(value, limit=60),
+                desktop_evidence_ref=evidence_ref,
+            )
         return _pause_desktop_action(
             action="desktop_type_text",
             summary=f"Approval required before typing into '{field_label}' in '{active_window.get('title', 'the active window')}'.",
@@ -2227,6 +2293,18 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
     )
     checkpoint_target = active_window.get("title", "") or "active window"
     if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop key presses need a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_press_key",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                key_sequence_preview=key_preview,
+                desktop_evidence_ref=evidence_ref,
+            )
         return _pause_desktop_action(
             action="desktop_press_key",
             summary=f"Approval required before pressing {key_preview} in '{checkpoint_target}'.",

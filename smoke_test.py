@@ -67,6 +67,7 @@ from core.desktop_evidence import (
     assess_desktop_evidence,
     build_desktop_evidence_bundle,
     compact_evidence_preview,
+    select_desktop_vision_context,
     select_checkpoint_evidence,
     select_recent_evidence,
     select_task_evidence,
@@ -78,7 +79,7 @@ from core.config import load_settings
 from core.desktop_capture_service import DesktopCaptureService
 from core.execution_manager import ScheduledTaskStore, TaskQueueStore
 from core.file_watch_backend import create_file_watch_backend
-from core.llm_client import _goal_requests_brief_answer, _goal_requests_single_recommendation
+from core.llm_client import _content_with_desktop_vision, _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer, _status_payload
 from core.local_api_client import LocalOperatorApiClient, wait_for_local_api_status
 from core.loop import _is_redundant_desktop_observation, _maybe_pause_for_desktop_action, _maybe_recover_desktop_action_failure
@@ -264,13 +265,20 @@ if not observation_token:
 if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and int(active_rect.get("height", 0) or 0) > 8:
     test_x = int(active_rect.get("x", 0)) + max(2, int(active_rect.get("width", 0) or 0) // 2)
     test_y = int(active_rect.get("y", 0)) + max(2, int(active_rect.get("height", 0) or 0) // 2)
-    click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": observation_token})
+    ungrouded_click = desktop_click_point({"x": test_x, "y": test_y, "observation_token": observation_token})
+    if "screenshot-backed inspection" not in str(ungrouded_click.get("summary", "")):
+        raise SystemExit("desktop_click_point() did not require screenshot-backed evidence before approval preview.")
+    preview_capture = desktop_capture_screenshot({"scope": "active_window", "name": "desktop_preview_smoke"})
+    preview_token = str(preview_capture.get("desktop_state", {}).get("observation_token", "")).strip()
+    if not preview_capture.get("ok", False) or not preview_token:
+        raise SystemExit("desktop_capture_screenshot() did not produce a screenshot-backed desktop observation for approval preview smoke coverage.")
+    click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": preview_token})
     if not click_preview.get("paused", False) or not click_preview.get("approval_required", False) or click_preview.get("checkpoint_tool") != "desktop_click_point":
         raise SystemExit("desktop_click_point() did not require approval in the expected bounded way.")
     key_preview = desktop_press_key(
         {
             "key": "Enter",
-            "observation_token": observation_token,
+            "observation_token": preview_token,
         }
     )
     if not key_preview.get("paused", False) or not key_preview.get("approval_required", False) or key_preview.get("checkpoint_tool") != "desktop_press_key":
@@ -279,7 +287,7 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
         {
             "value": "desktop smoke text",
             "field_label": "desktop smoke input",
-            "observation_token": observation_token,
+            "observation_token": preview_token,
         }
     )
     if not type_preview.get("paused", False) or not type_preview.get("approval_required", False) or type_preview.get("checkpoint_tool") != "desktop_type_text":
@@ -772,6 +780,73 @@ recent_context = temp_evidence_store.recent_context_summaries(
 if not recent_context or recent_context[0].get("evidence_id") != "desk-smoke-3":
     raise SystemExit("DesktopEvidenceStore.recent_context_summaries() did not prioritize the checkpoint-bound recent desktop evidence.")
 
+summary_only_vision = select_desktop_vision_context(
+    selected_summary=summary_first,
+    recent_summaries=recent_summaries,
+    purpose="desktop_investigation",
+    prompt_text="Which window is active right now?",
+    assessment={"state": "sufficient", "sufficient": True, "summary": "The selected desktop evidence already answers the question."},
+)
+if summary_only_vision.get("mode") != "summary_only" or summary_only_vision.get("needs_direct_image", False):
+    raise SystemExit("select_desktop_vision_context() did not keep a simple desktop question in summary-only mode.")
+
+single_image_vision = select_desktop_vision_context(
+    selected_summary=summary_first,
+    recent_summaries=recent_summaries,
+    purpose="desktop_investigation",
+    prompt_text="What exact text is visible on the button in the screenshot?",
+    assessment={"state": "sufficient", "sufficient": True},
+)
+if single_image_vision.get("mode") != "single_image" or not single_image_vision.get("needs_direct_image", False):
+    raise SystemExit("select_desktop_vision_context() did not choose a bounded single-image path for a visually specific desktop question.")
+vision_content = _content_with_desktop_vision("Desktop smoke", single_image_vision)
+if not isinstance(vision_content, list) or not any(isinstance(item, dict) and item.get("type") == "image_url" for item in vision_content):
+    raise SystemExit("_content_with_desktop_vision() did not attach bounded image_url content for direct desktop vision.")
+
+before_compare_bundle = build_desktop_evidence_bundle(
+    source_action="desktop_capture_screenshot",
+    active_window={"title": "Approval Target Window", "window_id": "0x00123460", "process_name": "notepad.exe"},
+    windows=[{"title": "Approval Target Window", "window_id": "0x00123460", "process_name": "notepad.exe"}],
+    observation_token="desktop-evidence-smoke-before",
+    screenshot={
+        "backend": "mss",
+        "path": str(first_capture_path),
+        "scope": "desktop",
+        "bounds": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+    },
+    capture_mode="manual",
+    importance="normal",
+    importance_reason="manual_capture",
+    state_scope_id="chat:desktop-evidence",
+    task_id="task-desktop-evidence",
+    task_status="running",
+)
+before_compare_bundle["evidence_id"] = "desk-smoke-before-approval"
+before_compare_bundle["timestamp"] = first_timestamp
+before_compare_summary = summarize_evidence_bundle(before_compare_bundle)
+before_after_vision = select_desktop_vision_context(
+    selected_summary=summary_third,
+    recent_summaries=[before_compare_summary, *recent_summaries],
+    purpose="desktop_investigation",
+    prompt_text="What changed on the Approval Target Window between before and after?",
+    assessment={"state": "sufficient", "sufficient": True},
+    prefer_before_after=True,
+)
+if before_after_vision.get("mode") != "before_after_pair" or int(before_after_vision.get("image_count", 0) or 0) != 2:
+    raise SystemExit("select_desktop_vision_context() did not choose a bounded before/after pair for changed desktop state reasoning.")
+
+approval_vision = select_desktop_vision_context(
+    selected_summary=summary_second,
+    checkpoint_summary=summary_third,
+    recent_summaries=recent_summaries,
+    purpose="desktop_approval",
+    prompt_text="Click the Apply button in the approval target window.",
+    assessment={"state": "needs_refresh", "sufficient": False},
+    checkpoint_assessment={"state": "sufficient", "sufficient": True},
+)
+if approval_vision.get("primary_evidence_id") != "desk-smoke-3" or approval_vision.get("mode") != "single_image":
+    raise SystemExit("select_desktop_vision_context() did not prioritize checkpoint-linked screenshot evidence for bounded desktop approval grounding.")
+
 investigation_assessment = assess_desktop_evidence(
     summary_second,
     purpose="desktop_investigation",
@@ -804,26 +879,32 @@ original_evidence_store = getattr(desktop_evidence_module, "_STORE", None)
 desktop_evidence_module._STORE = temp_evidence_store
 
 desktop_state = TaskState("desktop evidence smoke")
-desktop_state.update_memory_from_tool(
-    "desktop_capture_screenshot",
-    {
-        "ok": True,
-        "summary": "Captured a screenshot of the active window.",
-        "screenshot_path": third_ref.get("screenshot_path", ""),
-        "desktop_state": {
-            "active_window": {
-                "title": "Approval Target Window",
-                "window_id": "0x00123458",
-                "process_name": "notepad.exe",
-            },
-            "windows": [{"title": "Approval Target Window"}],
-            "observation_token": "desktop-evidence-smoke-3",
-            "observed_at": "2026-03-23T10:00:00",
-        },
-        "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
-        "desktop_evidence_ref": third_ref,
+desktop_state_result = {
+    "ok": True,
+    "summary": "Captured a screenshot of the active window.",
+    "screenshot_path": third_ref.get("screenshot_path", ""),
+    "process_context": {
+        "pid": 4321,
+        "process_name": "notepad.exe",
+        "status": "running",
+        "running": True,
+        "summary": "Foreground window process notepad.exe is running normally.",
     },
-)
+    "desktop_state": {
+        "active_window": {
+            "title": "Approval Target Window",
+            "window_id": "0x00123458",
+            "process_name": "notepad.exe",
+        },
+        "windows": [{"title": "Approval Target Window"}],
+        "observation_token": "desktop-evidence-smoke-3",
+        "observed_at": "2026-03-23T10:00:00",
+    },
+    "desktop_evidence": temp_evidence_store.load_bundle("desk-smoke-3"),
+    "desktop_evidence_ref": third_ref,
+}
+desktop_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_capture_screenshot", "args": {}, "result": desktop_state_result})
+desktop_state.update_memory_from_tool("desktop_capture_screenshot", desktop_state_result)
 desktop_evidence_snapshot = desktop_state.get_control_snapshot()
 if desktop_evidence_snapshot.get("desktop", {}).get("evidence_id") != "desk-smoke-3":
     raise SystemExit("TaskState did not surface desktop evidence in the authoritative control snapshot.")
@@ -833,9 +914,15 @@ if desktop_evidence_snapshot.get("desktop", {}).get("selected_evidence", {}).get
     raise SystemExit("TaskState did not surface the selected desktop evidence summary.")
 if not desktop_evidence_snapshot.get("desktop", {}).get("selected_evidence_assessment", {}).get("sufficient", False):
     raise SystemExit("TaskState did not surface selected desktop evidence sufficiency in the authoritative control snapshot.")
+if desktop_evidence_snapshot.get("desktop", {}).get("selected_vision", {}).get("mode") != "summary_only":
+    raise SystemExit("TaskState did not surface the expected compact selected desktop vision summary.")
+if desktop_evidence_snapshot.get("desktop", {}).get("latest_process_context", {}).get("process_name") != "notepad.exe":
+    raise SystemExit("TaskState did not surface the latest bounded desktop process context.")
 desktop_observation_text = desktop_state.get_observation()
 if "Selected desktop evidence assessment:" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact selected desktop evidence grounding lines.")
+if "Desktop process context: notepad.exe" not in desktop_observation_text:
+    raise SystemExit("TaskState.get_observation() did not include compact desktop process grounding lines.")
 
 desktop_checkpoint_summary_state = TaskState("desktop checkpoint evidence smoke")
 desktop_checkpoint_summary_state.update_memory_from_tool(
@@ -869,19 +956,27 @@ if checkpoint_snapshot.get("pending_approval", {}).get("evidence_preview", {}).g
     raise SystemExit("TaskState did not surface checkpoint-linked evidence in pending approval state.")
 if checkpoint_snapshot.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("TaskState did not surface checkpoint-linked evidence assessment in pending approval state.")
+if checkpoint_snapshot.get("pending_approval", {}).get("vision_preview", {}).get("mode") != "single_image":
+    raise SystemExit("TaskState did not surface checkpoint-linked bounded desktop vision context in pending approval state.")
 checkpoint_final_context = desktop_checkpoint_summary_state.get_final_context()
 if "Checkpoint desktop evidence assessment:" not in checkpoint_final_context:
     raise SystemExit("TaskState.get_final_context() did not include checkpoint desktop evidence grounding lines.")
+if "Checkpoint desktop vision:" not in checkpoint_final_context:
+    raise SystemExit("TaskState.get_final_context() did not include checkpoint desktop vision grounding lines.")
 
 status_payload = _status_payload(checkpoint_snapshot)
 if status_payload.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Local API status compaction did not expose checkpoint evidence assessment.")
 if status_payload.get("desktop", {}).get("checkpoint_evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Local API status compaction did not expose desktop checkpoint evidence assessment.")
+if status_payload.get("pending_approval", {}).get("vision_preview", {}).get("mode") != "single_image":
+    raise SystemExit("Local API status compaction did not expose bounded checkpoint desktop vision context.")
+if status_payload.get("desktop", {}).get("selected_vision", {}).get("mode") != "summary_only":
+    raise SystemExit("Local API status compaction did not expose bounded selected desktop vision context.")
 
 
 class _DesktopApprovalStubLLM:
-    def finalize(self, goal, steps, observation="", final_context=""):
+    def finalize(self, goal, steps, observation="", final_context="", **kwargs):
         return "desktop approval stub"
 
 
@@ -1380,7 +1475,15 @@ if not str(project_venv_python).lower().endswith(".venv\\scripts\\python.exe"):
     raise SystemExit("live_agent_eval did not resolve the expected project venv Python path.")
 if not _interpreter_has_playwright(project_venv_python):
     raise SystemExit("live_agent_eval did not detect Playwright in the project venv runtime.")
-for expected_scenario in {"outcome_style_corpus", "continuity_quality", "brief_answer_quality", "desktop_evidence_grounding", "desktop_recovery_grounding"}:
+for expected_scenario in {
+    "outcome_style_corpus",
+    "continuity_quality",
+    "brief_answer_quality",
+    "desktop_control",
+    "desktop_evidence_grounding",
+    "desktop_recovery_grounding",
+    "desktop_bounded_stack",
+}:
     if expected_scenario not in SCENARIO_NAMES:
         raise SystemExit(f"live_agent_eval is missing the expected scenario: {expected_scenario}")
 hidden_phase_checks = _desktop_hidden_recovery_checks(
@@ -1413,6 +1516,8 @@ if "focus_request_path" not in live_eval_source or "def request_focus(" not in l
     raise SystemExit("live_agent_eval is missing the expected desktop fixture focus-request harness support.")
 if "command_request_path" not in live_eval_source or "def request_command(" not in live_eval_source or "def _handle_command(" not in live_eval_source:
     raise SystemExit("live_agent_eval is missing the expected desktop fixture recovery command harness support.")
+if "vision_selected_direct_image" not in live_eval_source or "desktop_bounded_stack" not in live_eval_source or "desktop_press_key" not in live_eval_source:
+    raise SystemExit("live_agent_eval is missing the expected bounded desktop-stack validation coverage for direct image reasoning or keyboard approvals.")
 if _latest_new_run([{"run_id": "run-one"}], [{"run_id": "run-one"}]) != {}:
     raise SystemExit("_latest_new_run() did not return an empty mapping when no new run was created for a follow-up chat turn.")
 no_run_checks = _golden_final_answer_checks(
@@ -1690,7 +1795,7 @@ if temp_chat_path.exists():
 
 
 class _FakeChatClient:
-    def reply_in_chat(self, user_message, *, session_context="", mode="chat"):
+    def reply_in_chat(self, user_message, *, session_context="", mode="chat", desktop_vision=None):
         return f"[{mode}] {user_message}"
 
 

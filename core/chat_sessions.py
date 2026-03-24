@@ -14,6 +14,7 @@ from core.operator_behavior import (
     CHAT_MODE_FINAL,
     CHAT_MODE_NORMAL,
     CHAT_MODE_PAUSED,
+    CHAT_MODE_WORKFLOW,
     SESSION_ACTIVE_STATUSES,
     SESSION_TERMINAL_STATUSES,
     classify_chat_turn,
@@ -677,11 +678,30 @@ class ChatSessionManager:
 
     def _direct_reply_locked(self, session: Dict[str, Any], snapshot: Dict[str, Any], latest_message: str, route: Dict[str, str]) -> str:
         session_context = self._chat_context_lines_locked(session, snapshot, latest_message, route)
+        desktop_vision: Dict[str, Any] = {}
+        try:
+            desktop = snapshot.get("desktop", {}) if isinstance(snapshot.get("desktop", {}), dict) else {}
+            from core.desktop_evidence import get_desktop_evidence_store
+
+            store = get_desktop_evidence_store()
+            desktop_vision = store.select_vision_context(
+                selected_summary=desktop.get("selected_evidence", {}),
+                checkpoint_summary=desktop.get("checkpoint_evidence", {}),
+                recent_summaries=desktop.get("recent_context_evidence", []),
+                purpose="desktop_approval" if str(route.get("mode", "")).strip() == CHAT_MODE_APPROVAL else "desktop_investigation",
+                prompt_text=latest_message,
+                assessment=desktop.get("selected_evidence_assessment", {}),
+                checkpoint_assessment=desktop.get("checkpoint_evidence_assessment", {}),
+                prefer_before_after=True,
+            )
+        except Exception:
+            desktop_vision = {}
         try:
             reply = self._get_chat_client_locked().reply_in_chat(
                 latest_message,
                 session_context=session_context,
                 mode=route.get("mode", "chat"),
+                desktop_vision=desktop_vision,
             )
         except Exception:
             reply = self._fallback_chat_reply_locked(session, snapshot, route)

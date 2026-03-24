@@ -61,6 +61,11 @@ BACKEND_REASON_CODES = {
     "shown",
     "retrying",
     "duplicate_frame",
+    "summary_only",
+    "direct_image_needed",
+    "image_selected",
+    "image_pair_selected",
+    "vision_required",
     "error",
 }
 
@@ -445,6 +450,67 @@ def normalize_desktop_evidence_artifact(value: Dict[str, Any] | None) -> Dict[st
         "content_path": _trim_text(value.get("content_path", ""), limit=240),
         "bundle_path": _trim_text(value.get("bundle_path", ""), limit=320),
         "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_process_context(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    return {
+        "pid": _coerce_int(value.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(value.get("process_name", ""), limit=120),
+        "status": _trim_text(value.get("status", ""), limit=60),
+        "exe": _trim_text(value.get("exe", ""), limit=320),
+        "parent_pid": _coerce_int(value.get("parent_pid", 0), 0, minimum=0, maximum=10_000_000),
+        "parent_name": _trim_text(value.get("parent_name", ""), limit=120),
+        "present": _coerce_bool(value.get("present", False), False),
+        "running": _coerce_bool(value.get("running", False), False),
+        "background_candidate": _coerce_bool(value.get("background_candidate", False), False),
+        "backend": _trim_text(value.get("backend", ""), limit=60),
+        "reason": _normalize_reason(value.get("reason", "inspected"), default="inspected"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_vision_image(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    role = _trim_text(value.get("role", ""), limit=40).lower() or "selected"
+    if role not in {"selected", "checkpoint", "current", "before", "after", "important", "recent"}:
+        role = "selected"
+    return {
+        "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
+        "role": role,
+        "selection_reason": _trim_text(value.get("selection_reason", ""), limit=60),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "screenshot_scope": _trim_text(value.get("screenshot_scope", ""), limit=60),
+        "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
+        "artifact_available": _coerce_bool(value.get("artifact_available", False), False),
+        "artifact_path": _trim_text(value.get("artifact_path", ""), limit=320),
+        "artifact_type": _trim_text(value.get("artifact_type", ""), limit=80),
+        "availability_state": _trim_text(value.get("availability_state", ""), limit=40).lower() or "unavailable",
+    }
+
+
+def normalize_desktop_vision_context(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    mode = _trim_text(value.get("mode", ""), limit=40).lower() or "summary_only"
+    if mode not in {"summary_only", "single_image", "before_after_pair"}:
+        mode = "summary_only"
+    images = [
+        normalize_desktop_vision_image(item)
+        for item in list(value.get("images", []))[:2]
+        if isinstance(item, dict)
+    ]
+    return {
+        "purpose": _trim_text(value.get("purpose", ""), limit=60),
+        "mode": mode,
+        "needs_direct_image": _coerce_bool(value.get("needs_direct_image", False), False),
+        "reason": _normalize_reason(value.get("reason", "summary_only"), default="summary_only"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+        "image_count": _coerce_int(value.get("image_count", len(images)), len(images), minimum=0, maximum=2),
+        "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
+        "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
+        "images": images,
     }
 
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import re
+from pathlib import Path
 
 import requests
 
@@ -77,6 +80,62 @@ def _extract_first_section_item(final_context: str, heading: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _desktop_vision_requested(vision: dict | None) -> bool:
+    return bool(isinstance(vision, dict) and vision.get("needs_direct_image", False) and isinstance(vision.get("images", []), list))
+
+
+def _image_data_url(path_text: str) -> str:
+    path = Path(str(path_text or "").strip())
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        payload = path.read_bytes()
+    except Exception:
+        return ""
+    if not payload:
+        return ""
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _content_with_desktop_vision(text: str, desktop_vision: dict | None):
+    if not _desktop_vision_requested(desktop_vision):
+        return text
+
+    images = []
+    image_lines = []
+    for index, item in enumerate(list(desktop_vision.get("images", []))[:2]):
+        if not isinstance(item, dict):
+            continue
+        data_url = _image_data_url(item.get("artifact_path", ""))
+        if not data_url:
+            continue
+        role = str(item.get("role", "")).strip() or f"image {index + 1}"
+        detail = str(item.get("summary", "") or item.get("active_window_title", "")).strip()
+        image_lines.append(f"- Attached desktop image {index + 1} ({role}): {detail or 'selected screenshot evidence'}")
+        images.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                    "detail": "low",
+                },
+            }
+        )
+
+    if not images:
+        return text
+
+    guidance = str(desktop_vision.get("summary", "")).strip()
+    combined_text = str(text or "").strip()
+    if guidance:
+        combined_text += ("\n\n" if combined_text else "") + f"Desktop vision guidance:\n{guidance}"
+    if image_lines:
+        combined_text += ("\n\n" if combined_text else "") + "Bounded attached desktop image evidence:\n" + "\n".join(image_lines)
+    return [{"type": "text", "text": combined_text}, *images]
 
 
 def _extract_outcome_state(final_context: str) -> str:
@@ -563,17 +622,23 @@ class HostedLLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        has_images = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "image_url" for part in message.get("content", []))
+            for message in messages
+            if isinstance(message, dict)
+        )
 
         r = requests.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60,
+            timeout=120 if has_images else 60,
         )
         r.raise_for_status()
         return r.json()
 
-    def plan_next_action(self, goal, observation, tools):
+    def plan_next_action(self, goal, observation, tools, *, desktop_vision=None):
         messages = [
             {
                 "role": "developer",
@@ -599,6 +664,8 @@ class HostedLLMClient:
                     "Use desktop_focus_window for normal bounded focus, desktop_recover_window when the target needs restore/show/refocus recovery, and desktop_wait_for_window_ready when the window exists but still looks loading, not ready, or visually unstable. "
                     "desktop_capture_screenshot only captures bounded state; it does not interpret pixels or do OCR. "
                     "Use the Selected desktop evidence and Checkpoint desktop evidence lines in the observation as the authoritative compact grounding for desktop reasoning; do not ignore them or invent a second desktop state narrative. "
+                    "When bounded desktop image evidence is attached, treat it as the authoritative direct visual grounding for the selected desktop window or checkpoint. "
+                    "Use attached images only when compact summaries are not enough, and do not ask for another identical screenshot if the attached image already answers the desktop question. "
                     "If the selected desktop evidence assessment says the current evidence is sufficient for a read-only desktop answer, answer from that evidence instead of collecting another identical observation. "
                     "If the desktop evidence assessment says refresh is needed before a desktop action, collect one fresh desktop observation or screenshot before planning the paused desktop action. Do not loop on repeated refreshes. "
                     "When a paused desktop approval exists, ground the approval explanation in the linked checkpoint desktop evidence summary and assessment. "
@@ -643,7 +710,10 @@ class HostedLLMClient:
             },
             {
                 "role": "user",
-                "content": f"Goal:\n{goal}\n\nObservation:\n{observation}",
+                "content": _content_with_desktop_vision(
+                    f"Goal:\n{goal}\n\nObservation:\n{observation}",
+                    desktop_vision,
+                ),
             },
         ]
 
@@ -674,7 +744,7 @@ class HostedLLMClient:
 
         return {"tool": name, "args": args}
 
-    def reply_in_chat(self, user_message, *, session_context="", mode="chat"):
+    def reply_in_chat(self, user_message, *, session_context="", mode="chat", desktop_vision=None):
         messages = [
             {
                 "role": "developer",
@@ -693,6 +763,7 @@ class HostedLLMClient:
                     "If the user asks what the most important next step is after finished or interrupted work, give one primary recommendation grounded in the provided context instead of a long list. "
                     "If approval is required, make that explicit and brief, and tell the user exactly what decision is blocking progress. "
                     "If a desktop approval or desktop investigation context includes compact evidence summary lines, use that evidence compactly instead of vague desktop narration. "
+                    "When bounded desktop image evidence is attached, use it as the direct visual grounding for the current desktop reply instead of speculating from text alone. "
                     "If the mode is final_report, answer from the completed work as one authoritative reply rather than a stream of status updates. "
                     "Do not claim you started, applied, approved, clicked, typed, or changed anything unless the provided context explicitly says it already happened. "
                     "Keep the response calm and conversation-first. Avoid headings unless they clearly help."
@@ -700,17 +771,20 @@ class HostedLLMClient:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Reply mode: {mode}\n\n"
-                    f"Session Context:\n{session_context}\n\n"
-                    f"Latest User Message:\n{user_message}"
+                "content": _content_with_desktop_vision(
+                    (
+                        f"Reply mode: {mode}\n\n"
+                        f"Session Context:\n{session_context}\n\n"
+                        f"Latest User Message:\n{user_message}"
+                    ),
+                    desktop_vision,
                 ),
             },
         ]
         data = self._call(messages)
         return data["choices"][0]["message"]["content"].strip()
 
-    def finalize(self, goal, steps, observation="", final_context=""):
+    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None):
         messages = [
             {
                 "role": "developer",
@@ -741,6 +815,7 @@ class HostedLLMClient:
                     "Never imply blocked or paused browser actions succeeded; state clearly what was observed, clicked, typed, followed, paused pending approval, resumed after approval, or blocked pending approval. "
                     "Never imply paused or rejected desktop actions succeeded; state clearly what windows were inspected, which window was focused, whether a screenshot was captured, and whether a desktop click or type action was approved, executed, blocked, or rejected. "
                     "When compact desktop evidence summaries or desktop evidence assessment lines are present, use them to ground desktop-related conclusions and approval explanations in one or two calm sentences instead of vague desktop prose. "
+                    "When bounded desktop image evidence is attached, use it as the direct visual grounding for desktop conclusions, changed-state interpretation, and approval explanations instead of pretending the summaries alone proved everything. "
                     "If desktop evidence was sufficient, say what evidence you relied on in compact form when that materially improves trust. If desktop evidence was partial, stale, or missing, say that clearly without implying the desktop state is fully confirmed. "
                     "When browser task-library or workflow state is present, summarize it cleanly instead of dumping internal labels. "
                     "Use markdown sparingly and only when it improves scanability."
@@ -748,11 +823,14 @@ class HostedLLMClient:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Goal:\n{goal}\n\n"
-                    f"Final Context:\n{final_context}\n\n"
-                    f"Observation:\n{observation}\n\n"
-                    f"Steps:\n{json.dumps(steps, indent=2, ensure_ascii=False)}"
+                "content": _content_with_desktop_vision(
+                    (
+                        f"Goal:\n{goal}\n\n"
+                        f"Final Context:\n{final_context}\n\n"
+                        f"Observation:\n{observation}\n\n"
+                        f"Steps:\n{json.dumps(steps, indent=2, ensure_ascii=False)}"
+                    ),
+                    desktop_vision,
                 ),
             },
         ]

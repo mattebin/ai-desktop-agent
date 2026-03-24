@@ -127,6 +127,12 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "sufficient": bool(desktop.get("selected_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(desktop.get("selected_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
         },
+        "selected_vision": {
+            "mode": _trim_text(desktop.get("selected_vision", {}).get("mode", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_vision", {}).get("reason", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_vision", {}).get("summary", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=220),
+            "needs_direct_image": bool(desktop.get("selected_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("selected_vision", {}), dict) else False,
+        },
         "checkpoint_evidence": {
             "evidence_id": _trim_text(desktop.get("checkpoint_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=80),
             "summary": _trim_text(desktop.get("checkpoint_evidence", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=220),
@@ -139,6 +145,12 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "summary": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=220),
             "sufficient": bool(desktop.get("checkpoint_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
             "needs_refresh": bool(desktop.get("checkpoint_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
+        },
+        "checkpoint_vision": {
+            "mode": _trim_text(desktop.get("checkpoint_vision", {}).get("mode", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_vision", {}).get("reason", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_vision", {}).get("summary", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=220),
+            "needs_direct_image": bool(desktop.get("checkpoint_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("checkpoint_vision", {}), dict) else False,
         },
         "latest_recovery": {
             "state": _trim_text(desktop.get("latest_recovery", {}).get("state", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=40),
@@ -155,6 +167,12 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "state": _trim_text(desktop.get("latest_visual_stability", {}).get("state", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=40),
             "reason": _trim_text(desktop.get("latest_visual_stability", {}).get("reason", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=60),
             "summary": _trim_text(desktop.get("latest_visual_stability", {}).get("summary", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=220),
+        },
+        "latest_process_context": {
+            "process_name": _trim_text(desktop.get("latest_process_context", {}).get("process_name", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=120),
+            "status": _trim_text(desktop.get("latest_process_context", {}).get("status", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=60),
+            "running": bool(desktop.get("latest_process_context", {}).get("running", False)) if isinstance(desktop.get("latest_process_context", {}), dict) else False,
+            "summary": _trim_text(desktop.get("latest_process_context", {}).get("summary", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=220),
         },
     }
 

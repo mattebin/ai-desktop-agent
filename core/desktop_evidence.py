@@ -13,6 +13,8 @@ from core.backend_schemas import (
     normalize_desktop_evidence_assessment,
     normalize_desktop_evidence_artifact,
     normalize_desktop_evidence_summary,
+    normalize_desktop_vision_context,
+    normalize_desktop_vision_image,
     normalize_screen_observation,
     normalize_screenshot_observation,
     normalize_ui_evidence_observation,
@@ -567,6 +569,209 @@ def describe_evidence_artifact(
     )
 
 
+def _artifact_available_from_summary(summary: Dict[str, Any] | None) -> bool:
+    summary = summary if isinstance(summary, dict) else {}
+    artifact_path = _trim_text(summary.get("screenshot_path", ""), limit=320)
+    if not artifact_path:
+        return False
+    try:
+        candidate = Path(artifact_path)
+        return candidate.exists() and candidate.is_file()
+    except Exception:
+        return False
+
+
+def _vision_image_from_summary(summary: Dict[str, Any] | None, *, role: str, selection_reason: str) -> Dict[str, Any]:
+    summary = normalize_desktop_evidence_summary(summary if isinstance(summary, dict) else {})
+    artifact_path = _trim_text(summary.get("screenshot_path", ""), limit=320)
+    artifact_available = _artifact_available_from_summary(summary)
+    artifact_type = _trim_text(mimetypes.guess_type(artifact_path)[0] or "image/png", limit=80) if artifact_path else ""
+    return normalize_desktop_vision_image(
+        {
+            "evidence_id": summary.get("evidence_id", ""),
+            "role": role,
+            "selection_reason": selection_reason,
+            "summary": summary.get("summary", ""),
+            "active_window_title": summary.get("active_window_title", ""),
+            "screenshot_scope": summary.get("screenshot_scope", ""),
+            "timestamp": summary.get("timestamp", ""),
+            "artifact_available": artifact_available,
+            "artifact_path": artifact_path,
+            "artifact_type": artifact_type,
+            "availability_state": "available" if artifact_available else ("pruned" if artifact_path else "unavailable"),
+        }
+    )
+
+
+def _desktop_visual_goal(prompt_text: str) -> bool:
+    lowered = str(prompt_text or "").strip().lower()
+    if not lowered:
+        return False
+    phrases = (
+        "what do you see",
+        "look like",
+        "looks like",
+        "what is on",
+        "what's on",
+        "button",
+        "field label",
+        "entry label",
+        "icon",
+        "dialog",
+        "color",
+        "theme",
+        "appearance",
+        "visual",
+        "screen",
+        "screenshot",
+        "image",
+        "read the",
+        "text on",
+        "visible text",
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _desktop_changed_state_goal(prompt_text: str) -> bool:
+    lowered = str(prompt_text or "").strip().lower()
+    if not lowered:
+        return False
+    phrases = (
+        "changed",
+        "different",
+        "before",
+        "after",
+        "compare",
+        "what happened",
+        "loading",
+        "unstable",
+        "settling",
+        "stabilizing",
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def select_desktop_vision_context(
+    *,
+    selected_summary: Dict[str, Any] | None = None,
+    checkpoint_summary: Dict[str, Any] | None = None,
+    recent_summaries: Iterable[Dict[str, Any]] | None = None,
+    purpose: str = "desktop_investigation",
+    prompt_text: str = "",
+    assessment: Dict[str, Any] | None = None,
+    checkpoint_assessment: Dict[str, Any] | None = None,
+    prefer_before_after: bool = False,
+) -> Dict[str, Any]:
+    selected = normalize_desktop_evidence_summary(selected_summary if isinstance(selected_summary, dict) else {})
+    checkpoint = normalize_desktop_evidence_summary(checkpoint_summary if isinstance(checkpoint_summary, dict) else {})
+    assessment = normalize_desktop_evidence_assessment(assessment if isinstance(assessment, dict) else {})
+    checkpoint_assessment = normalize_desktop_evidence_assessment(checkpoint_assessment if isinstance(checkpoint_assessment, dict) else {})
+    recents = [
+        normalize_desktop_evidence_summary(item)
+        for item in list(recent_summaries or [])
+        if isinstance(item, dict)
+    ]
+    prompt_lower = str(prompt_text or "").strip().lower()
+    purpose_text = _trim_text(purpose or "desktop_investigation", limit=60).lower() or "desktop_investigation"
+
+    def _artifact_summary(summary: Dict[str, Any]) -> bool:
+        return bool(summary.get("has_artifact", False) and _artifact_available_from_summary(summary))
+
+    primary = checkpoint if purpose_text == "desktop_approval" and checkpoint.get("evidence_id") else selected
+    if not primary.get("evidence_id") and checkpoint.get("evidence_id"):
+        primary = checkpoint
+    if not primary.get("evidence_id"):
+        for item in recents:
+            if item.get("evidence_id"):
+                primary = item
+                break
+
+    visual_goal = _desktop_visual_goal(prompt_lower)
+    changed_state_goal = prefer_before_after or _desktop_changed_state_goal(prompt_lower)
+    image_required = False
+    reason = "summary_only"
+    summary_text = "Compact desktop evidence summaries were sufficient for this desktop turn."
+
+    if purpose_text in {"desktop_approval", "desktop_action_prepare"}:
+        if _artifact_summary(checkpoint if checkpoint.get("evidence_id") else primary):
+            image_required = True
+            reason = "direct_image_needed"
+            summary_text = "Attached the most relevant screenshot-backed desktop evidence to ground the pending bounded desktop action."
+            primary = checkpoint if checkpoint.get("evidence_id") else primary
+    elif visual_goal and _artifact_summary(primary):
+        image_required = True
+        reason = "direct_image_needed"
+        summary_text = "Attached the most relevant current desktop screenshot because the request depends on visible UI details."
+    elif changed_state_goal and _artifact_summary(primary):
+        image_required = True
+        reason = "direct_image_needed"
+        summary_text = "Attached the most relevant screenshot-backed desktop evidence because the request depends on changed desktop state."
+    elif assessment.get("reason") in {"partial_but_answerable", "partial_evidence"} and _artifact_summary(primary):
+        image_required = True
+        reason = "direct_image_needed"
+        summary_text = "Attached the most relevant screenshot because compact metadata alone was only partially conclusive."
+
+    images: List[Dict[str, Any]] = []
+    primary_reason = "checkpoint" if primary.get("evidence_id") == checkpoint.get("evidence_id") and checkpoint.get("evidence_id") else "selected"
+    if image_required and _artifact_summary(primary):
+        role = "checkpoint" if primary_reason == "checkpoint" else "current"
+        images.append(_vision_image_from_summary(primary, role=role, selection_reason=primary_reason))
+
+    if changed_state_goal and images:
+        comparison_candidates = []
+        primary_id = str(primary.get("evidence_id", "")).strip()
+        primary_title = str(primary.get("active_window_title", "")).strip().lower()
+        for item in recents:
+            evidence_id = str(item.get("evidence_id", "")).strip()
+            if not evidence_id or evidence_id == primary_id or not _artifact_summary(item):
+                continue
+            title = str(item.get("active_window_title", "")).strip().lower()
+            score = _importance_rank(item)
+            if primary_title and title and (primary_title in title or title in primary_title):
+                score += 4
+            comparison_candidates.append(
+                (
+                    score,
+                    -int(item.get("recency_seconds", 0) or 0),
+                    item,
+                )
+            )
+        comparison_candidates.sort(reverse=True)
+        if comparison_candidates:
+            before_item = comparison_candidates[0][2]
+            images = [
+                _vision_image_from_summary(before_item, role="before", selection_reason="recent_context"),
+                _vision_image_from_summary(primary, role="after", selection_reason=primary_reason),
+            ]
+            reason = "image_pair_selected"
+            summary_text = "Attached a bounded before/after screenshot pair because the desktop turn depends on changed visual state."
+
+    mode = "summary_only"
+    if len(images) >= 2:
+        mode = "before_after_pair"
+    elif images:
+        mode = "single_image"
+
+    if purpose_text == "desktop_approval" and checkpoint_assessment.get("summary") and not images:
+        summary_text = checkpoint_assessment.get("summary", "") or summary_text
+    elif assessment.get("summary") and not images:
+        summary_text = assessment.get("summary", "") or summary_text
+
+    return normalize_desktop_vision_context(
+        {
+            "purpose": purpose_text,
+            "mode": mode,
+            "needs_direct_image": bool(images),
+            "reason": reason if images else "summary_only",
+            "summary": summary_text,
+            "image_count": len(images),
+            "primary_evidence_id": primary.get("evidence_id", ""),
+            "comparison_evidence_id": images[0].get("evidence_id", "") if len(images) >= 2 else "",
+            "images": images,
+        }
+    )
+
+
 def _title_match_score(summary: Dict[str, Any], text: str) -> int:
     query = " ".join(str(text or "").lower().split())
     if not query:
@@ -1110,6 +1315,29 @@ class DesktopEvidenceStore:
             observation_token=observation_token,
             active_window_title=active_window_title,
             target_window_title=target_window_title,
+        )
+
+    def select_vision_context(
+        self,
+        *,
+        selected_summary: Dict[str, Any] | None = None,
+        checkpoint_summary: Dict[str, Any] | None = None,
+        recent_summaries: Iterable[Dict[str, Any]] | None = None,
+        purpose: str = "desktop_investigation",
+        prompt_text: str = "",
+        assessment: Dict[str, Any] | None = None,
+        checkpoint_assessment: Dict[str, Any] | None = None,
+        prefer_before_after: bool = False,
+    ) -> Dict[str, Any]:
+        return select_desktop_vision_context(
+            selected_summary=selected_summary,
+            checkpoint_summary=checkpoint_summary,
+            recent_summaries=recent_summaries,
+            purpose=purpose,
+            prompt_text=prompt_text,
+            assessment=assessment,
+            checkpoint_assessment=checkpoint_assessment,
+            prefer_before_after=prefer_before_after,
         )
 
     def assess_summary(

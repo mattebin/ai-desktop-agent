@@ -1197,6 +1197,11 @@ class ExecutionManager:
                 state.steps,
                 state.get_observation(),
                 state.get_final_context(),
+                desktop_vision=state.get_desktop_vision_context(
+                    purpose="desktop_final",
+                    prompt_text=state.goal,
+                    prefer_before_after=True,
+                ),
             )
         except Exception:
             rendered = ""

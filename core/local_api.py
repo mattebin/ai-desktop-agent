@@ -133,6 +133,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
             "evidence_preview": _compact_evidence_payload(pending.get("evidence_preview", {})),
             "evidence_assessment": _compact_evidence_assessment(pending.get("evidence_assessment", {})),
+            "vision_preview": _compact_vision_payload(pending.get("vision_preview", {})),
         },
         "active_task": snapshot.get("active_task", {}),
         "browser": {
@@ -160,8 +161,10 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
             "selected_evidence": _compact_evidence_payload(desktop.get("selected_evidence", {})),
             "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
+            "selected_vision": _compact_vision_payload(desktop.get("selected_vision", {})),
             "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
             "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
+            "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
             "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
         "queue_counts": queue.get("counts", {}),
@@ -260,6 +263,33 @@ def _compact_evidence_assessment(value: Dict[str, Any] | None) -> Dict[str, Any]
         "is_partial": bool(assessment.get("is_partial", False)),
         "recency_seconds": _coerce_int(assessment.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
         "stale": bool(assessment.get("stale", False)),
+    }
+
+
+def _compact_vision_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    vision = value if isinstance(value, dict) else {}
+    images = []
+    for item in list(vision.get("images", []))[:2]:
+        if not isinstance(item, dict):
+            continue
+        images.append(
+            {
+                "evidence_id": _trim_text(item.get("evidence_id", ""), limit=80),
+                "role": _trim_text(item.get("role", ""), limit=40),
+                "summary": _trim_text(item.get("summary", ""), limit=180),
+                "artifact_available": bool(item.get("artifact_available", False)),
+            }
+        )
+    return {
+        "purpose": _trim_text(vision.get("purpose", ""), limit=60),
+        "mode": _trim_text(vision.get("mode", ""), limit=40),
+        "reason": _trim_text(vision.get("reason", ""), limit=40),
+        "summary": _trim_text(vision.get("summary", ""), limit=220),
+        "needs_direct_image": bool(vision.get("needs_direct_image", False)),
+        "image_count": _coerce_int(vision.get("image_count", len(images)), len(images), minimum=0, maximum=2),
+        "primary_evidence_id": _trim_text(vision.get("primary_evidence_id", ""), limit=80),
+        "comparison_evidence_id": _trim_text(vision.get("comparison_evidence_id", ""), limit=80),
+        "images": images,
     }
 
 

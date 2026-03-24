@@ -54,6 +54,11 @@ def _finalize_message(llm, task_state) -> str:
         task_state.steps,
         task_state.get_observation(),
         task_state.get_final_context(),
+        desktop_vision=task_state.get_desktop_vision_context(
+            purpose="desktop_final",
+            prompt_text=task_state.goal,
+            prefer_before_after=True,
+        ),
     )
 
 
@@ -489,6 +494,43 @@ def _goal_desktop_key_request(goal: str) -> dict | None:
     if modifiers and len(modifiers) != len(parts) - 1:
         return None
     return {"key": key, "modifiers": modifiers, "repeat": 1}
+
+
+def _goal_is_desktop_related(goal: str, task_state) -> bool:
+    lowered = str(goal or "").strip().lower()
+    if any(
+        term in lowered
+        for term in (
+            "desktop",
+            "window",
+            "foreground",
+            "active window",
+            "screenshot",
+            "click",
+            "type",
+            "press",
+            "focus",
+            "hidden",
+            "minimized",
+            "tray",
+            "loading",
+            "unstable",
+        )
+    ):
+        return True
+    return bool(
+        getattr(task_state, "desktop_observation_token", "")
+        or getattr(task_state, "desktop_last_evidence_id", "")
+        or getattr(task_state, "desktop_checkpoint_pending", False)
+    )
+
+
+def _desktop_vision_purpose(goal: str, task_state) -> str:
+    if getattr(task_state, "desktop_checkpoint_pending", False):
+        return "desktop_approval"
+    if _goal_desktop_click_point(goal) is not None or _goal_desktop_key_request(goal) is not None or _goal_desktop_type_request(goal) is not None:
+        return "desktop_action_prepare"
+    return "desktop_investigation"
 
 
 def _desktop_has_inspection_context(task_state) -> bool:
@@ -1291,10 +1333,20 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             continue
 
         observation = task_state.get_observation()
+        desktop_vision = (
+            task_state.get_desktop_vision_context(
+                purpose=_desktop_vision_purpose(planner_goal, task_state),
+                prompt_text=planner_goal,
+                prefer_before_after=True,
+            )
+            if _goal_is_desktop_related(planner_goal, task_state)
+            else {}
+        )
         plan = llm.plan_next_action(
             planner_goal,
             observation,
             tool_runtime.planner_tools(),
+            desktop_vision=desktop_vision,
         )
 
         if plan.get("done"):

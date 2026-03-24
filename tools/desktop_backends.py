@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from core.backend_schemas import (
     backend_status,
+    normalize_desktop_process_context,
     normalize_desktop_visual_stability,
     normalize_desktop_window_readiness,
     normalize_screenshot_observation,
@@ -33,6 +34,11 @@ try:
     from pywinauto import Desktop as PyWinAutoDesktop
 except Exception:
     PyWinAutoDesktop = None  # type: ignore[assignment]
+
+try:
+    import psutil
+except Exception:
+    psutil = None  # type: ignore[assignment]
 
 
 WindowListDelegate = Callable[..., List[Dict[str, Any]]]
@@ -103,6 +109,126 @@ def _hex_hwnd(value: Any) -> str:
         return f"0x{int(value or 0):08X}"
     except Exception:
         return ""
+
+
+def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, Any]:
+    normalized_name = _trim_text(process_name, limit=120)
+    normalized_pid = _coerce_int(pid, 0, minimum=0, maximum=10_000_000)
+    if psutil is None:
+        context = normalize_desktop_process_context(
+            {
+                "pid": normalized_pid,
+                "process_name": normalized_name,
+                "present": False,
+                "running": False,
+                "background_candidate": False,
+                "backend": "stub",
+                "reason": "unsupported",
+                "summary": "Process diagnostics are unavailable because psutil is not active.",
+            }
+        )
+        return result_envelope(
+            "desktop_process_context",
+            ok=False,
+            backend="stub",
+            reason="unsupported",
+            message=context.get("summary", ""),
+            error="psutil is not available.",
+            data=context,
+        )
+
+    process = None
+    if normalized_pid > 0:
+        try:
+            process = psutil.Process(normalized_pid)
+        except Exception:
+            process = None
+    elif normalized_name:
+        try:
+            lowered = normalized_name.lower()
+            for item in psutil.process_iter(["pid", "name", "status", "ppid"]):
+                try:
+                    name = str(item.info.get("name", "") or "").strip()
+                except Exception:
+                    name = ""
+                if name and name.lower() == lowered:
+                    process = item
+                    break
+        except Exception:
+            process = None
+
+    if process is None:
+        context = normalize_desktop_process_context(
+            {
+                "pid": normalized_pid,
+                "process_name": normalized_name,
+                "present": False,
+                "running": False,
+                "background_candidate": False,
+                "backend": "psutil",
+                "reason": "target_not_found",
+                "summary": "No matching desktop process was available for bounded diagnostics.",
+            }
+        )
+        return result_envelope(
+            "desktop_process_context",
+            ok=False,
+            backend="psutil",
+            reason="target_not_found",
+            message=context.get("summary", ""),
+            error="No matching desktop process was available.",
+            data=context,
+        )
+
+    try:
+        status = _trim_text(process.status(), limit=60)
+    except Exception:
+        status = ""
+    try:
+        name = _trim_text(process.name(), limit=120)
+    except Exception:
+        name = normalized_name
+    try:
+        exe = _trim_text(process.exe(), limit=320)
+    except Exception:
+        exe = ""
+    try:
+        running = bool(process.is_running()) and status.lower() != "zombie"
+    except Exception:
+        running = False
+    try:
+        parent = process.parent()
+    except Exception:
+        parent = None
+    background_candidate = running and status.lower() in {"sleeping", "idle", "stopped"}
+    context = normalize_desktop_process_context(
+        {
+            "pid": int(getattr(process, "pid", normalized_pid) or normalized_pid),
+            "process_name": name or normalized_name,
+            "status": status,
+            "exe": exe,
+            "parent_pid": int(getattr(parent, "pid", 0) or 0) if parent is not None else 0,
+            "parent_name": _trim_text(parent.name(), limit=120) if parent is not None else "",
+            "present": True,
+            "running": running,
+            "background_candidate": background_candidate,
+            "backend": "psutil",
+            "reason": "inspected",
+            "summary": (
+                f"Process '{name or normalized_name or 'unknown'}' is running with status '{status or 'unknown'}'."
+                if running
+                else f"Process '{name or normalized_name or 'unknown'}' is present but does not look runnable."
+            ),
+        }
+    )
+    return result_envelope(
+        "desktop_process_context",
+        ok=running,
+        backend="psutil",
+        reason="inspected",
+        message=context.get("summary", ""),
+        data=context,
+    )
 
 
 class NativeWindowBackend:
@@ -873,5 +999,6 @@ def describe_backends(
             "window_strategies": ["restore_then_focus", "show_then_focus", "focus_then_verify", "wait_for_readiness"],
             "readiness_backend": "pywinauto" if PyWinAutoDesktop is not None else "stub",
             "visual_stability_backend": "mss" if mss is not None else "stub",
+            "process_backend": "psutil" if psutil is not None else "stub",
         },
     }

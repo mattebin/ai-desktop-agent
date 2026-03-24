@@ -7,3 +7,4 @@ watchdog
 PyWinCtl
 mss
 pywinauto
+psutil

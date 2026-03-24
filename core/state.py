@@ -86,6 +86,23 @@ def _desktop_evidence_context_lines(label: str, summary: Dict[str, Any], assessm
     return lines
 
 
+def _desktop_vision_context_lines(label: str, vision: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(vision, dict):
+        return lines
+    summary = str(vision.get("summary", "")).strip()
+    if summary:
+        lines.append(f"- {label} vision: {summary}")
+    for image in list(vision.get("images", []))[:2]:
+        if not isinstance(image, dict):
+            continue
+        role = str(image.get("role", "")).strip() or "selected"
+        detail = str(image.get("summary", "") or image.get("active_window_title", "")).strip()
+        if detail:
+            lines.append(f"- {label} vision image ({role}): {detail}")
+    return lines
+
+
 class TaskState:
     def __init__(
         self,
@@ -958,6 +975,7 @@ class TaskState:
         latest_recovery: Dict[str, Any] = {}
         latest_window_readiness: Dict[str, Any] = {}
         latest_visual_stability: Dict[str, Any] = {}
+        latest_process_context: Dict[str, Any] = {}
         for step in reversed(self.steps):
             tool_name = str(step.get("tool", "")).strip()
             if not tool_name.startswith("desktop_"):
@@ -988,8 +1006,18 @@ class TaskState:
                         "reason": str(stability.get("reason", "")).strip()[:60],
                         "summary": str(stability.get("summary", "")).strip()[:220],
                     }
+            if not latest_process_context:
+                process_context = result.get("process_context", {}) if isinstance(result.get("process_context", {}), dict) else {}
+                if process_context:
+                    latest_process_context = {
+                        "pid": int(process_context.get("pid", 0) or 0),
+                        "process_name": str(process_context.get("process_name", "")).strip()[:120],
+                        "status": str(process_context.get("status", "")).strip()[:60],
+                        "running": bool(process_context.get("running", False)),
+                        "summary": str(process_context.get("summary", "")).strip()[:220],
+                    }
             if step.get("status") not in {"failed", "paused"}:
-                if latest_recovery and latest_window_readiness and latest_visual_stability:
+                if latest_recovery and latest_window_readiness and latest_visual_stability and latest_process_context:
                     break
                 continue
             text = str(result.get("summary", "") or result.get("error", "")).strip()
@@ -997,7 +1025,7 @@ class TaskState:
                 continue
             uncertainties.append(text[:220])
             if len(uncertainties) >= 2:
-                if latest_recovery and latest_window_readiness and latest_visual_stability:
+                if latest_recovery and latest_window_readiness and latest_visual_stability and latest_process_context:
                     break
 
         selected_evidence: Dict[str, Any] = {}
@@ -1005,6 +1033,8 @@ class TaskState:
         selected_evidence_assessment: Dict[str, Any] = {}
         checkpoint_evidence_assessment: Dict[str, Any] = {}
         recent_context_evidence: List[Dict[str, Any]] = []
+        selected_vision: Dict[str, Any] = {}
+        checkpoint_vision: Dict[str, Any] = {}
         try:
             from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 
@@ -1043,12 +1073,34 @@ class TaskState:
                 active_window_title=self.desktop_active_window_title,
                 checkpoint_target=self.desktop_checkpoint_target or self.desktop_last_target_window,
             )
+            selected_vision = store.select_vision_context(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_investigation",
+                prompt_text="",
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                prefer_before_after=False,
+            )
+            checkpoint_vision = store.select_vision_context(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_approval",
+                prompt_text="",
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                prefer_before_after=False,
+            )
         except Exception:
             selected_evidence = {}
             checkpoint_evidence = {}
             selected_evidence_assessment = {}
             checkpoint_evidence_assessment = {}
             recent_context_evidence = []
+            selected_vision = {}
+            checkpoint_vision = {}
 
         return {
             "windows": self._normalize_values(self.desktop_windows[-limit:], limit=limit, text_limit=180),
@@ -1072,6 +1124,7 @@ class TaskState:
             "evidence_timestamp": self.desktop_last_evidence_timestamp[:40],
             "selected_evidence": selected_evidence,
             "selected_evidence_assessment": selected_evidence_assessment,
+            "selected_vision": selected_vision,
             "recent_context_evidence": recent_context_evidence,
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
@@ -1080,16 +1133,44 @@ class TaskState:
             "checkpoint_evidence_id": self.desktop_checkpoint_evidence_id[:80],
             "checkpoint_evidence": checkpoint_evidence,
             "checkpoint_evidence_assessment": checkpoint_evidence_assessment,
+            "checkpoint_vision": checkpoint_vision,
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
             "latest_recovery": latest_recovery,
             "latest_window_readiness": latest_window_readiness,
             "latest_visual_stability": latest_visual_stability,
+            "latest_process_context": latest_process_context,
             "uncertainties": uncertainties,
         }
 
         if recovery_summary:
             self._add_browser_workflow_recovery(f"{step_label}: {recovery_summary}")
+
+    def get_desktop_vision_context(
+        self,
+        *,
+        purpose: str = "desktop_investigation",
+        prompt_text: str = "",
+        prefer_before_after: bool = False,
+    ) -> Dict[str, Any]:
+        try:
+            from core.desktop_evidence import get_desktop_evidence_store
+
+            desktop_activity = self._collect_desktop_activity(limit=4)
+            store = get_desktop_evidence_store()
+            return store.select_vision_context(
+                selected_summary=desktop_activity.get("selected_evidence", {}),
+                checkpoint_summary=desktop_activity.get("checkpoint_evidence", {}),
+                recent_summaries=desktop_activity.get("recent_context_evidence", []),
+                purpose=purpose,
+                prompt_text=prompt_text,
+                assessment=desktop_activity.get("selected_evidence_assessment", {}),
+                checkpoint_assessment=desktop_activity.get("checkpoint_evidence_assessment", {}),
+                prefer_before_after=prefer_before_after,
+            )
+        except Exception:
+            return {}
+
     def _collect_browser_activity(self, limit: int = 4) -> Dict[str, Any]:
         actions = self._normalize_values(self.browser_recent_actions[-limit:], limit=limit, text_limit=220)
         recovery_notes = self._normalize_values(self.browser_recovery_notes[-3:], limit=3, text_limit=220)
@@ -1644,7 +1725,15 @@ class TaskState:
                 desktop_activity.get("checkpoint_evidence", {}),
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
             )
-            for line in evidence_grounding_lines + checkpoint_grounding_lines:
+            selected_vision_lines = _desktop_vision_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_vision", {}),
+            )
+            checkpoint_vision_lines = _desktop_vision_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_vision", {}),
+            )
+            for line in evidence_grounding_lines + checkpoint_grounding_lines + selected_vision_lines + checkpoint_vision_lines:
                 lines.append(line)
             recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
             if isinstance(recent_context_evidence, list) and recent_context_evidence:
@@ -2301,6 +2390,7 @@ class TaskState:
                 "evidence_summary": str(desktop_activity.get("checkpoint_evidence", {}).get("summary", "")).strip(),
                 "evidence_preview": desktop_activity.get("checkpoint_evidence", {}),
                 "evidence_assessment": desktop_activity.get("checkpoint_evidence_assessment", {}),
+                "vision_preview": desktop_activity.get("checkpoint_vision", {}),
                 "target_files": [],
             }
         elif (
@@ -2472,6 +2562,16 @@ class TaskState:
                 desktop_activity.get("checkpoint_evidence_assessment", {}),
             ):
                 lines.append(line)
+            for line in _desktop_vision_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_vision", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_vision_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_vision", {}),
+            ):
+                lines.append(line)
             recent_context_evidence = desktop_activity.get("recent_context_evidence", [])
             if isinstance(recent_context_evidence, list) and recent_context_evidence:
                 lines.append("Recent desktop context:")
@@ -2501,6 +2601,14 @@ class TaskState:
                 if latest_visual_stability.get("reason"):
                     stability_line += f" ({latest_visual_stability.get('reason', '')})"
                 lines.append(stability_line)
+            latest_process_context = desktop_activity.get("latest_process_context", {}) if isinstance(desktop_activity.get("latest_process_context", {}), dict) else {}
+            if latest_process_context.get("process_name"):
+                process_line = f"- Desktop process context: {latest_process_context.get('process_name', '')}"
+                if latest_process_context.get("status"):
+                    process_line += f" ({latest_process_context.get('status', '')})"
+                lines.append(process_line)
+                if latest_process_context.get("summary"):
+                    lines.append(f"- Desktop process summary: {latest_process_context.get('summary', '')}")
             if desktop_activity.get("actions"):
                 lines.append("Recent desktop actions:")
                 for action in desktop_activity.get("actions", [])[:4]:
