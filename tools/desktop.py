@@ -39,10 +39,12 @@ DESKTOP_TOOL_NAMES = {
     "desktop_recover_window",
     "desktop_wait_for_window_ready",
     "desktop_click_point",
+    "desktop_press_key",
     "desktop_type_text",
 }
 DESKTOP_APPROVAL_TOOL_NAMES = {
     "desktop_click_point",
+    "desktop_press_key",
     "desktop_type_text",
 }
 DESKTOP_SENSITIVE_FIELD_TERMS = {
@@ -56,6 +58,76 @@ DESKTOP_SENSITIVE_FIELD_TERMS = {
     "secret",
     "token",
     "verification code",
+}
+DESKTOP_DEFAULT_KEY_REPEAT = 1
+DESKTOP_MAX_KEY_REPEAT = 3
+DESKTOP_SAFE_KEY_VK = {
+    "enter": 0x0D,
+    "tab": 0x09,
+    "esc": 0x1B,
+    "escape": 0x1B,
+    "space": 0x20,
+    "backspace": 0x08,
+    "delete": 0x2E,
+    "del": 0x2E,
+    "up": 0x26,
+    "arrowup": 0x26,
+    "down": 0x28,
+    "arrowdown": 0x28,
+    "left": 0x25,
+    "arrowleft": 0x25,
+    "right": 0x27,
+    "arrowright": 0x27,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "a": 0x41,
+    "c": 0x43,
+    "f": 0x46,
+    "v": 0x56,
+    "x": 0x58,
+    "y": 0x59,
+    "z": 0x5A,
+}
+DESKTOP_SAFE_KEY_DISPLAY = {
+    "enter": "Enter",
+    "tab": "Tab",
+    "esc": "Escape",
+    "escape": "Escape",
+    "space": "Space",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "del": "Delete",
+    "up": "ArrowUp",
+    "arrowup": "ArrowUp",
+    "down": "ArrowDown",
+    "arrowdown": "ArrowDown",
+    "left": "ArrowLeft",
+    "arrowleft": "ArrowLeft",
+    "right": "ArrowRight",
+    "arrowright": "ArrowRight",
+    "home": "Home",
+    "end": "End",
+    "pageup": "PageUp",
+    "pagedown": "PageDown",
+    "a": "A",
+    "c": "C",
+    "f": "F",
+    "v": "V",
+    "x": "X",
+    "y": "Y",
+    "z": "Z",
+}
+DESKTOP_SAFE_MODIFIER_VK = {
+    "ctrl": 0x11,
+    "control": 0x11,
+    "shift": 0x10,
+}
+DESKTOP_SAFE_MODIFIER_DISPLAY = {
+    "ctrl": "Ctrl",
+    "control": "Ctrl",
+    "shift": "Shift",
 }
 
 SM_XVIRTUALSCREEN = 76
@@ -219,6 +291,8 @@ user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = ctypes.c_bool
 user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 user32.SetCursorPos.restype = ctypes.c_bool
+user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
+user32.MapVirtualKeyW.restype = ctypes.c_uint
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
 user32.SendInput.restype = ctypes.c_uint
 
@@ -895,6 +969,7 @@ def _desktop_result(
     workflow_resumed: bool = False,
     point: Dict[str, int] | None = None,
     typed_text_preview: str = "",
+    key_sequence_preview: str = "",
     desktop_evidence: Dict[str, Any] | None = None,
     desktop_evidence_ref: Dict[str, Any] | None = None,
     target_window: Dict[str, Any] | None = None,
@@ -935,6 +1010,7 @@ def _desktop_result(
         "last_desktop_action": _trim_text(summary, limit=220),
         "point": point if isinstance(point, dict) else {},
         "typed_text_preview": _trim_text(typed_text_preview, limit=80),
+        "key_sequence_preview": _trim_text(key_sequence_preview, limit=80),
         "desktop_evidence": evidence,
         "desktop_evidence_ref": evidence_ref,
         "evidence_id": _trim_text(evidence_ref.get("evidence_id", "") or evidence.get("evidence_id", ""), limit=80),
@@ -1701,6 +1777,7 @@ def _pause_desktop_action(
     checkpoint_resume_args: Dict[str, Any],
     point: Dict[str, int] | None = None,
     desktop_evidence_ref: Dict[str, Any] | None = None,
+    key_sequence_preview: str = "",
 ) -> Dict[str, Any]:
     observation = _register_observation(active_window=active_window, windows=windows)
     resume_args = dict(checkpoint_resume_args)
@@ -1720,6 +1797,7 @@ def _pause_desktop_action(
         checkpoint_target=checkpoint_target,
         checkpoint_resume_args=resume_args,
         point=point,
+        key_sequence_preview=key_sequence_preview,
         desktop_evidence_ref=desktop_evidence_ref,
     )
 
@@ -1873,6 +1951,94 @@ def _send_text(value: str) -> bool:
     return sent == len(inputs)
 
 
+def _normalize_modifier_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[str] = []
+    for item in value:
+        token = str(item or "").strip().lower()
+        if token not in DESKTOP_SAFE_MODIFIER_VK:
+            continue
+        canonical = "ctrl" if token == "control" else token
+        if canonical not in normalized:
+            normalized.append(canonical)
+    return normalized[:2]
+
+
+def _normalize_key_name(value: Any) -> str:
+    token = " ".join(str(value or "").strip().lower().split())
+    token = token.replace("page up", "pageup").replace("page down", "pagedown")
+    token = token.replace("arrow up", "arrowup").replace("arrow down", "arrowdown")
+    token = token.replace("arrow left", "arrowleft").replace("arrow right", "arrowright")
+    if token == "escape":
+        token = "esc"
+    if token == "del":
+        token = "delete"
+    return token
+
+
+def _is_modifier_shortcut_only(key_name: str, modifiers: List[str]) -> bool:
+    return len(key_name) == 1 and key_name.isalpha() and "ctrl" in modifiers
+
+
+def _validate_desktop_key_request(key_name: str, modifiers: List[str]) -> str:
+    if key_name not in DESKTOP_SAFE_KEY_VK:
+        return (
+            "This bounded desktop keyboard tool only supports safe navigation keys and a small allowlist "
+            "of Ctrl-based shortcuts."
+        )
+    if len(key_name) == 1 and key_name.isalpha() and not _is_modifier_shortcut_only(key_name, modifiers):
+        return (
+            "Single letter key presses are outside the safe desktop scope unless they are a bounded Ctrl-based shortcut. "
+            "Use desktop_type_text for plain text entry."
+        )
+    if any(modifier not in {"ctrl", "shift"} for modifier in modifiers):
+        return "Only Ctrl and Shift modifiers are allowed in this bounded desktop keyboard tool."
+    return ""
+
+
+def _desktop_key_sequence_preview(key_name: str, modifiers: List[str], repeat: int = 1) -> str:
+    sequence = [DESKTOP_SAFE_MODIFIER_DISPLAY.get(item, item.title()) for item in modifiers]
+    sequence.append(DESKTOP_SAFE_KEY_DISPLAY.get(key_name, key_name.title()))
+    preview = "+".join(sequence)
+    if repeat > 1:
+        preview = f"{preview} x{repeat}"
+    return preview
+
+
+def _send_key_sequence(key_name: str, modifiers: List[str], repeat: int = 1) -> bool:
+    vk = DESKTOP_SAFE_KEY_VK.get(key_name)
+    if not vk:
+        return False
+    repeat_count = _coerce_int(repeat, DESKTOP_DEFAULT_KEY_REPEAT, minimum=1, maximum=DESKTOP_MAX_KEY_REPEAT)
+    inputs: List[INPUT] = []
+
+    for modifier in modifiers:
+        modifier_vk = DESKTOP_SAFE_MODIFIER_VK.get(modifier)
+        if not modifier_vk:
+            continue
+        scan = int(user32.MapVirtualKeyW(modifier_vk, 0) or 0)
+        inputs.append(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(modifier_vk, scan, 0, 0, None))))
+
+    scan = int(user32.MapVirtualKeyW(vk, 0) or 0)
+    for _ in range(repeat_count):
+        inputs.append(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, scan, 0, 0, None))))
+        inputs.append(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, scan, KEYEVENTF_KEYUP, 0, None))))
+
+    for modifier in reversed(modifiers):
+        modifier_vk = DESKTOP_SAFE_MODIFIER_VK.get(modifier)
+        if not modifier_vk:
+            continue
+        scan = int(user32.MapVirtualKeyW(modifier_vk, 0) or 0)
+        inputs.append(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(modifier_vk, scan, KEYEVENTF_KEYUP, 0, None))))
+
+    if not inputs:
+        return False
+    payload = (INPUT * len(inputs))(*inputs)
+    sent = int(user32.SendInput(len(inputs), ctypes.byref(payload), ctypes.sizeof(INPUT)) or 0)
+    return sent == len(inputs)
+
+
 def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
     field_label = str(args.get("field_label", "")).strip()
     if not field_label:
@@ -1999,6 +2165,111 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
         approval_status="approved",
         workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
         typed_text_preview=_trim_text(value, limit=60),
+        desktop_evidence_ref=evidence_ref,
+    )
+
+
+def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
+    key_name = _normalize_key_name(args.get("key", ""))
+    modifiers = _normalize_modifier_list(args.get("modifiers", []))
+    repeat = _coerce_int(
+        args.get("repeat", DESKTOP_DEFAULT_KEY_REPEAT),
+        DESKTOP_DEFAULT_KEY_REPEAT,
+        minimum=1,
+        maximum=DESKTOP_MAX_KEY_REPEAT,
+    )
+    key_preview = _desktop_key_sequence_preview(key_name, modifiers, repeat) if key_name else ""
+    validation_error = _validate_desktop_key_request(key_name, modifiers)
+    if validation_error:
+        windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
+        active_window = _active_window_info()
+        observation = _register_observation(active_window=active_window, windows=windows)
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key",
+            summary=validation_error,
+            desktop_state=observation,
+            error=validation_error,
+            key_sequence_preview=key_preview,
+        )
+
+    token, observation, observation_error = _validate_fresh_observation(args)
+    evidence_ref = _latest_evidence_ref_for_observation(token)
+    active_window = _active_window_info()
+    windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
+    if observation_error:
+        state = _register_observation(active_window=active_window, windows=windows)
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key",
+            summary=observation_error,
+            desktop_state=state,
+            error=observation_error,
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    if not active_window or not _foreground_window_matches(observation, active_window):
+        state = _register_observation(active_window=active_window, windows=windows)
+        message = "The previously inspected target window is no longer active. Focus the window and inspect desktop state again before pressing a key."
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key",
+            summary=message,
+            desktop_state=state,
+            error=message,
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Pressing {key_preview} in '{active_window.get('title', 'the active window')}' requires explicit approval in this bounded control pass."
+    )
+    checkpoint_target = active_window.get("title", "") or "active window"
+    if not _approval_granted(args):
+        return _pause_desktop_action(
+            action="desktop_press_key",
+            summary=f"Approval required before pressing {key_preview} in '{checkpoint_target}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=f"{checkpoint_target} :: {key_preview}",
+            checkpoint_resume_args={
+                "key": DESKTOP_SAFE_KEY_DISPLAY.get(key_name, key_name),
+                "modifiers": modifiers,
+                "repeat": repeat,
+                "observation_token": token,
+                "expected_window_id": active_window.get("window_id", ""),
+                "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    ok = _send_key_sequence(key_name, modifiers, repeat)
+    active_after = _active_window_info()
+    observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    if not ok:
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key",
+            summary=f"Could not press {key_preview} in '{active_after.get('title', active_window.get('title', 'the active window'))}'.",
+            desktop_state=observation_after,
+            error=f"Could not press {key_preview} in '{active_window.get('title', 'the active window')}'.",
+            approval_status="approved",
+            workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+    return _desktop_result(
+        ok=True,
+        action="desktop_press_key",
+        summary=f"Pressed {key_preview} in '{active_after.get('title', active_window.get('title', 'the active window'))}'.",
+        desktop_state=observation_after,
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        key_sequence_preview=key_preview,
         desktop_evidence_ref=evidence_ref,
     )
 
@@ -2186,6 +2457,37 @@ DESKTOP_CLICK_POINT_TOOL = {
         "additionalProperties": False,
     },
     "func": desktop_click_point,
+}
+
+
+DESKTOP_PRESS_KEY_TOOL = {
+    "name": "desktop_press_key",
+    "description": (
+        "Press one bounded safe keyboard key or Ctrl/Shift shortcut in the currently active desktop window. "
+        "Requires explicit approval_status=approved, a fresh observation_token from recent desktop inspection, "
+        "and stays limited to safe navigation keys and a small allowlist of Ctrl-based shortcuts. "
+        "This tool does not send system keys, the Windows key, or unrestricted hotkeys."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string"},
+            "modifiers": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["ctrl", "control", "shift"]},
+                "minItems": 0,
+                "maxItems": 2,
+            },
+            "repeat": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_KEY_REPEAT},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "required": ["key"],
+        "additionalProperties": False,
+    },
+    "func": desktop_press_key,
 }
 
 

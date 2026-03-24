@@ -1269,7 +1269,7 @@ a {
   background: var(--surface-soft);
 }
 
-@media (max-width: 1380px) {
+@media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 228px minmax(0, 1fr);
   }
@@ -1277,20 +1277,39 @@ a {
   .right-rail {
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-auto-rows: minmax(0, auto);
     align-content: start;
   }
 
   .rail-card-grow {
-    min-height: 240px;
+    min-height: 220px;
+  }
+
+  .sidebar {
+    padding: 14px 12px;
+  }
+
+  .sidebar-subtitle {
+    font-size: 0.8rem;
+  }
+
+  .chat-header {
+    padding: 14px 16px;
+  }
+
+  .conversation-frame,
+  .composer-shell {
+    padding-left: 14px;
+    padding-right: 14px;
   }
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 920px) {
   .app-shell {
     grid-template-columns: 1fr;
     height: 100dvh;
+    overflow-y: auto;
   }
 
   .sidebar,
@@ -1299,12 +1318,40 @@ a {
   }
 
   .right-rail {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
+  }
+
+  .chat-layout {
+    min-height: 540px;
+    height: auto;
+  }
+
+  .sidebar {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .sidebar-top {
+    gap: 10px;
+  }
+
+  .sidebar-subtitle {
+    display: none;
+  }
+
+  .sidebar-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .session-list {
+    max-height: 240px;
   }
 
   .chat-header {
     flex-direction: column;
     align-items: flex-start;
+    padding: 14px 16px;
   }
 
   .chat-header-actions {

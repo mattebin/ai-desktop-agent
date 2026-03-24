@@ -48,6 +48,7 @@ DESKTOP_TOOL_STEP_LABELS = {
     "desktop_focus_window": "focus window",
     "desktop_capture_screenshot": "capture screenshot",
     "desktop_click_point": "click point",
+    "desktop_press_key": "press key",
     "desktop_type_text": "type text",
 }
 MAX_TASK_GOAL_CHARS = 4000
@@ -164,6 +165,7 @@ class TaskState:
         self.desktop_last_action: str = ""
         self.desktop_last_target_window: str = ""
         self.desktop_last_typed_text_preview: str = ""
+        self.desktop_last_key_sequence: str = ""
         self.desktop_last_point: str = ""
         self.desktop_checkpoint_pending: bool = False
         self.desktop_checkpoint_reason: str = ""
@@ -302,6 +304,7 @@ class TaskState:
         self.desktop_last_action = str(session_state.get("desktop_last_action", "")).strip()[:220]
         self.desktop_last_target_window = str(session_state.get("desktop_last_target_window", "")).strip()[:180]
         self.desktop_last_typed_text_preview = str(session_state.get("desktop_last_typed_text_preview", "")).strip()[:80]
+        self.desktop_last_key_sequence = str(session_state.get("desktop_last_key_sequence", "")).strip()[:80]
         self.desktop_last_point = str(session_state.get("desktop_last_point", "")).strip()[:80]
         self.desktop_checkpoint_pending = bool(session_state.get("desktop_checkpoint_pending", False))
         self.desktop_checkpoint_reason = str(session_state.get("desktop_checkpoint_reason", "")).strip()[:180]
@@ -388,6 +391,7 @@ class TaskState:
             "desktop_last_action": self.desktop_last_action[:220],
             "desktop_last_target_window": self.desktop_last_target_window[:180],
             "desktop_last_typed_text_preview": self.desktop_last_typed_text_preview[:80],
+            "desktop_last_key_sequence": self.desktop_last_key_sequence[:80],
             "desktop_last_point": self.desktop_last_point[:80],
             "desktop_checkpoint_pending": bool(self.desktop_checkpoint_pending),
             "desktop_checkpoint_reason": self.desktop_checkpoint_reason[:180],
@@ -918,6 +922,9 @@ class TaskState:
         typed_preview = str(result.get("typed_text_preview", "")).strip()
         if typed_preview:
             self.desktop_last_typed_text_preview = typed_preview[:80]
+        key_sequence_preview = str(result.get("key_sequence_preview", "")).strip()
+        if key_sequence_preview:
+            self.desktop_last_key_sequence = key_sequence_preview[:80]
 
         checkpoint_target = str(result.get("checkpoint_target", "")).strip()
         if checkpoint_target:
@@ -1053,6 +1060,7 @@ class TaskState:
             "last_target_window": self.desktop_last_target_window[:180],
             "last_point": self.desktop_last_point[:80],
             "last_typed_text_preview": self.desktop_last_typed_text_preview[:80],
+            "last_key_sequence": self.desktop_last_key_sequence[:80],
             "observation_token": self.desktop_observation_token[:120],
             "observed_at": self.desktop_observed_at[:40],
             "screenshot_path": self.desktop_last_screenshot_path[:260],
@@ -1615,6 +1623,8 @@ class TaskState:
                 lines.append(f"- Last point: {desktop_activity['last_point']}")
             if desktop_activity["last_typed_text_preview"]:
                 lines.append(f"- Last typed text preview: {desktop_activity['last_typed_text_preview']}")
+            if desktop_activity["last_key_sequence"]:
+                lines.append(f"- Last key sequence: {desktop_activity['last_key_sequence']}")
             if desktop_activity["screenshot_path"]:
                 if desktop_activity["screenshot_scope"]:
                     lines.append(
@@ -2436,6 +2446,8 @@ class TaskState:
                 lines.append(f"- Last point: {desktop_activity.get('last_point', '')}")
             if desktop_activity.get("last_typed_text_preview"):
                 lines.append(f"- Last typed text preview: {desktop_activity.get('last_typed_text_preview', '')}")
+            if desktop_activity.get("last_key_sequence"):
+                lines.append(f"- Last key sequence: {desktop_activity.get('last_key_sequence', '')}")
             if desktop_activity.get("screenshot_path"):
                 scope = str(desktop_activity.get("screenshot_scope", "")).strip()
                 if scope:

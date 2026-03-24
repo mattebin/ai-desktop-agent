@@ -106,6 +106,7 @@ from tools.desktop import (
     desktop_click_point,
     desktop_inspect_window_state,
     desktop_list_windows,
+    desktop_press_key,
     desktop_recover_window,
     desktop_type_text,
     desktop_wait_for_window_ready,
@@ -243,6 +244,7 @@ expected_desktop_tools = {
     "desktop_wait_for_window_ready",
     "desktop_capture_screenshot",
     "desktop_click_point",
+    "desktop_press_key",
     "desktop_type_text",
 }
 if not expected_desktop_tools.issubset(registered_tools):
@@ -265,6 +267,14 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": observation_token})
     if not click_preview.get("paused", False) or not click_preview.get("approval_required", False) or click_preview.get("checkpoint_tool") != "desktop_click_point":
         raise SystemExit("desktop_click_point() did not require approval in the expected bounded way.")
+    key_preview = desktop_press_key(
+        {
+            "key": "Enter",
+            "observation_token": observation_token,
+        }
+    )
+    if not key_preview.get("paused", False) or not key_preview.get("approval_required", False) or key_preview.get("checkpoint_tool") != "desktop_press_key":
+        raise SystemExit("desktop_press_key() did not require approval in the expected bounded way.")
     type_preview = desktop_type_text(
         {
             "value": "desktop smoke text",
@@ -940,6 +950,23 @@ if paused_snapshot.get("pending_approval", {}).get("evidence_preview", {}).get("
 if paused_snapshot.get("pending_approval", {}).get("evidence_assessment", {}).get("state") != "sufficient":
     raise SystemExit("Desktop approval synthesis did not retain checkpoint evidence sufficiency for the paused desktop checkpoint.")
 
+desktop_key_ready_state = TaskState("Press Enter in window titled 'Approval Target Window'")
+desktop_key_ready_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_capture_screenshot", "args": {}, "result": desktop_ready_result})
+desktop_key_ready_state.update_memory_from_tool("desktop_capture_screenshot", desktop_ready_result)
+desktop_key_pause_result = _maybe_pause_for_desktop_action(
+    _DesktopApprovalStubLLM(),
+    _DesktopApprovalStubRuntime(),
+    desktop_key_ready_state,
+    "Press Enter in window titled 'Approval Target Window'",
+)
+if not isinstance(desktop_key_pause_result, dict) or desktop_key_pause_result.get("status") != "paused":
+    raise SystemExit("Desktop approval synthesis did not create a paused checkpoint for a bounded desktop key press.")
+desktop_key_paused_snapshot = desktop_key_ready_state.get_control_snapshot()
+if desktop_key_paused_snapshot.get("pending_approval", {}).get("step") != "press key":
+    raise SystemExit("Desktop approval synthesis did not surface the expected key-press approval step label.")
+if desktop_key_paused_snapshot.get("desktop", {}).get("last_key_sequence", "") != "Enter":
+    raise SystemExit("Desktop approval synthesis did not retain the last bounded desktop key sequence.")
+
 partial_checkpoint_root = Path("data") / "desktop_partial_checkpoint_smoke"
 shutil.rmtree(partial_checkpoint_root, ignore_errors=True)
 partial_checkpoint_store = DesktopEvidenceStore(partial_checkpoint_root, max_items=2)
@@ -1457,9 +1484,14 @@ if "desktop_runtime_events.jsonl" not in desktop_tauri_source or "commit_runtime
     raise SystemExit("Desktop UI Tauri host is missing the expected runtime audit/status tracking.")
 if "failed_to_start_owned_child" not in desktop_tauri_source or "port_available" not in desktop_tauri_source:
     raise SystemExit("Desktop UI Tauri host is missing the expected startup/attach hardening.")
-if 'THEME_STORAGE_KEY' not in desktop_app_source or 'Theme:' not in desktop_app_source or 'data-theme="dark"' not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
+desktop_styles_source = (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8")
+if (
+    'THEME_STORAGE_KEY' not in desktop_app_source
+    or 'setThemeMode((current) => (current === "light" ? "dark" : "light"))' not in desktop_app_source
+    or 'data-theme="dark"' not in desktop_styles_source
+):
     raise SystemExit("Desktop UI is missing the expected theme-toggle implementation.")
-if 'Model: {runtimeModel}' not in desktop_app_source or 'Reasoning: {runtimeEffortLabel}' not in desktop_app_source:
+if 'Model {runtimeModel}' not in desktop_app_source or 'Reasoning {runtimeEffortLabel}' not in desktop_app_source:
     raise SystemExit("Desktop UI is missing the expected live runtime model indicator.")
 if 'desktopRuntimeStatus' not in desktop_app_source or 'Detached backend' not in desktop_app_source:
     raise SystemExit("Desktop UI is missing the expected desktop runtime visibility wiring.")
@@ -1883,22 +1915,23 @@ if "rejected" not in rejected_state.get_control_snapshot().get("behavior", {}).g
 desktop_checkpoint_state = TaskState("desktop approval smoke")
 desktop_checkpoint_state.status = "paused"
 desktop_checkpoint_state.update_memory_from_tool(
-    "desktop_click_point",
+    "desktop_press_key",
     {
         "ok": False,
         "paused": True,
         "approval_required": True,
         "checkpoint_required": True,
-        "checkpoint_reason": "Approval required before clicking the desktop point.",
-        "checkpoint_tool": "desktop_click_point",
-        "checkpoint_target": "Desktop Eval Window @ (120, 140)",
+        "checkpoint_reason": "Approval required before pressing Enter in the desktop window.",
+        "checkpoint_tool": "desktop_press_key",
+        "checkpoint_target": "Desktop Eval Window :: Enter",
         "checkpoint_resume_args": {
-            "x": 120,
-            "y": 140,
+            "key": "Enter",
+            "repeat": 1,
             "expected_window_title": "Desktop Eval Window",
             "observation_token": "desktop-smoke-token",
         },
-        "summary": "Approval required before clicking the desktop point.",
+        "summary": "Approval required before pressing Enter in the desktop window.",
+        "key_sequence_preview": "Enter",
         "desktop_state": {
             "active_window": {
                 "title": "Desktop Eval Window",
@@ -1916,8 +1949,10 @@ if desktop_snapshot.get("pending_approval", {}).get("kind") != "desktop_action":
     raise SystemExit("TaskState did not expose a desktop approval checkpoint in the control snapshot.")
 if not desktop_snapshot.get("paused", False):
     raise SystemExit("TaskState did not treat a desktop checkpoint as paused work.")
-if desktop_checkpoint_state.to_session_snapshot().get("desktop_checkpoint_tool", "") != "desktop_click_point":
+if desktop_checkpoint_state.to_session_snapshot().get("desktop_checkpoint_tool", "") != "desktop_press_key":
     raise SystemExit("TaskState did not persist desktop checkpoint state.")
+if desktop_checkpoint_state.get_control_snapshot().get("desktop", {}).get("last_key_sequence", "") != "Enter":
+    raise SystemExit("TaskState did not preserve the last bounded desktop key sequence in the desktop snapshot.")
 
 browser_checkpoint_state = TaskState("browser checkpoint smoke")
 browser_checkpoint_state.add_step(

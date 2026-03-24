@@ -19,6 +19,7 @@ BROWSER_APPROVAL_CONTROLLED_TOOLS = {
 }
 DESKTOP_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_click_point",
+    "desktop_press_key",
     "desktop_type_text",
 }
 BROWSER_APPROVAL_POSITIVE_PHRASES = (
@@ -53,6 +54,7 @@ DESKTOP_APPROVAL_POSITIVE_PHRASES = (
     "approval_status=approved",
     "approved to continue",
     "approved to click",
+    "approved to press",
     "approved to type",
     "desktop action is now approved",
     "desktop step is now approved",
@@ -335,6 +337,9 @@ class ToolRuntime:
             args.setdefault("scope", "active_window")
             args.setdefault("limit", 12)
         elif tool_name == "desktop_click_point":
+            args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_press_key":
+            args.setdefault("repeat", 1)
             args.setdefault("max_observation_age_seconds", 45)
         elif tool_name == "desktop_type_text":
             args.setdefault("max_text_length", 160)

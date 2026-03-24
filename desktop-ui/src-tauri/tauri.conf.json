@@ -14,10 +14,10 @@
       {
         "title": "AI Operator",
         "label": "main",
-        "width": 1520,
-        "height": 980,
-        "minWidth": 1140,
-        "minHeight": 760,
+        "width": 1640,
+        "height": 1020,
+        "minWidth": 1280,
+        "minHeight": 820,
         "resizable": true,
         "center": true
       }

@@ -212,6 +212,11 @@ WORKFLOW_STEP_HINTS = (
 DESKTOP_ACTION_OPERATOR_TERMS = {
     "click point",
     "desktop click",
+    "press key",
+    "press enter",
+    "press tab",
+    "keyboard shortcut",
+    "desktop key",
     "desktop type",
     "type text",
     "type the exact text",
@@ -229,11 +234,11 @@ ACTION_POLICY_AUTO_ALLOWED = [
 ACTION_POLICY_APPROVAL_REQUIRED = [
     "Browser submit-like or state-changing transitions.",
     "Paused browser checkpoints and review bundles.",
-    "Desktop click and desktop type actions.",
+    "Desktop click, bounded keyboard, and desktop type actions.",
     "Applying file edits or any other real mutation.",
 ]
 ACTION_POLICY_FORBIDDEN = [
-    "Desktop drag/drop, arbitrary hotkeys, unrestricted keyboard or mouse control, and broad autonomous desktop navigation.",
+    "Desktop drag/drop, system keys, unrestricted hotkeys, unrestricted keyboard or mouse control, and broad autonomous desktop navigation.",
     "Autonomous approval, silent escalation, or unapproved file mutation.",
     "Broad dangerous autonomy outside the current safe operator scope.",
 ]

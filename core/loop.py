@@ -20,6 +20,10 @@ _DESKTOP_TYPE_VALUE_PATTERNS = (
     re.compile(r"type the text ['\"]([^'\"]{1,200})['\"]", re.IGNORECASE),
     re.compile(r"type ['\"]([^'\"]{1,200})['\"]", re.IGNORECASE),
 )
+_DESKTOP_KEY_SEQUENCE_PATTERN = re.compile(
+    r"(?:press|hit|send)(?: the)?(?: key| shortcut)?\s+['\"]?([^'\".,;]{1,40})['\"]?(?:\s+in\b|\s+on\b|$)",
+    re.IGNORECASE,
+)
 _DESKTOP_FIELD_LABEL_PATTERN = re.compile(r"field label(?:ed|led)? ['\"]([^'\"]{1,120})['\"]", re.IGNORECASE)
 _DESKTOP_WINDOW_TITLE_PATTERN = re.compile(r"window titled ['\"]([^'\"]{1,180})['\"]", re.IGNORECASE)
 _DESKTOP_INSPECT_TOOLS = {
@@ -452,6 +456,41 @@ def _goal_desktop_type_request(goal: str) -> dict | None:
     return {"value": value, "field_label": field_label}
 
 
+def _goal_desktop_key_request(goal: str) -> dict | None:
+    lowered = str(goal or "").strip().lower()
+    if not any(term in lowered for term in ("press", "hit", "send")):
+        return None
+    match = _DESKTOP_KEY_SEQUENCE_PATTERN.search(str(goal or ""))
+    if not match:
+        return None
+
+    raw_sequence = " ".join(str(match.group(1) or "").strip().lower().split())
+    raw_sequence = raw_sequence.replace("control", "ctrl").replace("plus", "+")
+    raw_sequence = raw_sequence.replace("page up", "pageup").replace("page down", "pagedown")
+    raw_sequence = raw_sequence.replace("arrow up", "up").replace("arrow down", "down")
+    raw_sequence = raw_sequence.replace("arrow left", "left").replace("arrow right", "right")
+    raw_sequence = raw_sequence.replace("escape", "esc").replace("del", "delete")
+    parts = [part for part in re.split(r"\s*\+\s*|\s+", raw_sequence) if part]
+    if not parts:
+        return None
+
+    modifiers: list[str] = []
+    key = ""
+    for index, token in enumerate(parts):
+        if token in {"ctrl", "shift"} and index < len(parts) - 1:
+            if token not in modifiers:
+                modifiers.append(token)
+            continue
+        key = token
+        break
+
+    if not key:
+        return None
+    if modifiers and len(modifiers) != len(parts) - 1:
+        return None
+    return {"key": key, "modifiers": modifiers, "repeat": 1}
+
+
 def _desktop_has_inspection_context(task_state) -> bool:
     return any(_has_completed_tool(task_state, tool_name) for tool_name in _DESKTOP_INSPECT_TOOLS)
 
@@ -639,6 +678,18 @@ def _finalize_synthesized_desktop_pause(
     session_store=None,
 ):
     evidence_id = str(getattr(task_state, "desktop_last_evidence_id", "")).strip()
+    if resume_args.get("x") is not None and resume_args.get("y") is not None:
+        task_state.desktop_last_point = f"({resume_args.get('x')}, {resume_args.get('y')})"[:80]
+    key_name = str(resume_args.get("key", "")).strip()
+    modifiers = resume_args.get("modifiers", []) if isinstance(resume_args.get("modifiers", []), list) else []
+    repeat = int(resume_args.get("repeat", 1) or 1)
+    if key_name:
+        modifier_prefix = "+".join(str(part).title() for part in modifiers)
+        normalized_key = key_name.title()
+        key_preview = f"{modifier_prefix}+{normalized_key}" if modifier_prefix else normalized_key
+        if repeat > 1:
+            key_preview = f"{key_preview} x{repeat}"
+        task_state.desktop_last_key_sequence = key_preview[:80]
     task_state.set_desktop_checkpoint(
         reason=checkpoint_reason,
         tool=tool_name,
@@ -844,8 +895,9 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
         return None
 
     click_point = _goal_desktop_click_point(planner_goal)
+    key_request = _goal_desktop_key_request(planner_goal)
     type_request = _goal_desktop_type_request(planner_goal)
-    if click_point is None and type_request is None:
+    if click_point is None and key_request is None and type_request is None:
         return None
 
     latest_recovery_state = str(_desktop_latest_recovery(task_state).get("state", "")).strip().lower()
@@ -945,6 +997,71 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             session_store=session_store,
         )
 
+    if key_request and not _has_completed_or_paused_tool_step(task_state, "desktop_press_key"):
+        desktop_activity = task_state._collect_desktop_activity(limit=4)
+        selected_assessment = _desktop_evidence_assessment(
+            task_state,
+            purpose="desktop_action_prepare",
+            target_window_title=_goal_desktop_window_title(planner_goal),
+            require_screenshot=False,
+        )
+        if not selected_assessment.get("sufficient", False):
+            if not (
+                str(selected_assessment.get("reason", "")).strip().lower() == "partial_evidence"
+                and _desktop_partial_evidence_allows_checkpoint(
+                    task_state,
+                    planner_goal,
+                    require_screenshot=False,
+                )
+            ):
+                return None
+            selected_assessment = {
+                **selected_assessment,
+                "state": "partial",
+                "sufficient": True,
+                "needs_refresh": False,
+                "reason": "partial_but_answerable",
+                "summary": "Current desktop evidence is partial but approval-ready for a bounded desktop keyboard checkpoint.",
+            }
+        if not selected_assessment.get("sufficient", False):
+            return None
+        key = str(key_request.get("key", "")).strip()
+        modifiers = key_request.get("modifiers", []) if isinstance(key_request.get("modifiers", []), list) else []
+        repeat = int(key_request.get("repeat", 1) or 1)
+        modifier_text = "+".join(part.title() for part in modifiers)
+        key_preview = f"{modifier_text}+{key.title()}" if modifier_text else key.title()
+        if repeat > 1:
+            key_preview = f"{key_preview} x{repeat}"
+        evidence_summary = str(desktop_activity.get("selected_evidence", {}).get("summary", "")).strip()
+        checkpoint_reason = (
+            f"Ready to press {key_preview} in the active window "
+            f"'{getattr(task_state, 'desktop_active_window_title', 'the active window')}'. "
+            "Awaiting explicit user approval before performing the real desktop key press."
+        )
+        if evidence_summary:
+            checkpoint_reason += f" Evidence basis: {evidence_summary}"
+        checkpoint_target = f"{getattr(task_state, 'desktop_active_window_title', 'desktop target')} :: {key_preview}"
+        resume_args = {
+            "key": key,
+            "modifiers": modifiers,
+            "repeat": repeat,
+            "observation_token": str(getattr(task_state, "desktop_observation_token", "")).strip(),
+            "expected_window_title": str(getattr(task_state, "desktop_active_window_title", "")).strip(),
+            "expected_window_id": str(getattr(task_state, "desktop_active_window_id", "")).strip(),
+            "checkpoint_reason": checkpoint_reason,
+        }
+        note = f"Paused before desktop key press {key_preview} pending explicit approval."
+        return _finalize_synthesized_desktop_pause(
+            llm,
+            task_state,
+            tool_name="desktop_press_key",
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            resume_args=resume_args,
+            note=note,
+            session_store=session_store,
+        )
+
     if type_request and not _has_completed_or_paused_tool_step(task_state, "desktop_type_text"):
         desktop_activity = task_state._collect_desktop_activity(limit=4)
         selected_assessment = _desktop_evidence_assessment(
@@ -1007,7 +1124,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
 
 
 def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner_goal: str, tool_name: str, result, session_store=None):
-    if tool_name not in {"desktop_focus_window", "desktop_click_point", "desktop_type_text"}:
+    if tool_name not in {"desktop_focus_window", "desktop_click_point", "desktop_press_key", "desktop_type_text"}:
         return None
     if not isinstance(result, dict) or result.get("ok", False) or result.get("paused", False):
         return None
@@ -1082,7 +1199,7 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         return None
 
     tool_name = str(getattr(task_state, "desktop_checkpoint_tool", "")).strip()
-    if tool_name not in {"desktop_click_point", "desktop_type_text"}:
+    if tool_name not in {"desktop_click_point", "desktop_press_key", "desktop_type_text"}:
         return None
 
     args = tool_runtime.prepare_args(tool_name, {}, task_state, planning_goal=planner_goal)
