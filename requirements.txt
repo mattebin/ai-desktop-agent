@@ -8,3 +8,4 @@ PyWinCtl
 mss
 pywinauto
 psutil
+RapidFuzz

@@ -22,6 +22,7 @@ from core.backend_schemas import (
     result_envelope,
 )
 from core.config import load_settings
+from core.desktop_matching import WINDOW_MATCH_THRESHOLD, describe_title_match
 
 try:
     import mss
@@ -773,18 +774,12 @@ def select_desktop_vision_context(
 
 
 def _title_match_score(summary: Dict[str, Any], text: str) -> int:
-    query = " ".join(str(text or "").lower().split())
+    query = str(text or "").strip()
     if not query:
         return 0
-    active_title = " ".join(str(summary.get("active_window_title", "")).lower().split())
-    target_title = " ".join(str(summary.get("target_window_title", "")).lower().split())
-    if active_title == query or target_title == query:
-        return 3
-    if query in active_title or query in target_title:
-        return 2
-    if active_title in query or target_title in query:
-        return 1
-    return 0
+    active_match = describe_title_match(query, summary.get("active_window_title", ""), exact=False)
+    target_match = describe_title_match(query, summary.get("target_window_title", ""), exact=False)
+    return max(int(active_match.get("score", 0) or 0), int(target_match.get("score", 0) or 0))
 
 
 def _rank_recent_summaries(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -867,7 +862,7 @@ def select_recent_evidence(
             (item, max(_title_match_score(item, active_window_title), _title_match_score(item, target_window_title)))
             for item in items
         ]
-        scored = [entry for entry in scored if entry[1] > 0]
+        scored = [entry for entry in scored if entry[1] >= WINDOW_MATCH_THRESHOLD]
         if scored:
             scored.sort(
                 key=lambda entry: (

@@ -16,6 +16,7 @@ It supports bounded diagnosis and recovery for cases like:
 - target loading or not yet ready
 - visually unstable or still animating UI
 - expected vs actual window mismatch
+- title drift between expected and observed window labels
 
 ## Supported bounded strategies
 
@@ -63,11 +64,26 @@ Readiness is currently bounded and local-only:
 
 The system should prefer one bounded recovery pass and then a clear report over repeated blind retries.
 
+## Matching and diagnostics
+
+Recovery no longer relies on plain substring matching alone.
+
+The bounded matcher now contributes:
+
+- exact and containment matching first
+- bounded fuzzy title matching for small drift
+- optional process/class hints
+- candidate previews with scores and confidence
+- explicit match engine and match-reason diagnostics
+
+This keeps recovery explainable without turning the desktop path into fuzzy chaos.
+
 ## How to test locally
 
 - run `python smoke_test.py`
 - inspect the desktop tool registry and recovery reason coverage
 - verify missing/minimized/loading classifications in local deterministic tests
+- verify bounded fuzzy title-drift and candidate-ranking diagnostics in local deterministic tests
 - run `python live_agent_eval.py --scenario desktop_recovery_grounding --report-path data/evals/live_agent_eval_desktop_recovery_grounding_report.json`
 
 ## Current integration status

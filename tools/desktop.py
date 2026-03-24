@@ -13,6 +13,7 @@ from core.desktop_evidence import (
     collect_display_metadata,
     get_desktop_evidence_store,
 )
+from core.desktop_matching import select_window_candidate
 from core.desktop_recovery import classify_window_recovery_state, select_window_recovery_strategy
 from tools.desktop_backends import (
     create_screenshot_backend,
@@ -636,7 +637,7 @@ def _inspect_window_state_internal(
     include_visual_stability: bool = True,
 ) -> Dict[str, Any]:
     limit = max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30))
-    target_window, candidates, lookup_error = _find_window(args)
+    target_window, candidates, lookup_error, match_info = _find_window(args)
     visible_windows = _enum_windows(limit=min(limit, DESKTOP_DEFAULT_WINDOW_LIMIT))
     active_window = _active_window_info()
     readiness = _readiness_probe_for_window(
@@ -652,7 +653,8 @@ def _inspect_window_state_internal(
         if include_visual_stability
         else {}
     )
-    process_context = _process_context_for_window(target_window or active_window)
+    fallback_process_context = match_info.get("process_context", {}) if isinstance(match_info.get("process_context", {}), dict) else {}
+    process_context = fallback_process_context if fallback_process_context and not target_window else _process_context_for_window(target_window or active_window)
     observation = _register_observation(active_window=active_window, windows=visible_windows)
     errors = [lookup_error] if lookup_error else []
     evidence_bundle, evidence_ref = _record_desktop_evidence(
@@ -671,10 +673,16 @@ def _inspect_window_state_internal(
         target_window=target_window,
         active_window=active_window,
         candidate_count=len(candidates),
+        candidate_preview=match_info.get("candidate_preview", []),
         readiness=readiness,
         visual_stability=visual_stability,
         expected_window_id=str(args.get("expected_window_id", "")).strip(),
         expected_window_title=str(args.get("expected_window_title", "")).strip(),
+        match_score=int(match_info.get("top_score", 0) or 0),
+        match_confidence=str(match_info.get("confidence", "")).strip(),
+        match_kind=str(match_info.get("match_kind", "")).strip(),
+        match_engine=str(match_info.get("match_engine", "")).strip(),
+        match_reason=str(match_info.get("summary", "")).strip(),
         backend=str(get_desktop_backend_status().get("window", {}).get("active", "desktop") or "desktop"),
     )
     recovery_strategy = select_window_recovery_strategy(
@@ -700,6 +708,7 @@ def _inspect_window_state_internal(
         "readiness": readiness,
         "visual_stability": visual_stability,
         "process_context": process_context,
+        "match_info": match_info,
         "recovery": recovery_view,
     }
 
@@ -855,9 +864,11 @@ def _active_window_info() -> Dict[str, Any]:
     return active_window if isinstance(active_window, dict) else {}
 
 
-def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
+def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str, Dict[str, Any]]:
     window_id = _parse_hwnd(args.get("window_id", ""))
     requested_title = str(args.get("title", "") or args.get("match", "")).strip()
+    requested_process_name = str(args.get("process_name", "") or args.get("expected_process_name", "")).strip()
+    requested_class_name = str(args.get("class_name", "") or args.get("expected_class_name", "")).strip()
     exact = _coerce_bool(args.get("exact", False), False)
     requested_limit = _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)
     candidates = _enum_windows(
@@ -869,52 +880,55 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
     if window_id:
         for item in candidates:
             if _parse_hwnd(item.get("window_id", "")) == window_id:
-                return item, candidates, ""
+                return item, candidates, "", {"reason": "matched", "top_score": 100, "confidence": "high", "match_kind": "window_id", "match_engine": "builtin"}
         info = _window_info(window_id)
         if info:
-            return info, candidates, ""
-        return {}, candidates, f"Could not find a window with id {_hex_hwnd(window_id)}."
+            return info, candidates, "", {"reason": "matched", "top_score": 100, "confidence": "high", "match_kind": "window_id", "match_engine": "builtin"}
+        return {}, candidates, f"Could not find a window with id {_hex_hwnd(window_id)}.", {"reason": "target_not_found", "candidate_preview": []}
 
     if not requested_title:
-        return {}, candidates, "Provide a window title or window_id."
+        return {}, candidates, "Provide a window title or window_id.", {"reason": "invalid_input", "candidate_preview": []}
 
     if exact:
         direct_match = _find_window_by_exact_title_native(requested_title)
         direct_id = str(direct_match.get("window_id", "")).strip()
         if direct_id and not any(str(item.get("window_id", "")).strip() == direct_id for item in candidates):
             candidates = [direct_match, *candidates]
+    selection = select_window_candidate(
+        candidates,
+        requested_title=requested_title,
+        requested_window_id="",
+        expected_process_name=requested_process_name,
+        expected_class_name=requested_class_name,
+        exact=exact,
+    )
+    selected = selection.get("selected", {}) if isinstance(selection.get("selected", {}), dict) else {}
+    if selected.get("window_id"):
+        return selected, candidates, "", selection
 
-    normalized_title = requested_title.lower()
-    matches = [
-        item
-        for item in candidates
-        if (
-            item.get("title", "").lower() == normalized_title
-            if exact
-            else normalized_title in item.get("title", "").lower()
+    process_context: Dict[str, Any] = {}
+    if requested_process_name:
+        process_result = probe_process_context(process_name=requested_process_name)
+        process_context = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
+        selection["process_context"] = process_context
+
+    preview = selection.get("candidate_preview", []) if isinstance(selection.get("candidate_preview", []), list) else []
+    if selection.get("reason") == "candidate_ambiguous":
+        labels = ", ".join(
+            f"{item.get('title', 'window')} ({item.get('score', 0)})"
+            for item in preview[:4]
+            if isinstance(item, dict)
         )
-    ]
-    if len(matches) == 1:
-        return matches[0], candidates, ""
-    if len(matches) > 1:
-        matches.sort(
-            key=lambda item: (
-                not bool(item.get("is_active", False)),
-                not bool(item.get("is_visible", False)),
-                bool(item.get("is_minimized", False)),
-                item.get("title", "").lower(),
-            )
-        )
-        top = matches[0]
-        strong_match = bool(top.get("is_active", False)) or bool(top.get("is_visible", False))
-        if strong_match and len(matches) <= 3:
-            return top, candidates, ""
-        labels = ", ".join(item.get("title", "") for item in matches[:4] if item.get("title"))
-        return {}, candidates, f"Multiple windows matched '{requested_title}': {labels}"
+        return {}, candidates, f"Multiple windows matched '{requested_title}' with similar confidence: {labels}", selection
+
+    process_note = ""
+    if process_context.get("running", False) and requested_process_name:
+        process_note = f" Process '{requested_process_name}' is still running but not exposing a clearly matchable surfaced window."
     return {}, candidates, (
         f"Could not find a surfaced window matching '{requested_title}'. "
         "It may be withdrawn, tray-like, or not exposed as a visible top-level window."
-    )
+        f"{process_note}"
+    ), selection
 
 
 def _virtual_screen_rect() -> Dict[str, int]:

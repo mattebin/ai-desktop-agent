@@ -8,6 +8,7 @@ from core.backend_schemas import (
     normalize_desktop_window_readiness,
     normalize_window_descriptor,
 )
+from core.desktop_matching import describe_title_match, titles_compatible
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -29,14 +30,6 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return bool(value)
-
-
-def _window_titles_match(expected: str, actual: str) -> bool:
-    expected_text = str(expected or "").strip().lower()
-    actual_text = str(actual or "").strip().lower()
-    if not expected_text or not actual_text:
-        return False
-    return expected_text == actual_text or expected_text in actual_text or actual_text in expected_text
 
 
 def assess_visual_sample_signatures(signatures: Iterable[str], *, backend: str = "mss") -> Dict[str, Any]:
@@ -86,6 +79,12 @@ def classify_window_recovery_state(
     visual_stability: Dict[str, Any] | None = None,
     expected_window_id: str = "",
     expected_window_title: str = "",
+    candidate_preview: Iterable[Dict[str, Any]] | None = None,
+    match_score: int = 0,
+    match_confidence: str = "",
+    match_kind: str = "",
+    match_engine: str = "",
+    match_reason: str = "",
     backend: str = "desktop",
 ) -> Dict[str, Any]:
     target = normalize_window_descriptor(target_window or {}, backend=backend, reason="inspected")
@@ -110,14 +109,17 @@ def classify_window_recovery_state(
     )
     target_loading = readiness_view.get("state") == "loading"
     target_ready = bool(readiness_view.get("ready", False)) or readiness_view.get("state") == "ready"
+    title_match = {"matched": True, "score": 100, "kind": "exact", "engine": "builtin", "summary": "No title match was required."}
 
     target_match = True
     if expected_window_id_text:
         target_match = bool(target_present and target.get("window_id") == expected_window_id_text)
     elif expected_window_title_text:
-        target_match = _window_titles_match(expected_window_title_text, target.get("title", ""))
+        title_match = describe_title_match(expected_window_title_text, target.get("title", ""))
+        target_match = titles_compatible(expected_window_title_text, target.get("title", ""))
     elif requested_title_text:
-        target_match = _window_titles_match(requested_title_text, target.get("title", ""))
+        title_match = describe_title_match(requested_title_text, target.get("title", ""))
+        target_match = titles_compatible(requested_title_text, target.get("title", ""))
 
     if not target_present:
         reason = "tray_or_background_state" if requested_title_text or requested_window_id_text else "target_not_found"
@@ -169,6 +171,10 @@ def classify_window_recovery_state(
         reason = "recovery_succeeded"
         state = "ready"
         summary = f"'{target.get('title', 'The target window')}' is present, foreground, and ready enough for bounded desktop work."
+        if _trim_text(match_kind, limit=40) == "fuzzy":
+            summary = (
+                f"{summary} The title match relied on bounded fuzzy matching to absorb small title drift."
+            )
 
     return normalize_desktop_recovery_outcome(
         {
@@ -186,6 +192,21 @@ def classify_window_recovery_state(
             "target_ready": target_ready,
             "target_match": target_match,
             "candidate_count": candidate_count,
+            "candidate_preview": list(candidate_preview or []),
+            "match_score": int(match_score or title_match.get("score", 0) or 0),
+            "match_confidence": (
+                _trim_text(match_confidence, limit=20)
+                or (
+                    "high"
+                    if int(title_match.get("score", 0) or 0) >= 90
+                    else "medium"
+                    if int(title_match.get("score", 0) or 0) >= 74
+                    else "low"
+                )
+            ),
+            "match_kind": _trim_text(match_kind, limit=40) or title_match.get("kind", ""),
+            "match_engine": _trim_text(match_engine, limit=40) or title_match.get("engine", ""),
+            "match_reason": _trim_text(match_reason, limit=180) or title_match.get("summary", ""),
             "backend": backend,
             "summary": summary,
             "target_window": target,

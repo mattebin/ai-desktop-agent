@@ -17,6 +17,9 @@ BACKEND_REASON_CODES = {
     "pruned",
     "selected",
     "matched",
+    "title_drift",
+    "candidate_ambiguous",
+    "candidate_mismatch",
     "linked",
     "recent",
     "no_match",
@@ -61,6 +64,10 @@ BACKEND_REASON_CODES = {
     "shown",
     "retrying",
     "duplicate_frame",
+    "capture_backend_selected",
+    "capture_backend_fallback",
+    "capture_backend_unavailable",
+    "readiness_probe_limited",
     "summary_only",
     "direct_image_needed",
     "image_selected",
@@ -559,6 +566,22 @@ def normalize_desktop_recovery_outcome(value: Dict[str, Any] | None) -> Dict[str
     state = _trim_text(value.get("state", ""), limit=40).lower() or "missing"
     if state not in {"ready", "needs_recovery", "recovered", "failed", "skipped", "waiting", "missing"}:
         state = "missing"
+    candidate_preview: List[Dict[str, Any]] = []
+    for item in list(value.get("candidate_preview", []) or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        candidate_preview.append(
+            {
+                "window_id": _trim_text(item.get("window_id", ""), limit=40),
+                "title": _trim_text(item.get("title", ""), limit=180),
+                "process_name": _trim_text(item.get("process_name", ""), limit=120),
+                "score": _coerce_int(item.get("score", 0), 0, minimum=0, maximum=200),
+                "confidence": _trim_text(item.get("confidence", ""), limit=20),
+                "match_kind": _trim_text(item.get("match_kind", ""), limit=40),
+                "match_engine": _trim_text(item.get("match_engine", ""), limit=40),
+                "reason": _trim_text(item.get("reason", ""), limit=180),
+            }
+        )
     return {
         "state": state,
         "reason": _normalize_reason(value.get("reason", state), default=state),
@@ -577,8 +600,14 @@ def normalize_desktop_recovery_outcome(value: Dict[str, Any] | None) -> Dict[str
         "attempt_count": _coerce_int(value.get("attempt_count", 0), 0, minimum=0, maximum=16),
         "max_attempts": _coerce_int(value.get("max_attempts", 0), 0, minimum=0, maximum=16),
         "candidate_count": _coerce_int(value.get("candidate_count", 0), 0, minimum=0, maximum=64),
+        "match_score": _coerce_int(value.get("match_score", 0), 0, minimum=0, maximum=200),
+        "match_confidence": _trim_text(value.get("match_confidence", ""), limit=20),
+        "match_kind": _trim_text(value.get("match_kind", ""), limit=40),
+        "match_engine": _trim_text(value.get("match_engine", ""), limit=40),
+        "match_reason": _trim_text(value.get("match_reason", ""), limit=180),
         "backend": _trim_text(value.get("backend", ""), limit=60),
         "summary": _trim_text(value.get("summary", ""), limit=240),
+        "candidate_preview": candidate_preview,
         "target_window": normalize_window_descriptor(value.get("target_window", {}), backend=_trim_text(value.get("backend", ""), limit=60), reason=value.get("reason", "inspected")),
         "active_window": normalize_window_descriptor(value.get("active_window", {}), backend=_trim_text(value.get("backend", ""), limit=60), reason="inspected"),
         "readiness": normalize_desktop_window_readiness(value.get("readiness", {})),

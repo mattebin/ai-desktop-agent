@@ -68,6 +68,10 @@ This project now includes optional local backends that strengthen offline/runtim
   Preferred bounded desktop screenshot backend.
 - `pywinauto`
   Future-facing read-only UI evidence backend scaffold only.
+- `RapidFuzz`
+  Bounded title/candidate matching helper for window-title drift and recovery ranking.
+- `dxcam` / `bettercam` (optional)
+  Future-facing higher-performance screenshot backends behind the shared capture boundary.
 
 These integrations are intentionally narrow:
 
@@ -98,6 +102,14 @@ The local runtime can now also record bounded automatic active-window captures i
 
 The desktop stack now also includes bounded recovery/readiness helpers so desktop tasks can diagnose and recover from messy window states without relying on one fragile foreground-only path.
 
+Recent architecture work also strengthened the plug-in seams around:
+
+- capture backend selection and fallback
+- bounded title/process/class matching
+- process/background diagnostics
+- readiness and control-state probing
+- deterministic direct-vision packaging
+
 Those summaries now feed compact UI/client presentation too:
 
 - desktop approvals show linked evidence context
@@ -125,6 +137,7 @@ The bounded desktop recovery layer now supports:
 - bounded readiness and visual-stability checks
 
 See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.
+See [docs/DESKTOP_EVIDENCE_ARCHITECTURE.md](docs/DESKTOP_EVIDENCE_ARCHITECTURE.md) for the current semi-final subsystem shape.
 
 Recent integration work also wired those recovery tools into the real desktop loop and added a focused `desktop_recovery_grounding` live scenario for minimized, wrong-foreground, loading, and unstable states. The main remaining live validation limitation is fully withdrawn or tray-like hidden windows, which are still reported clearly as not visibly present instead of being force-recovered.
 

@@ -16,6 +16,8 @@ from core.backend_schemas import (
     result_envelope,
 )
 from core.config import load_settings
+from core.desktop_matching import WINDOW_MATCH_THRESHOLD, WINDOW_STRONG_MATCH_THRESHOLD, fuzz as rapidfuzz_fuzz
+from core.desktop_matching import select_window_candidate, titles_compatible
 from core.desktop_recovery import assess_visual_sample_signatures
 
 try:
@@ -34,6 +36,16 @@ try:
     from pywinauto import Desktop as PyWinAutoDesktop
 except Exception:
     PyWinAutoDesktop = None  # type: ignore[assignment]
+
+try:
+    import dxcam
+except Exception:
+    dxcam = None  # type: ignore[assignment]
+
+try:
+    import bettercam
+except Exception:
+    bettercam = None  # type: ignore[assignment]
 
 try:
     import psutil
@@ -95,13 +107,42 @@ def _normalize_path_text(value: Any) -> str:
 
 
 def _window_title_matches(title: str, requested_title: str, *, exact: bool) -> bool:
-    normalized_title = str(title or "").strip().lower()
-    requested = str(requested_title or "").strip().lower()
-    if not normalized_title or not requested:
-        return False
-    if exact:
-        return normalized_title == requested
-    return requested in normalized_title
+    return titles_compatible(requested_title, title, exact=exact)
+
+
+def _available_capture_backends() -> List[str]:
+    available: List[str] = []
+    if dxcam is not None:
+        available.append("dxcam")
+    if bettercam is not None:
+        available.append("bettercam")
+    if mss is not None and mss_tools is not None:
+        available.append("mss")
+    available.append("native")
+    return available
+
+
+def _frame_to_rgb_bytes(frame: Any, *, backend_name: str) -> tuple[bytes, int, int]:
+    shape = getattr(frame, "shape", None)
+    if not isinstance(shape, tuple) or len(shape) < 2:
+        raise RuntimeError(f"{backend_name} returned a frame without a usable shape.")
+    height = int(shape[0] or 0)
+    width = int(shape[1] or 0)
+    channels = int(shape[2] or 0) if len(shape) > 2 else 0
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"{backend_name} returned a frame with invalid bounds.")
+    raw = bytes(frame.tobytes()) if hasattr(frame, "tobytes") else b""
+    if not raw:
+        raise RuntimeError(f"{backend_name} returned an empty frame.")
+    if channels == 3:
+        return raw, width, height
+    if channels == 4:
+        rgb = bytearray(width * height * 3)
+        rgb[0::3] = raw[0::4]
+        rgb[1::3] = raw[1::4]
+        rgb[2::3] = raw[2::4]
+        return bytes(rgb), width, height
+    raise RuntimeError(f"{backend_name} returned an unsupported channel count ({channels}).")
 
 
 def _hex_hwnd(value: Any) -> str:
@@ -399,10 +440,23 @@ class PyWinCtlWindowBackend(NativeWindowBackend):
                         target = window
                         break
             elif title:
-                windows = list(pywinctl.getWindowsWithTitle(title) or [])
-                if exact:
-                    windows = [window for window in windows if _window_title_matches(getattr(window, "title", ""), title, exact=True)]
-                target = windows[0] if windows else None
+                active = pywinctl.getActiveWindow()
+                active_handle = int(active.getHandle()) if active else 0
+                windows = list(pywinctl.getAllWindows() or [])
+                candidates = [self._serialize_window(window, active_handle=active_handle) for window in windows]
+                selected = select_window_candidate(candidates, requested_title=title, exact=exact)
+                selected_id = str(selected.get("selected", {}).get("window_id", "")).strip().lower()
+                if selected_id:
+                    for window in windows:
+                        handle = 0
+                        try:
+                            handle = int(window.getHandle())
+                        except Exception:
+                            handle = 0
+                        candidate = f"0x{handle:08X}".lower() if handle else ""
+                        if candidate == selected_id:
+                            target = window
+                            break
 
             if target is None:
                 return result_envelope(
@@ -483,9 +537,9 @@ class NativeScreenshotBackend:
             preferred=preferred_backend,
             active=self.name,
             available=True,
-            reason="fallback_active" if preferred_backend != self.name else "active",
+            reason="capture_backend_fallback" if preferred_backend != self.name else "capture_backend_selected",
             message="Using the native screenshot backend.",
-            metadata={"extension": self.file_extension},
+            metadata={"extension": self.file_extension, "available_backends": _available_capture_backends()},
         )
 
     def shutdown(self):
@@ -543,10 +597,99 @@ class MssScreenshotBackend(NativeScreenshotBackend):
             preferred=preferred_backend,
             active=self.name,
             available=True,
-            reason="active",
+            reason="capture_backend_selected" if preferred_backend in {"auto", self.name} else "capture_backend_fallback",
             message="Using mss for desktop screenshot capture.",
-            metadata={"extension": self.file_extension},
+            metadata={"extension": self.file_extension, "available_backends": _available_capture_backends()},
         )
+
+
+class DesktopDuplicationScreenshotBackend(NativeScreenshotBackend):
+    file_extension = ".png"
+
+    def __init__(self, *, backend_name: str, module: Any, fallback_backend: NativeScreenshotBackend):
+        self.name = backend_name
+        self._module = module
+        self._fallback_backend = fallback_backend
+        self._camera = None
+
+    def _camera_instance(self):
+        if self._camera is not None:
+            return self._camera
+        create = getattr(self._module, "create", None)
+        if not callable(create):
+            raise RuntimeError(f"{self.name} does not expose create().")
+        try:
+            self._camera = create(output_color="RGB")
+        except TypeError:
+            self._camera = create()
+        return self._camera
+
+    def capture(self, path: Path, *, x: int, y: int, width: int, height: int, scope: str, active_window_title: str = "") -> Dict[str, Any]:
+        try:
+            if mss_tools is None:
+                raise RuntimeError("mss_tools is required to serialize capture-plugin frames to PNG.")
+            region = (int(x), int(y), int(x) + int(width), int(y) + int(height))
+            camera = self._camera_instance()
+            frame = camera.grab(region=region)
+            if frame is None:
+                raise RuntimeError(f"{self.name} did not return a fresh frame for the requested region.")
+            rgb_bytes, frame_width, frame_height = _frame_to_rgb_bytes(frame, backend_name=self.name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mss_tools.to_png(rgb_bytes, (frame_width, frame_height), output=str(path))
+            observation = normalize_screenshot_observation(
+                backend=self.name,
+                path=str(path),
+                scope=scope,
+                bounds={"x": x, "y": y, "width": frame_width, "height": frame_height},
+                active_window_title=active_window_title,
+                reason="captured",
+                metadata={"format": "png", "plugin": self.name},
+            )
+            return result_envelope(
+                "screenshot_observation",
+                ok=True,
+                backend=self.name,
+                reason="captured",
+                message=f"Captured the screenshot using {self.name}.",
+                data=observation,
+            )
+        except Exception as exc:
+            fallback = self._fallback_backend.capture(
+                path.with_suffix(self._fallback_backend.file_extension),
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                scope=scope,
+                active_window_title=active_window_title,
+            )
+            fallback["metadata"] = dict(fallback.get("metadata", {}))
+            fallback["metadata"]["fallback_from"] = self.name
+            fallback["metadata"]["fallback_error"] = _trim_text(exc, limit=180)
+            return fallback
+
+    def status_snapshot(self, preferred_backend: str) -> Dict[str, Any]:
+        return backend_status(
+            "screenshot",
+            preferred=preferred_backend,
+            active=self.name,
+            available=True,
+            reason="capture_backend_selected" if preferred_backend in {"auto", self.name} else "capture_backend_fallback",
+            message=f"Using {self.name} as the desktop duplication screenshot backend.",
+            metadata={"extension": self.file_extension, "available_backends": _available_capture_backends(), "plugin": self.name},
+        )
+
+    def shutdown(self):
+        camera = self._camera
+        self._camera = None
+        if camera is None:
+            return
+        stop = getattr(camera, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:
+                return
 
 
 class StubUiEvidenceBackend:
@@ -700,13 +843,34 @@ def _pywinauto_target_window(*, target: str = "active_window", window_id: str = 
     if not normalized_target:
         return windows[0] if windows else None
 
+    candidates: List[Dict[str, Any]] = []
+    window_index: Dict[str, Any] = {}
     for window in windows:
+        title = ""
         try:
             title = str(window.window_text() or "").strip()
         except Exception:
             title = ""
-        if _window_title_matches(title, normalized_target, exact=False):
-            return window
+        handle = 0
+        try:
+            handle = getattr(window.element_info, "handle", 0)
+        except Exception:
+            handle = 0
+        candidate = {
+            "window_id": _hex_hwnd(handle),
+            "title": title,
+            "is_active": False,
+            "is_visible": True,
+            "is_minimized": False,
+            "is_cloaked": False,
+        }
+        candidates.append(candidate)
+        if candidate["window_id"]:
+            window_index[candidate["window_id"].lower()] = window
+    selected = select_window_candidate(candidates, requested_title=normalized_target, exact=False)
+    selected_id = str(selected.get("selected", {}).get("window_id", "")).strip().lower()
+    if selected_id and selected_id in window_index:
+        return window_index[selected_id]
     return None
 
 
@@ -972,8 +1136,23 @@ def create_screenshot_backend(
 ) -> NativeScreenshotBackend:
     preferences = _load_backend_preferences()
     fallback = NativeScreenshotBackend(capture_delegate=capture_delegate)
-    if preferences["desktop_screenshot_backend"] == "mss" and mss is not None and mss_tools is not None:
-        return MssScreenshotBackend(fallback_backend=fallback)
+    preferred = preferences["desktop_screenshot_backend"]
+    ordered_preferences = {
+        "auto": ["dxcam", "bettercam", "mss", "native"],
+        "dxcam": ["dxcam", "bettercam", "mss", "native"],
+        "bettercam": ["bettercam", "dxcam", "mss", "native"],
+        "mss": ["mss", "native"],
+        "native": ["native"],
+    }.get(preferred, ["mss", "native"])
+    for name in ordered_preferences:
+        if name == "dxcam" and dxcam is not None:
+            return DesktopDuplicationScreenshotBackend(backend_name="dxcam", module=dxcam, fallback_backend=fallback)
+        if name == "bettercam" and bettercam is not None:
+            return DesktopDuplicationScreenshotBackend(backend_name="bettercam", module=bettercam, fallback_backend=fallback)
+        if name == "mss" and mss is not None and mss_tools is not None:
+            return MssScreenshotBackend(fallback_backend=fallback)
+        if name == "native":
+            return fallback
     return fallback
 
 
@@ -1000,5 +1179,10 @@ def describe_backends(
             "readiness_backend": "pywinauto" if PyWinAutoDesktop is not None else "stub",
             "visual_stability_backend": "mss" if mss is not None else "stub",
             "process_backend": "psutil" if psutil is not None else "stub",
+        },
+        "matching": {
+            "title_matching": "rapidfuzz" if rapidfuzz_fuzz is not None else "builtin",
+            "window_match_threshold": WINDOW_MATCH_THRESHOLD,
+            "window_strong_match_threshold": WINDOW_STRONG_MATCH_THRESHOLD,
         },
     }

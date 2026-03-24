@@ -22,6 +22,7 @@ mods = [
     "core.config",
     "core.desktop_capture_service",
     "core.desktop_evidence",
+    "core.desktop_matching",
     "core.desktop_recovery",
     "core.execution_manager",
     "core.file_watch_backend",
@@ -61,6 +62,7 @@ if failed:
 
 from core.alerts import AlertStore
 import core.desktop_evidence as desktop_evidence_module
+import tools.desktop_backends as desktop_backends_module
 import core.desktop_capture_service as desktop_capture_service_module
 from core.desktop_evidence import (
     DesktopEvidenceStore,
@@ -73,6 +75,7 @@ from core.desktop_evidence import (
     select_task_evidence,
     summarize_evidence_bundle,
 )
+from core.desktop_matching import select_window_candidate, titles_compatible
 from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
 from core.chat_sessions import ChatSessionManager
 from core.config import load_settings
@@ -300,6 +303,10 @@ if not isinstance(desktop_backend_status.get("recovery", {}), dict):
     raise SystemExit("Desktop backend status did not include the expected recovery capability section.")
 if desktop_backend_status.get("recovery", {}).get("readiness_backend", "") not in {"pywinauto", "stub"}:
     raise SystemExit("Desktop backend status did not expose the expected readiness backend.")
+if desktop_backend_status.get("matching", {}).get("title_matching", "") not in {"rapidfuzz", "builtin"}:
+    raise SystemExit("Desktop backend status did not expose the expected bounded title-matching backend.")
+if not isinstance(desktop_backend_status.get("screenshot", {}).get("metadata", {}).get("available_backends", []), list):
+    raise SystemExit("Desktop backend status did not expose available screenshot capture backends.")
 desktop_capture = desktop_capture_screenshot({"scope": "desktop", "name": "desktop_backend_smoke"})
 if not desktop_capture.get("ok", False) or not Path(str(desktop_capture.get("screenshot_path", ""))).exists():
     raise SystemExit("desktop_capture_screenshot() did not capture a bounded screenshot with the backend layer active.")
@@ -314,6 +321,74 @@ if not desktop_capture.get("desktop_evidence_ref", {}).get("evidence_id"):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence reference.")
 if not isinstance(desktop_capture.get("desktop_evidence", {}), dict):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence bundle.")
+original_backend_settings = desktop_backends_module.load_settings
+original_dxcam = desktop_backends_module.dxcam
+original_bettercam = desktop_backends_module.bettercam
+original_mss_tools = desktop_backends_module.mss_tools
+try:
+    class _FakeFrame:
+        shape = (6, 8, 3)
+
+        def tobytes(self):
+            return b"\x00\x00\x00" * (6 * 8)
+
+    class _FakeCamera:
+        def grab(self, region=None):
+            return _FakeFrame()
+
+        def stop(self):
+            return
+
+    class _FakeDxcamModule:
+        @staticmethod
+        def create(output_color="RGB"):
+            return _FakeCamera()
+
+    class _FakeMssTools:
+        @staticmethod
+        def to_png(rgb, size, output):
+            Path(output).write_bytes(b"fake-png")
+
+    desktop_backends_module.load_settings = lambda: {
+        "desktop_window_backend": "pywinctl",
+        "desktop_screenshot_backend": "auto",
+        "ui_evidence_backend": "pywinauto",
+    }
+    desktop_backends_module.dxcam = _FakeDxcamModule()
+    desktop_backends_module.bettercam = None
+    desktop_backends_module.mss_tools = _FakeMssTools()
+    plugin_backend = desktop_backends_module.create_screenshot_backend(capture_delegate=lambda path, x, y, width, height: (False, "native fallback should not run"))
+    if getattr(plugin_backend, "name", "") != "dxcam":
+        raise SystemExit("create_screenshot_backend() did not activate the optional desktop-duplication plugin backend under auto preference.")
+    plugin_capture_path = Path("data/plugin_capture_smoke.png")
+    plugin_capture_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_capture = plugin_backend.capture(
+        plugin_capture_path,
+        x=0,
+        y=0,
+        width=8,
+        height=6,
+        scope="desktop",
+        active_window_title="plugin smoke",
+    )
+    if not plugin_capture.get("ok", False) or not plugin_capture_path.exists():
+        raise SystemExit("Optional capture-plugin backend did not capture through the shared screenshot boundary.")
+
+    desktop_backends_module.load_settings = lambda: {
+        "desktop_window_backend": "pywinctl",
+        "desktop_screenshot_backend": "dxcam",
+        "ui_evidence_backend": "pywinauto",
+    }
+    desktop_backends_module.dxcam = None
+    fallback_backend = desktop_backends_module.create_screenshot_backend(capture_delegate=lambda path, x, y, width, height: (True, ""))
+    expected_fallback_backend = "mss" if desktop_backends_module.mss is not None and desktop_backends_module.mss_tools is not None else "native"
+    if getattr(fallback_backend, "name", "") != expected_fallback_backend:
+        raise SystemExit("create_screenshot_backend() did not fall back cleanly from an unavailable optional capture plugin backend.")
+finally:
+    desktop_backends_module.load_settings = original_backend_settings
+    desktop_backends_module.dxcam = original_dxcam
+    desktop_backends_module.bettercam = original_bettercam
+    desktop_backends_module.mss_tools = original_mss_tools
 missing_window_probe = desktop_inspect_window_state({"title": "__codex_missing_window__", "exact": True})
 if missing_window_probe.get("recovery", {}).get("reason") not in {"tray_or_background_state", "target_not_found"}:
     raise SystemExit("desktop_inspect_window_state() did not classify a missing target window with a bounded recovery reason.")
@@ -358,7 +433,7 @@ try:
         if include_hidden
         else []
     )
-    hidden_target, hidden_candidates, hidden_error = desktop_module._find_window({"title": "Hidden Target Window", "exact": True, "limit": 10})
+    hidden_target, hidden_candidates, hidden_error, hidden_match = desktop_module._find_window({"title": "Hidden Target Window", "exact": True, "limit": 10})
     if hidden_error or hidden_target.get("window_id") != "0x00001002":
         raise SystemExit(
             f"desktop hidden-window lookup did not merge native hidden candidates correctly: target={hidden_target} error={hidden_error} candidates={hidden_candidates}"
@@ -377,7 +452,7 @@ try:
         if title == "Withdrawn Target Window"
         else {}
     )
-    withdrawn_target, withdrawn_candidates, withdrawn_error = desktop_module._find_window(
+    withdrawn_target, withdrawn_candidates, withdrawn_error, withdrawn_match = desktop_module._find_window(
         {"title": "Withdrawn Target Window", "exact": True, "limit": 10}
     )
     if withdrawn_error or withdrawn_target.get("window_id") != "0x00001003":
@@ -388,6 +463,59 @@ finally:
     desktop_module._WINDOW_BACKEND = original_window_backend
     desktop_module._enum_windows_native = original_enum_windows_native
     desktop_module._find_window_by_exact_title_native = original_find_window_by_exact_title_native
+title_drift_selection = select_window_candidate(
+    [
+        {
+            "window_id": "0x00002001",
+            "title": "Outlook - New Message (Draft)",
+            "process_name": "outlook.exe",
+            "class_name": "rctrl_renwnd32",
+            "is_active": True,
+            "is_visible": True,
+            "is_minimized": False,
+            "is_cloaked": False,
+        },
+        {
+            "window_id": "0x00002002",
+            "title": "Outlook",
+            "process_name": "outlook.exe",
+            "class_name": "rctrl_renwnd32",
+            "is_active": False,
+            "is_visible": True,
+            "is_minimized": False,
+            "is_cloaked": False,
+        },
+    ],
+    requested_title="Outlook New Message Draft",
+    expected_process_name="outlook.exe",
+)
+if title_drift_selection.get("selected", {}).get("window_id") != "0x00002001":
+    raise SystemExit(f"select_window_candidate() did not rank the drifted Outlook compose title correctly: {title_drift_selection}")
+if title_drift_selection.get("match_engine", "") not in {"rapidfuzz", "builtin"}:
+    raise SystemExit("select_window_candidate() did not expose the expected bounded title-match engine metadata.")
+if not titles_compatible("Approval Targt Window", "Approval Target Window"):
+    raise SystemExit("titles_compatible() did not absorb small bounded title drift.")
+ambiguous_selection = select_window_candidate(
+    [
+        {
+            "window_id": "0x00002003",
+            "title": "Editor - notes.txt",
+            "process_name": "notepad.exe",
+            "is_active": True,
+            "is_visible": True,
+        },
+        {
+            "window_id": "0x00002004",
+            "title": "Editor - notes (copy).txt",
+            "process_name": "notepad.exe",
+            "is_active": False,
+            "is_visible": True,
+        },
+    ],
+    requested_title="Editor notes",
+)
+if ambiguous_selection.get("reason") != "candidate_ambiguous" or ambiguous_selection.get("selected"):
+    raise SystemExit("select_window_candidate() did not keep a close bounded title collision diagnosably ambiguous.")
 stable_visual = assess_visual_sample_signatures(["abc", "abc"], backend="mss")
 if stable_visual.get("state") != "stable" or not stable_visual.get("stable", False):
     raise SystemExit("assess_visual_sample_signatures() did not treat identical samples as stable.")
@@ -418,6 +546,25 @@ foreground_recovery = classify_window_recovery_state(
 )
 if foreground_recovery.get("reason") != "foreground_not_confirmed":
     raise SystemExit("classify_window_recovery_state() did not detect the foreground-not-confirmed recovery case.")
+drift_recovery = classify_window_recovery_state(
+    requested_title="Approval Targt Window",
+    target_window={"window_id": "0x00000005", "title": "Approval Target Window", "is_visible": True, "is_minimized": False},
+    active_window={"window_id": "0x00000005", "title": "Approval Target Window", "is_visible": True},
+    candidate_count=2,
+    readiness={"state": "ready", "ready": True, "reason": "ready"},
+    visual_stability={"state": "stable", "stable": True, "reason": "inspected"},
+    candidate_preview=[{"title": "Approval Target Window", "score": 92, "match_kind": "fuzzy", "match_engine": "rapidfuzz"}],
+    match_score=92,
+    match_confidence="high",
+    match_kind="fuzzy",
+    match_engine="rapidfuzz",
+    match_reason="Used bounded fuzzy matching to handle title drift.",
+    backend="smoke",
+)
+if drift_recovery.get("reason") != "recovery_succeeded" or drift_recovery.get("match_kind") != "fuzzy":
+    raise SystemExit("classify_window_recovery_state() did not preserve bounded title-drift diagnostics in the recovery view.")
+if "title drift" not in drift_recovery.get("summary", "").lower():
+    raise SystemExit("classify_window_recovery_state() did not explain fuzzy title-drift recovery in the normalized summary.")
 withdrawn_recovery = classify_window_recovery_state(
     requested_title="Withdrawn App",
     target_window={
@@ -865,6 +1012,13 @@ action_assessment = temp_evidence_store.assess_summary(
 )
 if not action_assessment.get("sufficient", False) or action_assessment.get("state") != "sufficient":
     raise SystemExit("DesktopEvidenceStore.assess_summary() did not treat recent screenshot-backed evidence as sufficient for bounded desktop action preparation.")
+fuzzy_recent_selection = select_recent_evidence(
+    recent_summaries,
+    strategy="window_title",
+    active_window_title="Approval Targt Window",
+)
+if fuzzy_recent_selection.get("selected", {}).get("evidence_id") != "desk-smoke-3":
+    raise SystemExit("select_recent_evidence() did not keep bounded fuzzy title matching continuity for selected desktop evidence.")
 refresh_assessment = temp_evidence_store.assess_summary(
     summary=summary_second,
     purpose="desktop_action_prepare",

@@ -28,11 +28,21 @@ Desktop recovery and readiness now sit alongside the evidence layer so the opera
 - the target exists but is hidden or cloaked
 - the target exists but still looks loading or visually unstable
 
+The evidence layer now also sits behind clearer subsystem seams:
+
+- capture backends
+- bounded window/title matching
+- process/background diagnostics
+- readiness and control-state probing
+- evidence summarization and selection
+- bounded direct-image packaging
+
 ## Current evidence sources
 
 - bounded window observation via the desktop window backend
 - bounded screenshot capture via the screenshot backend
 - optional read-only UI evidence via the UI evidence backend
+- bounded title/process/class matching via the desktop matching subsystem
 
 ## Evidence bundle shape
 
@@ -84,6 +94,20 @@ Current settings live in `config/settings.yaml`:
 - `desktop_auto_capture_scope`
 - `desktop_auto_capture_max_events`
 
+## Capture backend path
+
+The evidence layer remains authoritative even as capture backends change.
+
+Current supported capture preference path:
+
+- `auto`
+- `dxcam` when installed
+- `bettercam` when installed
+- `mss`
+- native fallback
+
+`mss` remains a valid supported backend. Optional desktop-duplication backends are helpers, not replacements for the evidence architecture.
+
 ## Current non-goals
 
 - no OCR-heavy interpretation
@@ -103,6 +127,7 @@ The current evidence-aware reasoning integration is intentionally bounded.
 - desktop typing preparation can rely on recent focused-window evidence without requiring OCR
 - stale, partial, or target-mismatched evidence should trigger one fresh observation before action preparation
 - repeated identical desktop inspection should stop once current evidence is already sufficient
+- direct screenshot input should only be attached when summaries are not enough and the selected evidence is screenshot-backed
 
 ## Later live validation
 
@@ -139,3 +164,5 @@ Current deterministic local coverage checks:
 - recent desktop context summary selection
 - desktop recovery classification and strategy selection
 - bounded readiness / visual-stability diagnostics
+- bounded fuzzy title drift matching and candidate ranking
+- capture backend selection and fallback diagnostics
