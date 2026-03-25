@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import threading
 import time
 from itertools import islice
 from pathlib import Path
@@ -58,6 +61,9 @@ WindowListDelegate = Callable[..., List[Dict[str, Any]]]
 WindowInfoDelegate = Callable[[], Dict[str, Any]]
 FocusDelegate = Callable[[int], tuple[bool, str]]
 CaptureDelegate = Callable[[Path], tuple[bool, str]]
+
+_OWNED_PROCESS_LOCK = threading.RLock()
+_OWNED_PROCESSES: Dict[int, Dict[str, Any]] = {}
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -279,6 +285,501 @@ def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, 
         message=context.get("summary", ""),
         data=context,
     )
+
+
+def _normalize_env_overrides(value: Any, *, limit: int = 8) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    sanitized: Dict[str, str] = {}
+    for raw_key, raw_value in list(value.items())[:limit]:
+        key = _trim_text(raw_key, limit=80)
+        if not key:
+            continue
+        sanitized[key] = _trim_text(raw_value, limit=240)
+    return sanitized
+
+
+def _owned_process_entry(pid: int) -> Dict[str, Any]:
+    with _OWNED_PROCESS_LOCK:
+        return dict(_OWNED_PROCESSES.get(int(pid or 0), {}))
+
+
+def _owned_process_entry_by_label(label: str) -> Dict[str, Any]:
+    normalized = _trim_text(label, limit=120)
+    if not normalized:
+        return {}
+    with _OWNED_PROCESS_LOCK:
+        for entry in _OWNED_PROCESSES.values():
+            if _trim_text(entry.get("owned_label", ""), limit=120) == normalized:
+                return dict(entry)
+    return {}
+
+
+def _register_owned_process(*, process: subprocess.Popen[Any], command: List[str], cwd: str = "", owned_label: str = "") -> Dict[str, Any]:
+    entry = {
+        "pid": int(getattr(process, "pid", 0) or 0),
+        "owned_label": _trim_text(owned_label, limit=120),
+        "command": [_trim_text(item, limit=180) for item in list(command)[:12] if _trim_text(item, limit=180)],
+        "cwd": _normalize_path_text(cwd),
+        "started_at": time.time(),
+        "process": process,
+    }
+    with _OWNED_PROCESS_LOCK:
+        if entry["pid"] > 0:
+            _OWNED_PROCESSES[entry["pid"]] = entry
+    return dict(entry)
+
+
+def _drop_owned_process(pid: int):
+    with _OWNED_PROCESS_LOCK:
+        _OWNED_PROCESSES.pop(int(pid or 0), None)
+
+
+def _process_context_from_psutil(process: Any, *, reason: str = "process_inspected") -> Dict[str, Any]:
+    try:
+        status = _trim_text(process.status(), limit=60)
+    except Exception:
+        status = ""
+    try:
+        name = _trim_text(process.name(), limit=120)
+    except Exception:
+        name = ""
+    try:
+        exe = _trim_text(process.exe(), limit=320)
+    except Exception:
+        exe = ""
+    try:
+        running = bool(process.is_running()) and status.lower() != "zombie"
+    except Exception:
+        running = False
+    try:
+        parent = process.parent()
+    except Exception:
+        parent = None
+    background_candidate = running and status.lower() in {"sleeping", "idle", "stopped"}
+    return normalize_desktop_process_context(
+        {
+            "pid": int(getattr(process, "pid", 0) or 0),
+            "process_name": name,
+            "status": status,
+            "exe": exe,
+            "parent_pid": int(getattr(parent, "pid", 0) or 0) if parent is not None else 0,
+            "parent_name": _trim_text(parent.name(), limit=120) if parent is not None else "",
+            "present": True,
+            "running": running,
+            "background_candidate": background_candidate,
+            "backend": "psutil",
+            "reason": reason,
+            "summary": (
+                f"Process '{name or 'unknown'}' is running with status '{status or 'unknown'}'."
+                if running
+                else f"Process '{name or 'unknown'}' is present but does not look runnable."
+            ),
+        }
+    )
+
+
+def list_process_contexts(*, query: str = "", limit: int = 12, include_background: bool = True) -> Dict[str, Any]:
+    normalized_query = _trim_text(query, limit=160).lower()
+    bounded_limit = max(1, min(24, int(limit or 12)))
+    if psutil is None:
+        return result_envelope(
+            "desktop_process_list",
+            ok=False,
+            backend="stub",
+            reason="unsupported",
+            message="Process listing is unavailable because psutil is not active.",
+            error="psutil is not available.",
+            data={"processes": [], "query": normalized_query, "count": 0},
+        )
+
+    processes: List[Dict[str, Any]] = []
+    try:
+        for process in psutil.process_iter(["pid", "name", "status", "ppid", "exe", "cmdline"]):
+            try:
+                context = _process_context_from_psutil(process, reason="process_inspected")
+                if not context.get("process_name"):
+                    continue
+                haystack = " ".join(
+                    [
+                        str(context.get("process_name", "")),
+                        str(context.get("exe", "")),
+                        " ".join(str(item or "") for item in list(process.info.get("cmdline", []) or [])[:8]),
+                    ]
+                ).lower()
+                if normalized_query and normalized_query not in haystack:
+                    continue
+                if not include_background and bool(context.get("background_candidate", False)):
+                    continue
+                owned = _owned_process_entry(int(context.get("pid", 0) or 0))
+                processes.append(
+                    {
+                        **context,
+                        "owned": bool(owned),
+                        "owned_label": _trim_text(owned.get("owned_label", ""), limit=120),
+                        "cmdline_excerpt": _trim_text(" ".join(str(item or "") for item in list(process.info.get("cmdline", []) or [])[:8]), limit=220),
+                    }
+                )
+                if len(processes) >= bounded_limit:
+                    break
+            except Exception:
+                continue
+    except Exception as exc:
+        return result_envelope(
+            "desktop_process_list",
+            ok=False,
+            backend="psutil",
+            reason="error",
+            message="Could not enumerate desktop processes.",
+            error=_trim_text(exc, limit=240),
+            data={"processes": [], "query": normalized_query, "count": 0},
+        )
+
+    return result_envelope(
+        "desktop_process_list",
+        ok=True,
+        backend="psutil",
+        reason="process_inspected",
+        message="Enumerated bounded desktop process diagnostics.",
+        data={"processes": processes, "query": normalized_query, "count": len(processes)},
+    )
+
+
+def inspect_process_details(*, pid: int = 0, process_name: str = "", child_limit: int = 4) -> Dict[str, Any]:
+    normalized_pid = _coerce_int(pid, 0, minimum=0, maximum=10_000_000)
+    normalized_name = _trim_text(process_name, limit=120)
+    base_result = probe_process_context(pid=normalized_pid, process_name=normalized_name)
+    base_context = base_result.get("data", {}) if isinstance(base_result.get("data", {}), dict) else {}
+    resolved_pid = int(base_context.get("pid", normalized_pid) or normalized_pid)
+    if psutil is None or resolved_pid <= 0:
+        return result_envelope(
+            "desktop_process_details",
+            ok=bool(base_result.get("ok", False)),
+            backend=str(base_result.get("backend", "stub")),
+            reason=str(base_result.get("reason", "unsupported")),
+            message=str(base_result.get("message", "")).strip(),
+            error=str(base_result.get("error", "")).strip(),
+            data={"process": base_context, "children": [], "owned": False, "owned_label": ""},
+        )
+
+    process = None
+    try:
+        process = psutil.Process(resolved_pid)
+        cmdline = _trim_text(" ".join(process.cmdline()[:12]), limit=320)
+    except Exception:
+        cmdline = ""
+    try:
+        cwd = _trim_text(process.cwd(), limit=320)  # type: ignore[name-defined]
+    except Exception:
+        cwd = ""
+    try:
+        children_raw = process.children(recursive=False)  # type: ignore[name-defined]
+    except Exception:
+        children_raw = []
+    children: List[Dict[str, Any]] = []
+    for child in list(children_raw)[: max(0, min(8, int(child_limit or 4)))]:
+        try:
+            children.append(_process_context_from_psutil(child, reason="process_inspected"))
+        except Exception:
+            continue
+    owned = _owned_process_entry(resolved_pid)
+    return result_envelope(
+        "desktop_process_details",
+        ok=bool(base_result.get("ok", False)),
+        backend="psutil",
+        reason="process_inspected",
+        message=str(base_context.get("summary", "")).strip(),
+        data={
+            "process": base_context,
+            "cmdline_excerpt": cmdline,
+            "cwd": cwd,
+            "children": children,
+            "owned": bool(owned),
+            "owned_label": _trim_text(owned.get("owned_label", ""), limit=120),
+        },
+    )
+
+
+def start_owned_process(
+    *,
+    executable: str,
+    args: List[str] | None = None,
+    cwd: str = "",
+    env: Dict[str, str] | None = None,
+    owned_label: str = "",
+) -> Dict[str, Any]:
+    executable_text = _normalize_path_text(executable)
+    command = [executable_text, *[_trim_text(item, limit=180) for item in list(args or [])[:12] if _trim_text(item, limit=180)]]
+    if not executable_text:
+        return result_envelope(
+            "desktop_process_action",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="A bounded executable path is required before starting a process.",
+            error="Executable path missing.",
+            data={"process": {}, "owned": False, "owned_label": ""},
+        )
+
+    working_dir = _normalize_path_text(cwd)
+    if working_dir and not Path(working_dir).exists():
+        return result_envelope(
+            "desktop_process_action",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="The requested working directory does not exist.",
+            error="Working directory does not exist.",
+            data={"process": {}, "owned": False, "owned_label": _trim_text(owned_label, limit=120)},
+        )
+
+    env_overrides = _normalize_env_overrides(env or {})
+    merged_env = dict(os.environ)
+    merged_env.update(env_overrides)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=working_dir or None,
+            env=merged_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        owned_entry = _register_owned_process(
+            process=process,
+            command=command,
+            cwd=working_dir,
+            owned_label=owned_label,
+        )
+        process_context = probe_process_context(pid=int(getattr(process, "pid", 0) or 0)).get("data", {})
+        process_name = _trim_text(process_context.get("process_name", ""), limit=120) or Path(executable_text).name or executable_text
+        return result_envelope(
+            "desktop_process_action",
+            ok=True,
+            backend="subprocess",
+            reason="process_started",
+            message=f"Started owned process '{process_name}'.",
+            data={
+                "process": process_context,
+                "owned": True,
+                "owned_label": _trim_text(owned_entry.get("owned_label", ""), limit=120),
+                "command": owned_entry.get("command", []),
+                "cwd": owned_entry.get("cwd", ""),
+            },
+        )
+    except Exception as exc:
+        return result_envelope(
+            "desktop_process_action",
+            ok=False,
+            backend="subprocess",
+            reason="error",
+            message="Could not start the requested bounded process.",
+            error=_trim_text(exc, limit=240),
+            data={"process": {}, "owned": False, "owned_label": _trim_text(owned_label, limit=120)},
+        )
+
+
+def stop_owned_process(*, pid: int = 0, owned_label: str = "", wait_seconds: float = 2.0) -> Dict[str, Any]:
+    entry = _owned_process_entry(_coerce_int(pid, 0, minimum=0, maximum=10_000_000))
+    if not entry and owned_label:
+        entry = _owned_process_entry_by_label(owned_label)
+    if not entry:
+        return result_envelope(
+            "desktop_process_action",
+            ok=False,
+            backend="subprocess",
+            reason="process_not_owned",
+            message="The requested process is not an owned bounded process.",
+            error="Only owned bounded processes can be stopped.",
+            data={"process": {}, "owned": False, "owned_label": _trim_text(owned_label, limit=120)},
+        )
+
+    resolved_pid = int(entry.get("pid", 0) or 0)
+    process_name = ""
+    stopped = False
+    error_text = ""
+    try:
+        process = psutil.Process(resolved_pid) if psutil is not None else entry.get("process")
+        process_name = _trim_text(getattr(process, "name", lambda: "")() if process is not None and callable(getattr(process, "name", None)) else "", limit=120)
+        if psutil is not None and process is not None:
+            process.terminate()
+            try:
+                process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+            except Exception:
+                process.kill()
+                process.wait(timeout=1.0)
+        elif process is not None:
+            process.terminate()
+            process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+        stopped = True
+    except Exception as exc:
+        error_text = _trim_text(exc, limit=240)
+    finally:
+        if stopped:
+            _drop_owned_process(resolved_pid)
+
+    final_context = normalize_desktop_process_context(
+        {
+            "pid": resolved_pid,
+            "process_name": process_name,
+            "status": "stopped" if stopped else "unknown",
+            "present": bool(not stopped),
+            "running": False,
+            "background_candidate": False,
+            "backend": "subprocess",
+            "reason": "process_stopped" if stopped else "error",
+            "summary": (
+                f"Stopped owned process '{process_name or resolved_pid}'."
+                if stopped
+                else f"Could not stop owned process '{process_name or resolved_pid}'."
+            ),
+        }
+    )
+    return result_envelope(
+        "desktop_process_action",
+        ok=stopped,
+        backend="subprocess",
+        reason="process_stopped" if stopped else "error",
+        message=final_context.get("summary", ""),
+        error=error_text,
+        data={
+            "process": final_context,
+            "owned": bool(entry),
+            "owned_label": _trim_text(entry.get("owned_label", ""), limit=120),
+        },
+    )
+
+
+def run_bounded_command(
+    *,
+    command: str,
+    cwd: str = "",
+    env: Dict[str, str] | None = None,
+    timeout_seconds: float = 8.0,
+    shell_kind: str = "powershell",
+) -> Dict[str, Any]:
+    command_text = _trim_text(command, limit=320)
+    working_dir = _normalize_path_text(cwd)
+    normalized_shell = _trim_text(shell_kind, limit=40).lower() or "powershell"
+    if normalized_shell not in {"powershell", "cmd"}:
+        normalized_shell = "powershell"
+    bounded_timeout = max(1.0, min(20.0, float(timeout_seconds or 8.0)))
+    if not command_text:
+        return result_envelope(
+            "desktop_command_result",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="A bounded command string is required before execution.",
+            error="Command missing.",
+            data={},
+        )
+    if working_dir and not Path(working_dir).exists():
+        return result_envelope(
+            "desktop_command_result",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="The requested working directory does not exist.",
+            error="Working directory does not exist.",
+            data={},
+        )
+
+    argv = (
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_text]
+        if normalized_shell == "powershell"
+        else ["cmd.exe", "/d", "/s", "/c", command_text]
+    )
+    merged_env = dict(os.environ)
+    merged_env.update(_normalize_env_overrides(env or {}))
+    started_at = time.time()
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=working_dir or None,
+            env=merged_env,
+            timeout=bounded_timeout,
+        )
+        duration_ms = int(max(0.0, time.time() - started_at) * 1000)
+        exit_code = int(completed.returncode or 0)
+        stdout_excerpt = _trim_text(completed.stdout, limit=600)
+        stderr_excerpt = _trim_text(completed.stderr, limit=600)
+        summary = (
+            f"Command exited with code {exit_code}."
+            if not stderr_excerpt
+            else f"Command exited with code {exit_code} and produced stderr output."
+        )
+        return result_envelope(
+            "desktop_command_result",
+            ok=exit_code == 0,
+            backend="subprocess",
+            reason="command_executed",
+            message=summary,
+            data={
+                "command": command_text,
+                "shell_kind": normalized_shell,
+                "cwd": working_dir,
+                "exit_code": exit_code,
+                "timed_out": False,
+                "timeout_seconds": int(bounded_timeout),
+                "duration_ms": duration_ms,
+                "stdout_excerpt": stdout_excerpt,
+                "stderr_excerpt": stderr_excerpt,
+                "reason": "command_executed",
+                "summary": summary,
+            },
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration_ms = int(max(0.0, time.time() - started_at) * 1000)
+        stdout_excerpt = _trim_text(getattr(exc, "stdout", "") or "", limit=600)
+        stderr_excerpt = _trim_text(getattr(exc, "stderr", "") or "", limit=600)
+        return result_envelope(
+            "desktop_command_result",
+            ok=False,
+            backend="subprocess",
+            reason="command_timed_out",
+            message="The bounded command timed out before completion.",
+            error="Command timed out.",
+            data={
+                "command": command_text,
+                "shell_kind": normalized_shell,
+                "cwd": working_dir,
+                "exit_code": -1,
+                "timed_out": True,
+                "timeout_seconds": int(bounded_timeout),
+                "duration_ms": duration_ms,
+                "stdout_excerpt": stdout_excerpt,
+                "stderr_excerpt": stderr_excerpt,
+                "reason": "command_timed_out",
+                "summary": "The bounded command timed out before completion.",
+            },
+        )
+    except Exception as exc:
+        duration_ms = int(max(0.0, time.time() - started_at) * 1000)
+        return result_envelope(
+            "desktop_command_result",
+            ok=False,
+            backend="subprocess",
+            reason="error",
+            message="Could not execute the bounded command.",
+            error=_trim_text(exc, limit=240),
+            data={
+                "command": command_text,
+                "shell_kind": normalized_shell,
+                "cwd": working_dir,
+                "exit_code": -1,
+                "timed_out": False,
+                "timeout_seconds": int(bounded_timeout),
+                "duration_ms": duration_ms,
+                "stdout_excerpt": "",
+                "stderr_excerpt": "",
+                "reason": "error",
+                "summary": "Could not execute the bounded command.",
+            },
+        )
 
 
 class NativeWindowBackend:

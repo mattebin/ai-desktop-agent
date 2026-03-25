@@ -1609,8 +1609,13 @@ def _maybe_recover_desktop_action_failure(
     if tool_name not in {
         "desktop_inspect_window_state",
         "desktop_focus_window",
+        "desktop_move_mouse",
+        "desktop_hover_point",
+        "desktop_click_mouse",
         "desktop_click_point",
+        "desktop_scroll",
         "desktop_press_key",
+        "desktop_press_key_sequence",
         "desktop_type_text",
     }:
         return None
@@ -1649,12 +1654,12 @@ def _maybe_recover_desktop_action_failure(
         tool_runtime,
         task_state,
         planner_goal,
-        require_screenshot=tool_name == "desktop_click_point",
+        require_screenshot=tool_name in {"desktop_click_mouse", "desktop_click_point", "desktop_scroll", "desktop_move_mouse", "desktop_hover_point"},
         session_store=session_store,
         progress_callback=progress_callback,
     )
     if recovery_progress is None and refresh_needed:
-        refresh_tool = "desktop_capture_screenshot" if tool_name == "desktop_click_point" else "desktop_get_active_window"
+        refresh_tool = "desktop_capture_screenshot" if tool_name in {"desktop_click_mouse", "desktop_click_point", "desktop_scroll", "desktop_move_mouse", "desktop_hover_point"} else "desktop_get_active_window"
         refresh_seed_args = {"scope": "active_window"} if refresh_tool == "desktop_capture_screenshot" else {}
         refresh_args, refresh_result = _execute_desktop_tool_step(
             tool_runtime,
@@ -1693,7 +1698,19 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         return None
 
     tool_name = str(getattr(task_state, "desktop_checkpoint_tool", "")).strip()
-    if tool_name not in {"desktop_click_point", "desktop_press_key", "desktop_type_text"}:
+    if tool_name not in {
+        "desktop_move_mouse",
+        "desktop_hover_point",
+        "desktop_click_mouse",
+        "desktop_click_point",
+        "desktop_scroll",
+        "desktop_press_key",
+        "desktop_press_key_sequence",
+        "desktop_type_text",
+        "desktop_start_process",
+        "desktop_stop_process",
+        "desktop_run_command",
+    }:
         return None
 
     args = tool_runtime.prepare_args(tool_name, {}, task_state, planning_goal=planner_goal)

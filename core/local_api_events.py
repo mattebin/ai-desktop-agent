@@ -227,6 +227,38 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "running": bool(desktop.get("latest_process_context", {}).get("running", False)) if isinstance(desktop.get("latest_process_context", {}), dict) else False,
             "summary": _trim_text(desktop.get("latest_process_context", {}).get("summary", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=220),
         },
+        "latest_mouse_action": {
+            "action": _trim_text(desktop.get("latest_mouse_action", {}).get("action", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=40),
+            "button": _trim_text(desktop.get("latest_mouse_action", {}).get("button", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=20),
+            "click_count": int(desktop.get("latest_mouse_action", {}).get("click_count", 0) or 0) if isinstance(desktop.get("latest_mouse_action", {}), dict) else 0,
+            "point": _trim_text(desktop.get("latest_mouse_action", {}).get("point", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("latest_mouse_action", {}).get("summary", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=220),
+        },
+        "latest_process_action": {
+            "action": _trim_text(desktop.get("latest_process_action", {}).get("action", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=40),
+            "pid": int(desktop.get("latest_process_action", {}).get("pid", 0) or 0) if isinstance(desktop.get("latest_process_action", {}), dict) else 0,
+            "process_name": _trim_text(desktop.get("latest_process_action", {}).get("process_name", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=120),
+            "owned": bool(desktop.get("latest_process_action", {}).get("owned", False)) if isinstance(desktop.get("latest_process_action", {}), dict) else False,
+            "owned_label": _trim_text(desktop.get("latest_process_action", {}).get("owned_label", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=120),
+            "summary": _trim_text(desktop.get("latest_process_action", {}).get("summary", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=220),
+        },
+        "latest_command_result": {
+            "command": _trim_text(desktop.get("latest_command_result", {}).get("command", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=220),
+            "shell_kind": _trim_text(desktop.get("latest_command_result", {}).get("shell_kind", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=40),
+            "exit_code": int(desktop.get("latest_command_result", {}).get("exit_code", 0) or 0) if isinstance(desktop.get("latest_command_result", {}), dict) else 0,
+            "timed_out": bool(desktop.get("latest_command_result", {}).get("timed_out", False)) if isinstance(desktop.get("latest_command_result", {}), dict) else False,
+            "summary": _trim_text(desktop.get("latest_command_result", {}).get("summary", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=220),
+        },
+        "latest_processes": [
+            {
+                "pid": int(item.get("pid", 0) or 0),
+                "process_name": _trim_text(item.get("process_name", ""), limit=120),
+                "status": _trim_text(item.get("status", ""), limit=60),
+                "owned": bool(item.get("owned", False)),
+            }
+            for item in list(desktop.get("latest_processes", []))[:4]
+            if isinstance(item, dict)
+        ],
     }
 
 

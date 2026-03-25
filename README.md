@@ -44,14 +44,21 @@ Implemented bounded desktop-control primitives:
 - get active window
 - focus a specific window
 - capture a bounded screenshot
-- approval-gated single click
+- approval-gated mouse move / hover / click / right click / double click
+- approval-gated bounded scroll
+- approval-gated bounded safe key press and short key sequences
 - approval-gated bounded text entry
+- bounded process listing / inspection
+- approval-gated owned-process start / stop
+- approval-gated bounded local command execution with timeout and captured output
 
 Not included:
 
 - drag/drop
-- arbitrary hotkeys
+- arbitrary hotkeys or unrestricted macro playback
 - unrestricted keyboard/mouse control
+- broad kill-anything process control
+- giant shell-agent behavior
 - autonomous desktop navigation loops
 - broad dangerous autonomy
 

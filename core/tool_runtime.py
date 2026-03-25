@@ -19,8 +19,16 @@ BROWSER_APPROVAL_CONTROLLED_TOOLS = {
 }
 DESKTOP_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_click_point",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
+    "desktop_scroll",
     "desktop_press_key",
+    "desktop_press_key_sequence",
     "desktop_type_text",
+    "desktop_start_process",
+    "desktop_stop_process",
+    "desktop_run_command",
 }
 BROWSER_APPROVAL_POSITIVE_PHRASES = (
     "approval granted",
@@ -54,8 +62,14 @@ DESKTOP_APPROVAL_POSITIVE_PHRASES = (
     "approval_status=approved",
     "approved to continue",
     "approved to click",
+    "approved to scroll",
+    "approved to hover",
+    "approved to move the mouse",
     "approved to press",
     "approved to type",
+    "approved to run the command",
+    "approved to start the process",
+    "approved to stop the process",
     "desktop action is now approved",
     "desktop step is now approved",
     "explicitly approve the paused desktop action",
@@ -344,14 +358,39 @@ class ToolRuntime:
         elif tool_name == "desktop_capture_screenshot":
             args.setdefault("scope", "active_window")
             args.setdefault("limit", 12)
+        elif tool_name in {"desktop_move_mouse", "desktop_hover_point", "desktop_click_mouse", "desktop_scroll"}:
+            args.setdefault("max_observation_age_seconds", 45)
+            if tool_name == "desktop_hover_point":
+                args.setdefault("hover_ms", 600)
+            if tool_name == "desktop_scroll":
+                args.setdefault("direction", "down")
+                args.setdefault("scroll_units", 3)
         elif tool_name == "desktop_click_point":
             args.setdefault("max_observation_age_seconds", 45)
         elif tool_name == "desktop_press_key":
             args.setdefault("repeat", 1)
             args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_press_key_sequence":
+            args.setdefault("max_observation_age_seconds", 45)
         elif tool_name == "desktop_type_text":
             args.setdefault("max_text_length", 160)
             args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_list_processes":
+            args.setdefault("limit", 8)
+            args.setdefault("include_background", True)
+        elif tool_name == "desktop_inspect_process":
+            args.setdefault("child_limit", 4)
+            if not any(str(args.get(key, "")).strip() for key in ("pid", "process_name", "owned_label")):
+                active_process_name = str(getattr(task_state, "desktop_active_window_process", "")).strip()
+                if active_process_name:
+                    args.setdefault("process_name", active_process_name)
+        elif tool_name == "desktop_start_process":
+            args.setdefault("owned_label", "")
+        elif tool_name == "desktop_stop_process":
+            args.setdefault("wait_seconds", 2)
+        elif tool_name == "desktop_run_command":
+            args.setdefault("timeout_seconds", 8)
+            args.setdefault("shell_kind", "powershell")
 
         if tool_name in DESKTOP_APPROVAL_CONTROLLED_TOOLS:
             approval_status = str(args.get("approval_status", "")).strip().lower()

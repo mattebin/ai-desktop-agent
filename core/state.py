@@ -47,10 +47,20 @@ DESKTOP_TOOL_STEP_LABELS = {
     "desktop_list_windows": "list visible windows",
     "desktop_get_active_window": "get active window",
     "desktop_focus_window": "focus window",
+    "desktop_move_mouse": "move mouse",
+    "desktop_hover_point": "hover point",
+    "desktop_click_mouse": "click mouse",
     "desktop_capture_screenshot": "capture screenshot",
     "desktop_click_point": "click point",
+    "desktop_scroll": "scroll",
     "desktop_press_key": "press key",
+    "desktop_press_key_sequence": "press key sequence",
     "desktop_type_text": "type text",
+    "desktop_list_processes": "list processes",
+    "desktop_inspect_process": "inspect process",
+    "desktop_start_process": "start process",
+    "desktop_stop_process": "stop process",
+    "desktop_run_command": "run command",
 }
 MAX_TASK_GOAL_CHARS = 4000
 MAX_TASK_REPLACEMENT_GOAL_CHARS = 2000
@@ -1058,6 +1068,10 @@ class TaskState:
         latest_window_readiness: Dict[str, Any] = {}
         latest_visual_stability: Dict[str, Any] = {}
         latest_process_context: Dict[str, Any] = {}
+        latest_mouse_action: Dict[str, Any] = {}
+        latest_process_action: Dict[str, Any] = {}
+        latest_command_result: Dict[str, Any] = {}
+        latest_processes: List[Dict[str, Any]] = []
         for step in reversed(self.steps):
             tool_name = str(step.get("tool", "")).strip()
             if not tool_name.startswith("desktop_"):
@@ -1100,6 +1114,57 @@ class TaskState:
                         "running": bool(process_context.get("running", False)),
                         "summary": str(process_context.get("summary", "")).strip()[:220],
                     }
+            if not latest_mouse_action:
+                mouse_action = result.get("mouse_action", {}) if isinstance(result.get("mouse_action", {}), dict) else {}
+                if mouse_action and str(mouse_action.get("action", "")).strip():
+                    point = result.get("point", {}) if isinstance(result.get("point", {}), dict) else {}
+                    latest_mouse_action = {
+                        "action": str(mouse_action.get("action", "")).strip()[:40],
+                        "button": str(mouse_action.get("button", "")).strip()[:20],
+                        "click_count": int(mouse_action.get("click_count", 0) or 0),
+                        "point": (
+                            f"({point.get('x', '')}, {point.get('y', '')})"[:80]
+                            if point
+                            else ""
+                        ),
+                        "summary": str(mouse_action.get("summary", "")).strip()[:220],
+                    }
+            if not latest_process_action:
+                process_action = result.get("process_action", {}) if isinstance(result.get("process_action", {}), dict) else {}
+                if process_action and str(process_action.get("action", "")).strip():
+                    latest_process_action = {
+                        "action": str(process_action.get("action", "")).strip()[:40],
+                        "pid": int(process_action.get("pid", 0) or 0),
+                        "process_name": str(process_action.get("process_name", "")).strip()[:120],
+                        "owned": bool(process_action.get("owned", False)),
+                        "owned_label": str(process_action.get("owned_label", "")).strip()[:120],
+                        "summary": str(process_action.get("summary", "")).strip()[:220],
+                    }
+            if not latest_command_result:
+                command_result = result.get("command_result", {}) if isinstance(result.get("command_result", {}), dict) else {}
+                if command_result and str(command_result.get("command", "")).strip():
+                    latest_command_result = {
+                        "command": str(command_result.get("command", "")).strip()[:220],
+                        "shell_kind": str(command_result.get("shell_kind", "")).strip()[:40],
+                        "exit_code": int(command_result.get("exit_code", 0) or 0),
+                        "timed_out": bool(command_result.get("timed_out", False)),
+                        "stdout_excerpt": str(command_result.get("stdout_excerpt", "")).strip()[:220],
+                        "stderr_excerpt": str(command_result.get("stderr_excerpt", "")).strip()[:220],
+                        "summary": str(command_result.get("summary", "")).strip()[:220],
+                    }
+            if not latest_processes:
+                processes = result.get("processes", []) if isinstance(result.get("processes", []), list) else []
+                if processes:
+                    latest_processes = [
+                        {
+                            "pid": int(item.get("pid", 0) or 0),
+                            "process_name": str(item.get("process_name", "")).strip()[:120],
+                            "status": str(item.get("status", "")).strip()[:60],
+                            "owned": bool(item.get("owned", False)),
+                        }
+                        for item in processes[:4]
+                        if isinstance(item, dict)
+                    ]
             if step.get("status") not in {"failed", "paused"}:
                 if latest_recovery and latest_window_readiness and latest_visual_stability and latest_process_context:
                     break
@@ -1269,6 +1334,10 @@ class TaskState:
             "latest_window_readiness": latest_window_readiness,
             "latest_visual_stability": latest_visual_stability,
             "latest_process_context": latest_process_context,
+            "latest_mouse_action": latest_mouse_action,
+            "latest_process_action": latest_process_action,
+            "latest_command_result": latest_command_result,
+            "latest_processes": latest_processes,
             "uncertainties": uncertainties,
         }
 
@@ -2692,6 +2761,15 @@ class TaskState:
                 lines.append(f"- Last typed text preview: {desktop_activity.get('last_typed_text_preview', '')}")
             if desktop_activity.get("last_key_sequence"):
                 lines.append(f"- Last key sequence: {desktop_activity.get('last_key_sequence', '')}")
+            latest_mouse_action = desktop_activity.get("latest_mouse_action", {}) if isinstance(desktop_activity.get("latest_mouse_action", {}), dict) else {}
+            if latest_mouse_action.get("summary"):
+                lines.append(f"- Latest mouse action: {latest_mouse_action.get('summary', '')}")
+            latest_process_action = desktop_activity.get("latest_process_action", {}) if isinstance(desktop_activity.get("latest_process_action", {}), dict) else {}
+            if latest_process_action.get("summary"):
+                lines.append(f"- Latest process action: {latest_process_action.get('summary', '')}")
+            latest_command_result = desktop_activity.get("latest_command_result", {}) if isinstance(desktop_activity.get("latest_command_result", {}), dict) else {}
+            if latest_command_result.get("summary"):
+                lines.append(f"- Latest command result: {latest_command_result.get('summary', '')}")
             if desktop_activity.get("screenshot_path"):
                 scope = str(desktop_activity.get("screenshot_scope", "")).strip()
                 if scope:
@@ -2778,6 +2856,15 @@ class TaskState:
                 lines.append(process_line)
                 if latest_process_context.get("summary"):
                     lines.append(f"- Desktop process summary: {latest_process_context.get('summary', '')}")
+            latest_mouse_action = desktop_activity.get("latest_mouse_action", {}) if isinstance(desktop_activity.get("latest_mouse_action", {}), dict) else {}
+            if latest_mouse_action.get("summary"):
+                lines.append(f"- Desktop mouse action: {latest_mouse_action.get('summary', '')}")
+            latest_process_action = desktop_activity.get("latest_process_action", {}) if isinstance(desktop_activity.get("latest_process_action", {}), dict) else {}
+            if latest_process_action.get("summary"):
+                lines.append(f"- Desktop process action: {latest_process_action.get('summary', '')}")
+            latest_command_result = desktop_activity.get("latest_command_result", {}) if isinstance(desktop_activity.get("latest_command_result", {}), dict) else {}
+            if latest_command_result.get("summary"):
+                lines.append(f"- Desktop command result: {latest_command_result.get('summary', '')}")
             if desktop_activity.get("actions"):
                 lines.append("Recent desktop actions:")
                 for action in desktop_activity.get("actions", [])[:4]:

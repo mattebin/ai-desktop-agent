@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from core.backend_schemas import normalize_desktop_window_readiness
+from core.backend_schemas import (
+    normalize_desktop_command_result,
+    normalize_desktop_pointer_action,
+    normalize_desktop_process_action,
+    normalize_desktop_window_readiness,
+)
 from core.desktop_evidence import (
     build_desktop_evidence_bundle,
     collect_display_metadata,
@@ -23,9 +28,14 @@ from tools.desktop_backends import (
     create_ui_evidence_backend,
     create_window_backend,
     describe_backends,
+    inspect_process_details,
+    list_process_contexts,
     probe_process_context,
     probe_visual_stability,
     probe_window_readiness,
+    run_bounded_command,
+    start_owned_process,
+    stop_owned_process,
 )
 
 
@@ -44,13 +54,31 @@ DESKTOP_TOOL_NAMES = {
     "desktop_recover_window",
     "desktop_wait_for_window_ready",
     "desktop_click_point",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
+    "desktop_scroll",
     "desktop_press_key",
+    "desktop_press_key_sequence",
     "desktop_type_text",
+    "desktop_list_processes",
+    "desktop_inspect_process",
+    "desktop_start_process",
+    "desktop_stop_process",
+    "desktop_run_command",
 }
 DESKTOP_APPROVAL_TOOL_NAMES = {
     "desktop_click_point",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
+    "desktop_scroll",
     "desktop_press_key",
+    "desktop_press_key_sequence",
     "desktop_type_text",
+    "desktop_start_process",
+    "desktop_stop_process",
+    "desktop_run_command",
 }
 DESKTOP_SENSITIVE_FIELD_TERMS = {
     "2fa",
@@ -65,7 +93,16 @@ DESKTOP_SENSITIVE_FIELD_TERMS = {
     "verification code",
 }
 DESKTOP_DEFAULT_KEY_REPEAT = 1
-DESKTOP_MAX_KEY_REPEAT = 3
+DESKTOP_MAX_KEY_REPEAT = 4
+DESKTOP_MAX_KEY_SEQUENCE_STEPS = 3
+DESKTOP_DEFAULT_HOVER_MS = 600
+DESKTOP_MAX_HOVER_MS = 2_000
+DESKTOP_DEFAULT_SCROLL_UNITS = 3
+DESKTOP_MAX_SCROLL_UNITS = 8
+DESKTOP_DEFAULT_PROCESS_LIMIT = 8
+DESKTOP_MAX_PROCESS_LIMIT = 16
+DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS = 8
+DESKTOP_MAX_COMMAND_TIMEOUT_SECONDS = 20
 DESKTOP_SAFE_KEY_VK = {
     "enter": 0x0D,
     "tab": 0x09,
@@ -85,6 +122,7 @@ DESKTOP_SAFE_KEY_VK = {
     "arrowright": 0x27,
     "home": 0x24,
     "end": 0x23,
+    "insert": 0x2D,
     "pageup": 0x21,
     "pagedown": 0x22,
     "a": 0x41,
@@ -114,6 +152,7 @@ DESKTOP_SAFE_KEY_DISPLAY = {
     "arrowright": "ArrowRight",
     "home": "Home",
     "end": "End",
+    "insert": "Insert",
     "pageup": "PageUp",
     "pagedown": "PageDown",
     "a": "A",
@@ -151,6 +190,10 @@ KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
+WHEEL_DELTA = 120
 DWMWA_CLOAKED = 14
 
 
@@ -1122,6 +1165,10 @@ def _desktop_result(
     point: Dict[str, int] | None = None,
     typed_text_preview: str = "",
     key_sequence_preview: str = "",
+    mouse_action: Dict[str, Any] | None = None,
+    process_action: Dict[str, Any] | None = None,
+    command_result: Dict[str, Any] | None = None,
+    processes: List[Dict[str, Any]] | None = None,
     desktop_evidence: Dict[str, Any] | None = None,
     desktop_evidence_ref: Dict[str, Any] | None = None,
     target_window: Dict[str, Any] | None = None,
@@ -1141,6 +1188,10 @@ def _desktop_result(
     stability = visual_stability if isinstance(visual_stability, dict) else {}
     process_view = process_context if isinstance(process_context, dict) else {}
     scene_view = scene if isinstance(scene, dict) else {}
+    pointer_view = normalize_desktop_pointer_action(mouse_action if isinstance(mouse_action, dict) else {})
+    process_action_view = normalize_desktop_process_action(process_action if isinstance(process_action, dict) else {})
+    command_view = normalize_desktop_command_result(command_result if isinstance(command_result, dict) else {})
+    process_items = [dict(item) for item in list(processes or [])[:12] if isinstance(item, dict)]
     return {
         "ok": bool(ok),
         "action": action,
@@ -1167,6 +1218,10 @@ def _desktop_result(
         "point": point if isinstance(point, dict) else {},
         "typed_text_preview": _trim_text(typed_text_preview, limit=80),
         "key_sequence_preview": _trim_text(key_sequence_preview, limit=80),
+        "mouse_action": pointer_view,
+        "process_action": process_action_view,
+        "command_result": command_view,
+        "processes": process_items,
         "desktop_evidence": evidence,
         "desktop_evidence_ref": evidence_ref,
         "evidence_id": _trim_text(evidence_ref.get("evidence_id", "") or evidence.get("evidence_id", ""), limit=80),
@@ -1217,6 +1272,131 @@ def _foreground_window_matches(observation: Dict[str, Any], current_active_windo
     if not expected_window_id:
         return bool(current_window_id)
     return expected_window_id == current_window_id
+
+
+def _current_cursor_point() -> Dict[str, int]:
+    point = POINT()
+    try:
+        if user32.GetCursorPos(ctypes.byref(point)):
+            return {"x": int(point.x), "y": int(point.y)}
+    except Exception:
+        pass
+    return {"x": 0, "y": 0}
+
+
+def _window_center_point(window: Dict[str, Any]) -> Dict[str, int]:
+    rect = window.get("rect", {}) if isinstance(window.get("rect", {}), dict) else {}
+    return {
+        "x": int(rect.get("x", 0) or 0) + max(1, int(rect.get("width", 0) or 0) // 2),
+        "y": int(rect.get("y", 0) or 0) + max(1, int(rect.get("height", 0) or 0) // 2),
+    }
+
+
+def _normalize_mouse_button(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token not in {"left", "right"}:
+        return "left"
+    return token
+
+
+def _click_button_flags(button: str) -> Tuple[int, int]:
+    normalized = _normalize_mouse_button(button)
+    if normalized == "right":
+        return MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
+    return MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP
+
+
+def _resolve_pointer_target_window(args: Dict[str, Any], active_window: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    explicit_target = any(str(args.get(key, "")).strip() for key in ("title", "match", "window_id"))
+    if not explicit_target:
+        if isinstance(active_window, dict) and active_window.get("window_id"):
+            return active_window, ""
+        return {}, "No active window is available for the bounded desktop pointer action."
+
+    target_window, _candidates, lookup_error, _match_info = _find_window(args)
+    if lookup_error:
+        return {}, lookup_error
+    if not isinstance(target_window, dict) or not target_window.get("window_id"):
+        return {}, "Could not resolve the requested target window for the bounded desktop pointer action."
+    active_window_id = str(active_window.get("window_id", "")).strip()
+    target_window_id = str(target_window.get("window_id", "")).strip()
+    if active_window_id and target_window_id and active_window_id != target_window_id:
+        return target_window, "The target window is not active. Focus or recover it before using a real bounded pointer action."
+    return target_window, ""
+
+
+def _resolve_pointer_point(
+    args: Dict[str, Any],
+    *,
+    active_window: Dict[str, Any],
+    allow_default_center: bool = False,
+) -> Tuple[Dict[str, int], Dict[str, Any], str]:
+    coordinate_mode = str(args.get("coordinate_mode", "")).strip().lower()
+    if not coordinate_mode:
+        coordinate_mode = "window_relative" if any(key in args for key in ("relative_x", "relative_y")) else "absolute"
+    target_window, target_error = _resolve_pointer_target_window(args, active_window)
+    if target_error and coordinate_mode == "window_relative":
+        return {}, target_window, target_error
+
+    point_x_raw = args.get("x", args.get("relative_x", None))
+    point_y_raw = args.get("y", args.get("relative_y", None))
+    if point_x_raw in {None, ""} or point_y_raw in {None, ""}:
+        if allow_default_center and target_window.get("window_id"):
+            center = _window_center_point(target_window)
+            return center, target_window, ""
+        return {}, target_window, "Provide bounded pointer coordinates before using this desktop pointer tool."
+
+    point_x = _coerce_int(point_x_raw, 0, minimum=-20_000, maximum=20_000)
+    point_y = _coerce_int(point_y_raw, 0, minimum=-20_000, maximum=20_000)
+    if coordinate_mode == "window_relative":
+        rect = target_window.get("rect", {}) if isinstance(target_window.get("rect", {}), dict) else {}
+        width = int(rect.get("width", 0) or 0)
+        height = int(rect.get("height", 0) or 0)
+        if width <= 0 or height <= 0:
+            return {}, target_window, "The target window does not expose usable visible bounds for a relative pointer action."
+        absolute_point = {
+            "x": int(rect.get("x", 0) or 0) + point_x,
+            "y": int(rect.get("y", 0) or 0) + point_y,
+        }
+    else:
+        absolute_point = {"x": point_x, "y": point_y}
+
+    screen_rect = _virtual_screen_rect()
+    if not _point_in_rect(int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0)), screen_rect):
+        return {}, target_window, f"The point ({absolute_point.get('x', 0)}, {absolute_point.get('y', 0)}) is outside the visible desktop."
+    if target_window.get("window_id"):
+        target_rect = target_window.get("rect", {}) if isinstance(target_window.get("rect", {}), dict) else {}
+        if not _point_in_rect(int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0)), target_rect):
+            return {}, target_window, (
+                f"The point ({absolute_point.get('x', 0)}, {absolute_point.get('y', 0)}) is outside "
+                f"the target window '{target_window.get('title', 'window')}'."
+            )
+    return absolute_point, target_window, target_error
+
+
+def _send_mouse_click(button: str, click_count: int) -> bool:
+    down_flag, up_flag = _click_button_flags(button)
+    bounded_click_count = _coerce_int(click_count, 1, minimum=1, maximum=2)
+    inputs: List[INPUT] = []
+    for _ in range(bounded_click_count):
+        inputs.append(INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, down_flag, 0, None))))
+        inputs.append(INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, up_flag, 0, None))))
+    payload = (INPUT * len(inputs))(*inputs)
+    sent = int(user32.SendInput(len(inputs), ctypes.byref(payload), ctypes.sizeof(INPUT)) or 0)
+    return sent == len(inputs)
+
+
+def _send_mouse_scroll(direction: str, scroll_units: int) -> bool:
+    normalized_direction = str(direction or "").strip().lower()
+    if normalized_direction not in {"up", "down"}:
+        return False
+    bounded_units = _coerce_int(scroll_units, DESKTOP_DEFAULT_SCROLL_UNITS, minimum=1, maximum=DESKTOP_MAX_SCROLL_UNITS)
+    signed_delta = WHEEL_DELTA * bounded_units * (1 if normalized_direction == "up" else -1)
+    inputs = (INPUT * 1)(
+        INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, ctypes.c_uint32(signed_delta & 0xFFFFFFFF).value, MOUSEEVENTF_WHEEL, 0, None)))
+    )
+    sent = int(user32.SendInput(1, ctypes.byref(inputs), ctypes.sizeof(INPUT)) or 0)
+    return sent == 1
 
 
 def _focus_window_handle_native(hwnd: int) -> Tuple[bool, str]:
@@ -1977,151 +2157,445 @@ def _pause_desktop_action(
     )
 
 
-def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
-    x = _coerce_int(args.get("x", 0), 0, minimum=-20_000, maximum=20_000)
-    y = _coerce_int(args.get("y", 0), 0, minimum=-20_000, maximum=20_000)
+def _prepare_pointer_action_context(
+    args: Dict[str, Any],
+    *,
+    action: str,
+    allow_default_center: bool = False,
+) -> Dict[str, Any]:
     token, observation, observation_error = _validate_fresh_observation(args)
     evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
     if observation_error:
         state = _register_observation(active_window=active_window, windows=windows)
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary=observation_error,
-            desktop_state=state,
-            error=observation_error,
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
+        return {
+            "ok": False,
+            "result": _desktop_result(
+                ok=False,
+                action=action,
+                summary=observation_error,
+                desktop_state=state,
+                error=observation_error,
+                desktop_evidence_ref=evidence_ref,
+            ),
+        }
     if not active_window or not _foreground_window_matches(observation, active_window):
         state = _register_observation(active_window=active_window, windows=windows)
-        message = "The previously inspected target window is no longer active. Focus the window and inspect desktop state again before clicking."
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary=message,
-            desktop_state=state,
-            error=message,
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
-
-    screen_rect = _virtual_screen_rect()
-    if not _point_in_rect(x, y, screen_rect):
-        state = _register_observation(active_window=active_window, windows=windows)
-        message = f"The point ({x}, {y}) is outside the visible desktop."
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary=message,
-            desktop_state=state,
-            error=message,
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
-
-    active_rect = active_window.get("rect", {}) if isinstance(active_window.get("rect", {}), dict) else {}
-    if not _point_in_rect(x, y, active_rect):
-        state = _register_observation(active_window=active_window, windows=windows)
-        message = f"The point ({x}, {y}) is outside the active window '{active_window.get('title', 'window')}'."
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary=message,
-            desktop_state=state,
-            error=message,
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
-
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
-        f"Clicking the desktop at ({x}, {y}) in '{active_window.get('title', 'the active window')}' requires explicit approval in this bounded control pass."
-    )
-    checkpoint_target = active_window.get("title", "") or "active window"
-    if not _approval_granted(args):
-        if not _evidence_ref_has_screenshot(evidence_ref):
-            state = _register_observation(active_window=active_window, windows=windows)
-            message = "Approval-gated desktop clicking needs a screenshot-backed inspection of the active window first."
-            return _desktop_result(
+        message = "The previously inspected target window is no longer active. Focus the window and inspect desktop state again before using a real desktop pointer action."
+        return {
+            "ok": False,
+            "result": _desktop_result(
                 ok=False,
-                action="desktop_click_point",
+                action=action,
                 summary=message,
                 desktop_state=state,
                 error=message,
-                point={"x": x, "y": y},
                 desktop_evidence_ref=evidence_ref,
+            ),
+        }
+    point, target_window, point_error = _resolve_pointer_point(
+        args,
+        active_window=active_window,
+        allow_default_center=allow_default_center,
+    )
+    if point_error:
+        state = _register_observation(active_window=active_window, windows=windows)
+        return {
+            "ok": False,
+            "result": _desktop_result(
+                ok=False,
+                action=action,
+                summary=point_error,
+                desktop_state=state,
+                error=point_error,
+                point=point if isinstance(point, dict) else {},
+                target_window=target_window,
+                desktop_evidence_ref=evidence_ref,
+            ),
+        }
+    return {
+        "ok": True,
+        "token": token,
+        "observation": observation,
+        "evidence_ref": evidence_ref,
+        "active_window": active_window,
+        "windows": windows,
+        "point": point,
+        "target_window": target_window if isinstance(target_window, dict) and target_window.get("window_id") else active_window,
+    }
+
+
+def desktop_move_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
+    context = _prepare_pointer_action_context(args, action="desktop_move_mouse")
+    if not context.get("ok", False):
+        return context.get("result", {})
+
+    point = context["point"]
+    active_window = context["active_window"]
+    windows = context["windows"]
+    evidence_ref = context["evidence_ref"]
+    target_window = context["target_window"]
+    checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: move mouse"
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Moving the desktop cursor to ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
+    )
+    if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop mouse movement needs a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_move_mouse",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                point=point,
+                desktop_evidence_ref=evidence_ref,
+                target_window=target_window,
             )
         return _pause_desktop_action(
-            action="desktop_click_point",
-            summary=f"Approval required before clicking ({x}, {y}) in '{checkpoint_target}'.",
+            action="desktop_move_mouse",
+            summary=f"Approval required before moving the mouse to ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}'.",
             active_window=active_window,
             windows=windows,
             checkpoint_reason=checkpoint_reason,
-            checkpoint_target=f"{checkpoint_target} @ ({x}, {y})",
+            checkpoint_target=checkpoint_target,
             checkpoint_resume_args={
-                "x": x,
-                "y": y,
-                "observation_token": token,
+                "x": int(point.get("x", 0) or 0),
+                "y": int(point.get("y", 0) or 0),
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "observation_token": context["token"],
                 "expected_window_id": active_window.get("window_id", ""),
                 "expected_window_title": active_window.get("title", ""),
                 "evidence_id": evidence_ref.get("evidence_id", ""),
             },
-            point={"x": x, "y": y},
+            point=point,
             desktop_evidence_ref=evidence_ref,
         )
 
-    original_point = POINT()
-    try:
-        user32.GetCursorPos(ctypes.byref(original_point))
-    except Exception:
-        original_point = POINT(x=x, y=y)
-
-    if not user32.SetCursorPos(x, y):
-        state = _register_observation(active_window=active_window, windows=windows)
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary="Could not move the cursor to the requested point.",
-            desktop_state=state,
-            error="Could not move the cursor to the requested point.",
-            approval_status="approved",
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
-
-    inputs = (INPUT * 2)(
-        INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None))),
-        INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None))),
+    moved = bool(user32.SetCursorPos(int(point.get("x", 0) or 0), int(point.get("y", 0) or 0)))
+    active_after = _active_window_info()
+    observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    mouse_action = {
+        "action": "move",
+        "point": point,
+        "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "reason": "mouse_moved" if moved else "error",
+        "summary": (
+            f"Moved the mouse to ({point.get('x')}, {point.get('y')}) in '{active_after.get('title', target_window.get('title', 'the active window'))}'."
+            if moved
+            else "Could not move the mouse to the requested bounded point."
+        ),
+    }
+    return _desktop_result(
+        ok=moved,
+        action="desktop_move_mouse",
+        summary=mouse_action["summary"],
+        desktop_state=observation_after,
+        error="" if moved else "Could not move the mouse to the requested bounded point.",
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        point=point,
+        mouse_action=mouse_action,
+        desktop_evidence_ref=evidence_ref,
+        target_window=target_window,
     )
-    sent = int(user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT)) or 0)
+
+
+def desktop_hover_point(args: Dict[str, Any]) -> Dict[str, Any]:
+    context = _prepare_pointer_action_context(args, action="desktop_hover_point")
+    if not context.get("ok", False):
+        return context.get("result", {})
+
+    point = context["point"]
+    active_window = context["active_window"]
+    windows = context["windows"]
+    evidence_ref = context["evidence_ref"]
+    target_window = context["target_window"]
+    hover_ms = _coerce_int(args.get("hover_ms", DESKTOP_DEFAULT_HOVER_MS), DESKTOP_DEFAULT_HOVER_MS, minimum=120, maximum=DESKTOP_MAX_HOVER_MS)
+    checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: hover"
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Hovering the desktop cursor over ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
+    )
+    if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop hovering needs a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_hover_point",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                point=point,
+                desktop_evidence_ref=evidence_ref,
+                target_window=target_window,
+            )
+        return _pause_desktop_action(
+            action="desktop_hover_point",
+            summary=f"Approval required before hovering over ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "x": int(point.get("x", 0) or 0),
+                "y": int(point.get("y", 0) or 0),
+                "hover_ms": hover_ms,
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "observation_token": context["token"],
+                "expected_window_id": active_window.get("window_id", ""),
+                "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            point=point,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    moved = bool(user32.SetCursorPos(int(point.get("x", 0) or 0), int(point.get("y", 0) or 0)))
+    if moved:
+        time.sleep(max(0.12, hover_ms / 1000.0))
+    active_after = _active_window_info()
+    observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    mouse_action = {
+        "action": "hover",
+        "point": point,
+        "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "hover_ms": hover_ms,
+        "reason": "hovered" if moved else "error",
+        "summary": (
+            f"Hovered over ({point.get('x')}, {point.get('y')}) in '{active_after.get('title', target_window.get('title', 'the active window'))}' for {hover_ms} ms."
+            if moved
+            else "Could not hover over the requested bounded desktop point."
+        ),
+    }
+    return _desktop_result(
+        ok=moved,
+        action="desktop_hover_point",
+        summary=mouse_action["summary"],
+        desktop_state=observation_after,
+        error="" if moved else "Could not hover over the requested bounded desktop point.",
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        point=point,
+        mouse_action=mouse_action,
+        desktop_evidence_ref=evidence_ref,
+        target_window=target_window,
+    )
+
+
+def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
+    context = _prepare_pointer_action_context(args, action="desktop_click_mouse")
+    if not context.get("ok", False):
+        return context.get("result", {})
+
+    point = context["point"]
+    active_window = context["active_window"]
+    windows = context["windows"]
+    evidence_ref = context["evidence_ref"]
+    target_window = context["target_window"]
+    button = _normalize_mouse_button(args.get("button", "left"))
+    click_count = 2 if _coerce_bool(args.get("double_click", False), False) else _coerce_int(args.get("click_count", 1), 1, minimum=1, maximum=2)
+    click_label = f"{button} {'double-click' if click_count == 2 else 'click'}"
+    checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: {click_label}"
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"{click_label.title()}ing at ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
+    )
+    if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop mouse clicks need a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_click_mouse",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                point=point,
+                desktop_evidence_ref=evidence_ref,
+                target_window=target_window,
+            )
+        return _pause_desktop_action(
+            action="desktop_click_mouse",
+            summary=f"Approval required before performing a {click_label} at ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "x": int(point.get("x", 0) or 0),
+                "y": int(point.get("y", 0) or 0),
+                "button": button,
+                "click_count": click_count,
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "observation_token": context["token"],
+                "expected_window_id": active_window.get("window_id", ""),
+                "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            point=point,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    original_point = _current_cursor_point()
+    moved = bool(user32.SetCursorPos(int(point.get("x", 0) or 0), int(point.get("y", 0) or 0)))
+    clicked = moved and _send_mouse_click(button, click_count)
     try:
-        user32.SetCursorPos(original_point.x, original_point.y)
+        user32.SetCursorPos(int(original_point.get("x", 0) or 0), int(original_point.get("y", 0) or 0))
     except Exception:
         pass
     active_after = _active_window_info()
     observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
-    if sent != 2:
-        return _desktop_result(
-            ok=False,
-            action="desktop_click_point",
-            summary="The desktop click did not complete.",
-            desktop_state=observation_after,
-            error="The desktop click did not complete.",
-            approval_status="approved",
-            point={"x": x, "y": y},
-            desktop_evidence_ref=evidence_ref,
-        )
+    mouse_action = {
+        "action": "click",
+        "button": button,
+        "click_count": click_count,
+        "point": point,
+        "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "reason": "clicked" if clicked else "error",
+        "summary": (
+            f"Performed a {click_label} at ({point.get('x')}, {point.get('y')}) in '{active_after.get('title', target_window.get('title', 'the active window'))}'."
+            if clicked
+            else f"Could not perform the requested bounded {click_label}."
+        ),
+    }
     return _desktop_result(
-        ok=True,
-        action="desktop_click_point",
-        summary=f"Clicked ({x}, {y}) in '{active_after.get('title', checkpoint_target)}'.",
+        ok=clicked,
+        action="desktop_click_mouse",
+        summary=mouse_action["summary"],
         desktop_state=observation_after,
+        error="" if clicked else f"Could not perform the requested bounded {click_label}.",
         approval_status="approved",
         workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
-        point={"x": x, "y": y},
+        point=point,
+        mouse_action=mouse_action,
         desktop_evidence_ref=evidence_ref,
+        target_window=target_window,
+    )
+
+
+def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
+    delegated_args = dict(args)
+    delegated_args.setdefault("button", "left")
+    delegated_args.setdefault("click_count", 1)
+    result = desktop_click_mouse(delegated_args)
+    if not isinstance(result, dict):
+        return result
+    result["action"] = "desktop_click_point"
+    if str(result.get("checkpoint_tool", "")).strip() == "desktop_click_mouse":
+        result["checkpoint_tool"] = "desktop_click_point"
+    if isinstance(result.get("checkpoint_resume_args", {}), dict):
+        result["checkpoint_resume_args"].pop("click_count", None)
+        result["checkpoint_resume_args"].pop("button", None)
+    if result.get("summary"):
+        result["summary"] = str(result.get("summary", "")).replace("bounded left click", "desktop click")
+    return result
+
+
+def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
+    context = _prepare_pointer_action_context(args, action="desktop_scroll", allow_default_center=True)
+    if not context.get("ok", False):
+        return context.get("result", {})
+
+    point = context["point"]
+    active_window = context["active_window"]
+    windows = context["windows"]
+    evidence_ref = context["evidence_ref"]
+    target_window = context["target_window"]
+    direction = str(args.get("direction", "down")).strip().lower()
+    if direction not in {"up", "down"}:
+        state = _register_observation(active_window=active_window, windows=windows)
+        message = "desktop_scroll only supports bounded 'up' or 'down' directions."
+        return _desktop_result(
+            ok=False,
+            action="desktop_scroll",
+            summary=message,
+            desktop_state=state,
+            error=message,
+            point=point,
+            desktop_evidence_ref=evidence_ref,
+            target_window=target_window,
+        )
+    scroll_units = _coerce_int(args.get("scroll_units", args.get("lines", DESKTOP_DEFAULT_SCROLL_UNITS)), DESKTOP_DEFAULT_SCROLL_UNITS, minimum=1, maximum=DESKTOP_MAX_SCROLL_UNITS)
+    checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} :: scroll {direction} x{scroll_units}"
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Scrolling {direction} by {scroll_units} unit(s) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
+    )
+    if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            state = _register_observation(active_window=active_window, windows=windows)
+            message = "Approval-gated desktop scrolling needs a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_scroll",
+                summary=message,
+                desktop_state=state,
+                error=message,
+                point=point,
+                desktop_evidence_ref=evidence_ref,
+                target_window=target_window,
+            )
+        return _pause_desktop_action(
+            action="desktop_scroll",
+            summary=f"Approval required before scrolling {direction} by {scroll_units} unit(s) in '{target_window.get('title', active_window.get('title', 'the active window'))}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "x": int(point.get("x", 0) or 0),
+                "y": int(point.get("y", 0) or 0),
+                "direction": direction,
+                "scroll_units": scroll_units,
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "observation_token": context["token"],
+                "expected_window_id": active_window.get("window_id", ""),
+                "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            point=point,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    original_point = _current_cursor_point()
+    moved = bool(user32.SetCursorPos(int(point.get("x", 0) or 0), int(point.get("y", 0) or 0)))
+    scrolled = moved and _send_mouse_scroll(direction, scroll_units)
+    try:
+        user32.SetCursorPos(int(original_point.get("x", 0) or 0), int(original_point.get("y", 0) or 0))
+    except Exception:
+        pass
+    active_after = _active_window_info()
+    observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    mouse_action = {
+        "action": "scroll",
+        "point": point,
+        "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "scroll_direction": direction,
+        "scroll_units": scroll_units,
+        "reason": "scrolled" if scrolled else "error",
+        "summary": (
+            f"Scrolled {direction} by {scroll_units} unit(s) in '{active_after.get('title', target_window.get('title', 'the active window'))}'."
+            if scrolled
+            else "Could not perform the bounded desktop scroll."
+        ),
+    }
+    return _desktop_result(
+        ok=scrolled,
+        action="desktop_scroll",
+        summary=mouse_action["summary"],
+        desktop_state=observation_after,
+        error="" if scrolled else "Could not perform the bounded desktop scroll.",
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        point=point,
+        mouse_action=mouse_action,
+        desktop_evidence_ref=evidence_ref,
+        target_window=target_window,
     )
 
 
@@ -2193,6 +2667,48 @@ def _desktop_key_sequence_preview(key_name: str, modifiers: List[str], repeat: i
     return preview
 
 
+def _normalize_desktop_key_sequence(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    items: List[Dict[str, Any]] = []
+    for raw_item in value[:DESKTOP_MAX_KEY_SEQUENCE_STEPS]:
+        if not isinstance(raw_item, dict):
+            continue
+        key_name = _normalize_key_name(raw_item.get("key", ""))
+        modifiers = _normalize_modifier_list(raw_item.get("modifiers", []))
+        repeat = _coerce_int(raw_item.get("repeat", 1), 1, minimum=1, maximum=DESKTOP_MAX_KEY_REPEAT)
+        if not key_name:
+            continue
+        items.append({"key": key_name, "modifiers": modifiers, "repeat": repeat})
+    return items
+
+
+def _validate_desktop_key_sequence(sequence_items: List[Dict[str, Any]]) -> str:
+    if not sequence_items:
+        return "Provide a bounded key sequence before using this desktop keyboard tool."
+    for item in sequence_items:
+        validation_error = _validate_desktop_key_request(
+            str(item.get("key", "")).strip(),
+            item.get("modifiers", []) if isinstance(item.get("modifiers", []), list) else [],
+        )
+        if validation_error:
+            return validation_error
+    return ""
+
+
+def _desktop_key_sequence_chain_preview(sequence_items: List[Dict[str, Any]]) -> str:
+    previews = [
+        _desktop_key_sequence_preview(
+            str(item.get("key", "")).strip(),
+            item.get("modifiers", []) if isinstance(item.get("modifiers", []), list) else [],
+            int(item.get("repeat", 1) or 1),
+        )
+        for item in sequence_items
+        if isinstance(item, dict)
+    ]
+    return " -> ".join(part for part in previews if part)[:180]
+
+
 def _send_key_sequence(key_name: str, modifiers: List[str], repeat: int = 1) -> bool:
     vk = DESKTOP_SAFE_KEY_VK.get(key_name)
     if not vk:
@@ -2224,6 +2740,20 @@ def _send_key_sequence(key_name: str, modifiers: List[str], repeat: int = 1) -> 
     payload = (INPUT * len(inputs))(*inputs)
     sent = int(user32.SendInput(len(inputs), ctypes.byref(payload), ctypes.sizeof(INPUT)) or 0)
     return sent == len(inputs)
+
+
+def _send_key_sequence_chain(sequence_items: List[Dict[str, Any]]) -> bool:
+    for index, item in enumerate(sequence_items):
+        ok = _send_key_sequence(
+            str(item.get("key", "")).strip(),
+            item.get("modifiers", []) if isinstance(item.get("modifiers", []), list) else [],
+            int(item.get("repeat", 1) or 1),
+        )
+        if not ok:
+            return False
+        if index < len(sequence_items) - 1:
+            time.sleep(0.05)
+    return True
 
 
 def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2485,6 +3015,423 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _current_desktop_context(*, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    active_window = _active_window_info()
+    windows = _enum_windows(limit=limit)
+    observation = _register_observation(active_window=active_window, windows=windows)
+    return active_window, windows, observation
+
+
+def _active_window_process_target(active_window: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(active_window, dict):
+        return {}
+    return {
+        "pid": _coerce_int(active_window.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": str(active_window.get("process_name", "")).strip(),
+    }
+
+
+def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
+    sequence_items = _normalize_desktop_key_sequence(args.get("sequence", []))
+    key_preview = _desktop_key_sequence_chain_preview(sequence_items)
+    validation_error = _validate_desktop_key_sequence(sequence_items)
+    if validation_error:
+        active_window, windows, observation = _current_desktop_context()
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key_sequence",
+            summary=validation_error,
+            desktop_state=observation,
+            error=validation_error,
+            key_sequence_preview=key_preview,
+            target_window=active_window,
+        )
+
+    token, observation, observation_error = _validate_fresh_observation(args)
+    evidence_ref = _latest_evidence_ref_for_observation(token)
+    active_window, windows, current_observation = _current_desktop_context()
+    if observation_error:
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key_sequence",
+            summary=observation_error,
+            desktop_state=current_observation,
+            error=observation_error,
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+
+    if not active_window or not _foreground_window_matches(observation, active_window):
+        message = "The previously inspected target window is no longer active. Focus the window and inspect desktop state again before sending a bounded key sequence."
+        return _desktop_result(
+            ok=False,
+            action="desktop_press_key_sequence",
+            summary=message,
+            desktop_state=current_observation,
+            error=message,
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Pressing the bounded key sequence {key_preview} in '{active_window.get('title', 'the active window')}' requires explicit approval in this control pass."
+    )
+    checkpoint_target = active_window.get("title", "") or "active window"
+    if not _approval_granted(args):
+        if not _evidence_ref_has_screenshot(evidence_ref):
+            message = "Approval-gated desktop key sequences need a screenshot-backed inspection of the active window first."
+            return _desktop_result(
+                ok=False,
+                action="desktop_press_key_sequence",
+                summary=message,
+                desktop_state=current_observation,
+                error=message,
+                key_sequence_preview=key_preview,
+                desktop_evidence_ref=evidence_ref,
+                target_window=active_window,
+            )
+        return _pause_desktop_action(
+            action="desktop_press_key_sequence",
+            summary=f"Approval required before pressing {key_preview} in '{checkpoint_target}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=f"{checkpoint_target} :: {key_preview}",
+            checkpoint_resume_args={
+                "sequence": sequence_items,
+                "observation_token": token,
+                "expected_window_id": active_window.get("window_id", ""),
+                "expected_window_title": active_window.get("title", ""),
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    ok = _send_key_sequence_chain(sequence_items)
+    active_after, visible_after, observation_after = _current_desktop_context()
+    return _desktop_result(
+        ok=ok,
+        action="desktop_press_key_sequence",
+        summary=(
+            f"Pressed {key_preview} in '{active_after.get('title', active_window.get('title', 'the active window'))}'."
+            if ok
+            else f"Could not press the bounded key sequence {key_preview} in '{active_window.get('title', 'the active window')}'."
+        ),
+        desktop_state=observation_after,
+        error="" if ok else f"Could not press the bounded key sequence {key_preview}.",
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        key_sequence_preview=key_preview,
+        desktop_evidence_ref=evidence_ref,
+        target_window=active_after or active_window,
+    )
+
+
+def desktop_list_processes(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context()
+    query = str(args.get("query", "")).strip()
+    limit = _coerce_int(
+        args.get("limit", DESKTOP_DEFAULT_PROCESS_LIMIT),
+        DESKTOP_DEFAULT_PROCESS_LIMIT,
+        minimum=1,
+        maximum=DESKTOP_MAX_PROCESS_LIMIT,
+    )
+    include_background = _coerce_bool(args.get("include_background", True), True)
+    process_result = list_process_contexts(query=query, limit=limit, include_background=include_background)
+    payload = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
+    processes = payload.get("processes", []) if isinstance(payload.get("processes", []), list) else []
+    summary = str(process_result.get("message", "")).strip() or (
+        f"Listed {len(processes)} bounded process candidates."
+        if processes
+        else "No bounded desktop processes matched the current query."
+    )
+    return _desktop_result(
+        ok=bool(process_result.get("ok", False)),
+        action="desktop_list_processes",
+        summary=summary,
+        desktop_state=observation,
+        error=str(process_result.get("error", "")).strip(),
+        processes=processes,
+        process_action={
+            "action": "list",
+            "reason": str(process_result.get("reason", "process_inspected")).strip() or "process_inspected",
+            "summary": summary,
+        },
+        process_context=processes[0] if len(processes) == 1 and isinstance(processes[0], dict) else {},
+        target_window=active_window,
+    )
+
+
+def desktop_inspect_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context()
+    pid = _coerce_int(args.get("pid", 0), 0, minimum=0, maximum=10_000_000)
+    process_name = str(args.get("process_name", "")).strip()
+    owned_label = str(args.get("owned_label", "")).strip()
+    if pid <= 0 and not process_name and not owned_label:
+        active_target = _active_window_process_target(active_window)
+        pid = int(active_target.get("pid", 0) or 0)
+        process_name = str(active_target.get("process_name", "")).strip()
+    if pid <= 0 and not process_name and not owned_label:
+        message = "No bounded desktop process target was available. Provide pid, process_name, owned_label, or inspect a surfaced window first."
+        return _desktop_result(
+            ok=False,
+            action="desktop_inspect_process",
+            summary=message,
+            desktop_state=observation,
+            error=message,
+            target_window=active_window,
+        )
+
+    child_limit = _coerce_int(args.get("child_limit", 4), 4, minimum=0, maximum=8)
+    process_result = inspect_process_details(pid=pid, process_name=process_name or owned_label, child_limit=child_limit)
+    payload = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
+    process_context = payload.get("process", {}) if isinstance(payload.get("process", {}), dict) else {}
+    children = payload.get("children", []) if isinstance(payload.get("children", []), list) else []
+    summary = str(process_result.get("message", "")).strip() or str(process_context.get("summary", "")).strip() or "Inspected the requested bounded process context."
+    return _desktop_result(
+        ok=bool(process_result.get("ok", False)),
+        action="desktop_inspect_process",
+        summary=summary,
+        desktop_state=observation,
+        error=str(process_result.get("error", "")).strip(),
+        process_context=process_context,
+        processes=children,
+        process_action={
+            "action": "inspect",
+            "pid": int(process_context.get("pid", pid) or pid),
+            "process_name": str(process_context.get("process_name", "") or process_name or owned_label),
+            "owned": bool(payload.get("owned", False)),
+            "owned_label": str(payload.get("owned_label", "")).strip(),
+            "reason": str(process_result.get("reason", "process_inspected")).strip() or "process_inspected",
+            "summary": summary,
+        },
+        target_window=active_window,
+    )
+
+
+def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context()
+    token = str(args.get("observation_token", "")).strip()
+    evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
+    executable = str(args.get("executable", "")).strip()
+    arguments = args.get("arguments", [])
+    if not isinstance(arguments, list):
+        arguments = []
+    bounded_arguments = [_trim_text(item, limit=180) for item in arguments[:8] if _trim_text(item, limit=180)]
+    owned_label = str(args.get("owned_label", "")).strip() or Path(executable).stem
+    checkpoint_target = owned_label or executable or "bounded desktop process"
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Starting the bounded process '{checkpoint_target}' requires explicit approval in this control pass."
+    )
+    if not executable:
+        message = "Provide an executable path before starting a bounded desktop process."
+        return _desktop_result(
+            ok=False,
+            action="desktop_start_process",
+            summary=message,
+            desktop_state=observation,
+            error=message,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+    if not _approval_granted(args):
+        return _pause_desktop_action(
+            action="desktop_start_process",
+            summary=f"Approval required before starting '{checkpoint_target}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "executable": executable,
+                "arguments": bounded_arguments,
+                "cwd": str(args.get("cwd", "")).strip(),
+                "owned_label": owned_label,
+                "shell_kind": str(args.get("shell_kind", "")).strip(),
+                "observation_token": token,
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    process_result = start_owned_process(
+        executable=executable,
+        args=bounded_arguments,
+        cwd=str(args.get("cwd", "")).strip(),
+        env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        owned_label=owned_label,
+    )
+    payload = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
+    process_context = payload.get("process", {}) if isinstance(payload.get("process", {}), dict) else {}
+    observation_after = _register_observation(active_window=_active_window_info(), windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    summary = str(process_result.get("message", "")).strip() or "Started the requested bounded process."
+    return _desktop_result(
+        ok=bool(process_result.get("ok", False)),
+        action="desktop_start_process",
+        summary=summary,
+        desktop_state=observation_after,
+        error=str(process_result.get("error", "")).strip(),
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        process_context=process_context,
+        process_action={
+            "action": "start",
+            "pid": int(process_context.get("pid", 0) or 0),
+            "process_name": str(process_context.get("process_name", "")).strip() or Path(executable).name,
+            "owned": bool(payload.get("owned", False)),
+            "owned_label": str(payload.get("owned_label", "")).strip(),
+            "reason": str(process_result.get("reason", "process_started")).strip() or "process_started",
+            "summary": summary,
+        },
+        target_window=active_window,
+    )
+
+
+def desktop_stop_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context()
+    token = str(args.get("observation_token", "")).strip()
+    evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
+    pid = _coerce_int(args.get("pid", 0), 0, minimum=0, maximum=10_000_000)
+    owned_label = str(args.get("owned_label", "")).strip()
+    if pid <= 0 and not owned_label:
+        active_target = _active_window_process_target(active_window)
+        pid = int(active_target.get("pid", 0) or 0)
+    checkpoint_target = owned_label or (str(pid) if pid > 0 else "owned bounded process")
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Stopping the bounded owned process '{checkpoint_target}' requires explicit approval in this control pass."
+    )
+    if pid <= 0 and not owned_label:
+        message = "Provide an owned process pid or owned_label before stopping a bounded desktop process."
+        return _desktop_result(
+            ok=False,
+            action="desktop_stop_process",
+            summary=message,
+            desktop_state=observation,
+            error=message,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+    if not _approval_granted(args):
+        return _pause_desktop_action(
+            action="desktop_stop_process",
+            summary=f"Approval required before stopping '{checkpoint_target}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "pid": pid,
+                "owned_label": owned_label,
+                "wait_seconds": _coerce_int(args.get("wait_seconds", 2), 2, minimum=1, maximum=5),
+                "observation_token": token,
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    process_result = stop_owned_process(
+        pid=pid,
+        owned_label=owned_label,
+        wait_seconds=float(_coerce_int(args.get("wait_seconds", 2), 2, minimum=1, maximum=5)),
+    )
+    payload = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
+    process_context = payload.get("process", {}) if isinstance(payload.get("process", {}), dict) else {}
+    observation_after = _register_observation(active_window=_active_window_info(), windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    summary = str(process_result.get("message", "")).strip() or "Stopped the requested bounded owned process."
+    return _desktop_result(
+        ok=bool(process_result.get("ok", False)),
+        action="desktop_stop_process",
+        summary=summary,
+        desktop_state=observation_after,
+        error=str(process_result.get("error", "")).strip(),
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        process_context=process_context,
+        process_action={
+            "action": "stop",
+            "pid": int(process_context.get("pid", pid) or pid),
+            "process_name": str(process_context.get("process_name", "")).strip() or str(checkpoint_target).strip(),
+            "owned": bool(payload.get("owned", False)),
+            "owned_label": str(payload.get("owned_label", "")).strip(),
+            "reason": str(process_result.get("reason", "process_stopped")).strip() or "process_stopped",
+            "summary": summary,
+        },
+        target_window=active_window,
+    )
+
+
+def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context()
+    token = str(args.get("observation_token", "")).strip()
+    evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
+    command = str(args.get("command", "")).strip()
+    shell_kind = str(args.get("shell_kind", "powershell")).strip().lower() or "powershell"
+    timeout_seconds = _coerce_int(
+        args.get("timeout_seconds", DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        minimum=1,
+        maximum=DESKTOP_MAX_COMMAND_TIMEOUT_SECONDS,
+    )
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        "Running the requested bounded local command requires explicit approval in this control pass."
+    )
+    checkpoint_target = _trim_text(command, limit=120) or "bounded command"
+    if not command:
+        message = "Provide a bounded command string before running a local desktop command."
+        return _desktop_result(
+            ok=False,
+            action="desktop_run_command",
+            summary=message,
+            desktop_state=observation,
+            error=message,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+    if not _approval_granted(args):
+        return _pause_desktop_action(
+            action="desktop_run_command",
+            summary=f"Approval required before running '{checkpoint_target}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "command": command,
+                "cwd": str(args.get("cwd", "")).strip(),
+                "shell_kind": shell_kind,
+                "timeout_seconds": timeout_seconds,
+                "observation_token": token,
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            desktop_evidence_ref=evidence_ref,
+        )
+
+    command_result = run_bounded_command(
+        command=command,
+        cwd=str(args.get("cwd", "")).strip(),
+        env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        timeout_seconds=float(timeout_seconds),
+        shell_kind=shell_kind,
+    )
+    payload = command_result.get("data", {}) if isinstance(command_result.get("data", {}), dict) else {}
+    observation_after = _register_observation(active_window=_active_window_info(), windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    summary = str(command_result.get("message", "")).strip() or str(payload.get("summary", "")).strip() or "Ran the bounded local command."
+    return _desktop_result(
+        ok=bool(command_result.get("ok", False)),
+        action="desktop_run_command",
+        summary=summary,
+        desktop_state=observation_after,
+        error=str(command_result.get("error", "")).strip(),
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        command_result=payload,
+        target_window=active_window,
+    )
+
+
 DESKTOP_LIST_WINDOWS_TOOL = {
     "name": "desktop_list_windows",
     "description": (
@@ -2646,6 +3593,94 @@ DESKTOP_CAPTURE_SCREENSHOT_TOOL = {
 }
 
 
+DESKTOP_MOVE_MOUSE_TOOL = {
+    "name": "desktop_move_mouse",
+    "description": (
+        "Move the mouse cursor to one bounded absolute point or one bounded point relative to the active target window. "
+        "Requires explicit approval_status=approved, a fresh observation_token, and exact visible coordinates."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "relative_x": {"type": "integer"},
+            "relative_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_move_mouse,
+}
+
+
+DESKTOP_HOVER_POINT_TOOL = {
+    "name": "desktop_hover_point",
+    "description": (
+        "Move the mouse to one bounded point and hover briefly over it inside the active target window. "
+        "Requires explicit approval_status=approved and a fresh observation_token."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "relative_x": {"type": "integer"},
+            "relative_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "hover_ms": {"type": "integer", "minimum": 120, "maximum": DESKTOP_MAX_HOVER_MS},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_hover_point,
+}
+
+
+DESKTOP_CLICK_MOUSE_TOOL = {
+    "name": "desktop_click_mouse",
+    "description": (
+        "Perform one bounded mouse click at an exact visible point in the active target window. "
+        "Supports left click, right click, and a bounded double click with explicit approval."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "relative_x": {"type": "integer"},
+            "relative_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "button": {"type": "string", "enum": ["left", "right"]},
+            "click_count": {"type": "integer", "minimum": 1, "maximum": 2},
+            "double_click": {"type": "boolean"},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_click_mouse,
+}
+
+
 DESKTOP_CLICK_POINT_TOOL = {
     "name": "desktop_click_point",
     "description": (
@@ -2668,6 +3703,37 @@ DESKTOP_CLICK_POINT_TOOL = {
         "additionalProperties": False,
     },
     "func": desktop_click_point,
+}
+
+
+DESKTOP_SCROLL_TOOL = {
+    "name": "desktop_scroll",
+    "description": (
+        "Scroll one bounded amount up or down in the active target window. "
+        "Requires explicit approval_status=approved, a fresh observation_token, and stays limited to one bounded scroll step."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "direction": {"type": "string", "enum": ["up", "down"]},
+            "scroll_units": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_SCROLL_UNITS},
+            "lines": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_SCROLL_UNITS},
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "relative_x": {"type": "integer"},
+            "relative_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_scroll,
 }
 
 
@@ -2702,6 +3768,47 @@ DESKTOP_PRESS_KEY_TOOL = {
 }
 
 
+DESKTOP_PRESS_KEY_SEQUENCE_TOOL = {
+    "name": "desktop_press_key_sequence",
+    "description": (
+        "Press a short bounded sequence of safe desktop key combinations in the active window. "
+        "Requires explicit approval_status=approved, a fresh observation_token, and stays inside the safe key allowlist."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "sequence": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": DESKTOP_MAX_KEY_SEQUENCE_STEPS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "modifiers": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["ctrl", "control", "shift"]},
+                            "minItems": 0,
+                            "maxItems": 2,
+                        },
+                        "repeat": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_KEY_REPEAT},
+                    },
+                    "required": ["key"],
+                    "additionalProperties": False,
+                },
+            },
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+            "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+        },
+        "required": ["sequence"],
+        "additionalProperties": False,
+    },
+    "func": desktop_press_key_sequence,
+}
+
+
 DESKTOP_TYPE_TEXT_TOOL = {
     "name": "desktop_type_text",
     "description": (
@@ -2725,4 +3832,115 @@ DESKTOP_TYPE_TEXT_TOOL = {
         "additionalProperties": False,
     },
     "func": desktop_type_text,
+}
+
+
+DESKTOP_LIST_PROCESSES_TOOL = {
+    "name": "desktop_list_processes",
+    "description": (
+        "List a bounded set of local desktop processes with compact diagnostics such as pid, status, background-candidate state, "
+        "and whether the process is one of this operator's owned processes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_PROCESS_LIMIT},
+            "include_background": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_list_processes,
+}
+
+
+DESKTOP_INSPECT_PROCESS_TOOL = {
+    "name": "desktop_inspect_process",
+    "description": (
+        "Inspect one bounded local process in more detail, including command line excerpt, working directory, "
+        "child processes, and owned-process metadata when available."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pid": {"type": "integer", "minimum": 0, "maximum": 10000000},
+            "process_name": {"type": "string"},
+            "owned_label": {"type": "string"},
+            "child_limit": {"type": "integer", "minimum": 0, "maximum": 8},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_inspect_process,
+}
+
+
+DESKTOP_START_PROCESS_TOOL = {
+    "name": "desktop_start_process",
+    "description": (
+        "Start one bounded owned local process with explicit approval. "
+        "This is intended for safe test helpers or known local apps, not broad process spawning."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "executable": {"type": "string"},
+            "arguments": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "cwd": {"type": "string"},
+            "env": {"type": "object", "additionalProperties": {"type": "string"}},
+            "owned_label": {"type": "string"},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+        },
+        "required": ["executable"],
+        "additionalProperties": False,
+    },
+    "func": desktop_start_process,
+}
+
+
+DESKTOP_STOP_PROCESS_TOOL = {
+    "name": "desktop_stop_process",
+    "description": (
+        "Stop one bounded owned local process with explicit approval. "
+        "This tool only stops processes that were started as owned bounded processes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pid": {"type": "integer", "minimum": 0, "maximum": 10000000},
+            "owned_label": {"type": "string"},
+            "wait_seconds": {"type": "integer", "minimum": 1, "maximum": 5},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "func": desktop_stop_process,
+}
+
+
+DESKTOP_RUN_COMMAND_TOOL = {
+    "name": "desktop_run_command",
+    "description": (
+        "Run one bounded local command with explicit approval, a capped timeout, and captured stdout/stderr excerpts. "
+        "This is a controlled command surface, not a general autonomous shell."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "cwd": {"type": "string"},
+            "env": {"type": "object", "additionalProperties": {"type": "string"}},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": DESKTOP_MAX_COMMAND_TIMEOUT_SECONDS},
+            "shell_kind": {"type": "string", "enum": ["powershell", "cmd"]},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+    "func": desktop_run_command,
 }

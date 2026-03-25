@@ -90,6 +90,15 @@ BACKEND_REASON_CODES = {
     "image_selected",
     "image_pair_selected",
     "vision_required",
+    "mouse_moved",
+    "hovered",
+    "scrolled",
+    "process_inspected",
+    "process_started",
+    "process_stopped",
+    "process_not_owned",
+    "command_executed",
+    "command_timed_out",
     "recovery_exhausted",
     "unrecoverable_missing_target",
     "unrecoverable_tray_background",
@@ -509,6 +518,72 @@ def normalize_desktop_process_context(value: Dict[str, Any] | None) -> Dict[str,
         "background_candidate": _coerce_bool(value.get("background_candidate", False), False),
         "backend": _trim_text(value.get("backend", ""), limit=60),
         "reason": _normalize_reason(value.get("reason", "inspected"), default="inspected"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_pointer_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    action = _trim_text(value.get("action", ""), limit=40).lower()
+    if action not in {"move", "hover", "click", "scroll"}:
+        action = ""
+    button = _trim_text(value.get("button", ""), limit=20).lower()
+    if button not in {"", "left", "right"}:
+        button = ""
+    scroll_direction = _trim_text(value.get("scroll_direction", ""), limit=20).lower()
+    if scroll_direction not in {"", "up", "down"}:
+        scroll_direction = ""
+    point = value.get("point", {}) if isinstance(value.get("point", {}), dict) else {}
+    return {
+        "action": action,
+        "button": button,
+        "click_count": _coerce_int(value.get("click_count", 0), 0, minimum=0, maximum=4),
+        "point": {
+            "x": _coerce_int(point.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(point.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+        },
+        "window_title": _trim_text(value.get("window_title", ""), limit=180),
+        "coordinate_mode": _trim_text(value.get("coordinate_mode", ""), limit=40).lower() or "absolute",
+        "hover_ms": _coerce_int(value.get("hover_ms", 0), 0, minimum=0, maximum=5_000),
+        "scroll_direction": scroll_direction,
+        "scroll_units": _coerce_int(value.get("scroll_units", 0), 0, minimum=0, maximum=64),
+        "reason": _normalize_reason(value.get("reason", "ok"), default="ok"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_process_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    action = _trim_text(value.get("action", ""), limit=40).lower()
+    if action not in {"list", "inspect", "start", "stop"}:
+        action = ""
+    return {
+        "action": action,
+        "pid": _coerce_int(value.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(value.get("process_name", ""), limit=120),
+        "owned": _coerce_bool(value.get("owned", False), False),
+        "owned_label": _trim_text(value.get("owned_label", ""), limit=120),
+        "reason": _normalize_reason(value.get("reason", "inspected"), default="inspected"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+    }
+
+
+def normalize_desktop_command_result(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    shell_kind = _trim_text(value.get("shell_kind", ""), limit=40).lower() or "powershell"
+    if shell_kind not in {"powershell", "cmd"}:
+        shell_kind = "powershell"
+    return {
+        "command": _trim_text(value.get("command", ""), limit=320),
+        "shell_kind": shell_kind,
+        "cwd": _trim_text(value.get("cwd", ""), limit=320),
+        "exit_code": int(value.get("exit_code", 0) or 0),
+        "timed_out": _coerce_bool(value.get("timed_out", False), False),
+        "timeout_seconds": _coerce_int(value.get("timeout_seconds", 0), 0, minimum=0, maximum=300),
+        "duration_ms": _coerce_int(value.get("duration_ms", 0), 0, minimum=0, maximum=3_600_000),
+        "stdout_excerpt": _trim_text(value.get("stdout_excerpt", ""), limit=600),
+        "stderr_excerpt": _trim_text(value.get("stderr_excerpt", ""), limit=600),
+        "reason": _normalize_reason(value.get("reason", "command_executed"), default="command_executed"),
         "summary": _trim_text(value.get("summary", ""), limit=220),
     }
 

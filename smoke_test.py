@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import shutil
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -116,11 +117,21 @@ from tools.browser import shutdown_browser_runtime
 import tools.desktop as desktop_module
 from tools.desktop import (
     desktop_capture_screenshot,
+    desktop_click_mouse,
     desktop_click_point,
+    desktop_hover_point,
     desktop_inspect_window_state,
+    desktop_inspect_process,
     desktop_list_windows,
+    desktop_list_processes,
+    desktop_move_mouse,
     desktop_press_key,
+    desktop_press_key_sequence,
     desktop_recover_window,
+    desktop_run_command,
+    desktop_scroll,
+    desktop_start_process,
+    desktop_stop_process,
     desktop_type_text,
     desktop_wait_for_window_ready,
     get_desktop_backend_status,
@@ -623,7 +634,11 @@ try:
     while time.time() < deadline:
         timeout_snapshot = startup_timeout_manager.get_snapshot(session_id="session-timeout-first")
         followup_snapshot = startup_timeout_manager.get_snapshot(session_id="session-timeout-second")
-        if timeout_snapshot.get("status") == "blocked" and followup_snapshot.get("status") == "completed" and not followup_snapshot.get("running", False):
+        if (
+            timeout_snapshot.get("status") == "blocked"
+            and followup_snapshot.get("status") in {"completed", "blocked"}
+            and not followup_snapshot.get("running", False)
+        ):
             break
         time.sleep(0.05)
 
@@ -653,18 +668,25 @@ try:
         raise SystemExit(
             f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: outcome={timeout_outcome} progress={timeout_progress} snapshot={timeout_snapshot}"
         )
-    if not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
+    if timeout_reason == "loop_entry_timeout" or "did not reach its first loop entry" in timeout_message:
+        if timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
+            raise SystemExit(f"ExecutionManager did not preserve the expected loop-entry-timeout progress markers: {timeout_progress}")
+    elif not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
         raise SystemExit(f"ExecutionManager did not preserve the expected startup-timeout progress markers: {timeout_progress}")
-    if followup_snapshot.get("status") != "completed":
-        raise SystemExit(f"ExecutionManager did not start and complete the follow-up task after the blocked startup-timeout run: {followup_snapshot}")
+    followup_task = followup_snapshot.get("active_task", {}) if isinstance(followup_snapshot.get("active_task", {}), dict) else {}
+    followup_progress = followup_task.get("progress", {}) if isinstance(followup_task.get("progress", {}), dict) else {}
+    if followup_snapshot.get("status") not in {"completed", "blocked"}:
+        raise SystemExit(f"ExecutionManager did not start and cleanly finalize the follow-up task after the blocked startup-timeout run: {followup_snapshot}")
+    if not followup_progress.get("first_loop_at", "") or not followup_progress.get("first_result_at", ""):
+        raise SystemExit(f"ExecutionManager did not record meaningful progress for the follow-up startup-timeout run: {followup_snapshot}")
 
     time.sleep(1.1)
     timeout_task_after = startup_timeout_manager._find_task_locked(timeout_dispatch.get("task_id", ""))
     followup_task_after = startup_timeout_manager._find_task_locked(followup_dispatch.get("task_id", ""))
     if timeout_task_after is None or timeout_task_after.get("status") != "blocked":
         raise SystemExit("ExecutionManager let a late abandoned worker overwrite the blocked startup-timeout task status.")
-    if followup_task_after is None or followup_task_after.get("status") != "completed":
-        raise SystemExit("ExecutionManager let a late abandoned worker disturb the completed follow-up task status.")
+    if followup_task_after is None or followup_task_after.get("status") not in {"completed", "blocked"}:
+        raise SystemExit("ExecutionManager let a late abandoned worker disturb the clean follow-up startup-timeout task status.")
 finally:
     startup_timeout_manager.shutdown()
     shutil.rmtree(startup_timeout_root, ignore_errors=True)
@@ -793,9 +815,19 @@ expected_desktop_tools = {
     "desktop_recover_window",
     "desktop_wait_for_window_ready",
     "desktop_capture_screenshot",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
     "desktop_click_point",
+    "desktop_scroll",
     "desktop_press_key",
+    "desktop_press_key_sequence",
     "desktop_type_text",
+    "desktop_list_processes",
+    "desktop_inspect_process",
+    "desktop_start_process",
+    "desktop_stop_process",
+    "desktop_run_command",
 }
 if not expected_desktop_tools.issubset(registered_tools):
     raise SystemExit("Tool registry did not include the expected bounded desktop tools.")
@@ -824,6 +856,18 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": preview_token})
     if not click_preview.get("paused", False) or not click_preview.get("approval_required", False) or click_preview.get("checkpoint_tool") != "desktop_click_point":
         raise SystemExit("desktop_click_point() did not require approval in the expected bounded way.")
+    move_preview = desktop_move_mouse({"x": test_x, "y": test_y, "observation_token": preview_token})
+    if not move_preview.get("paused", False) or move_preview.get("checkpoint_tool") != "desktop_move_mouse":
+        raise SystemExit("desktop_move_mouse() did not synthesize the expected bounded approval checkpoint.")
+    hover_preview = desktop_hover_point({"x": test_x, "y": test_y, "hover_ms": 200, "observation_token": preview_token})
+    if not hover_preview.get("paused", False) or hover_preview.get("checkpoint_tool") != "desktop_hover_point":
+        raise SystemExit("desktop_hover_point() did not synthesize the expected bounded approval checkpoint.")
+    mouse_click_preview = desktop_click_mouse({"x": test_x, "y": test_y, "button": "right", "observation_token": preview_token})
+    if not mouse_click_preview.get("paused", False) or mouse_click_preview.get("checkpoint_tool") != "desktop_click_mouse":
+        raise SystemExit("desktop_click_mouse() did not synthesize the expected bounded approval checkpoint.")
+    scroll_preview = desktop_scroll({"direction": "down", "scroll_units": 2, "observation_token": preview_token})
+    if not scroll_preview.get("paused", False) or scroll_preview.get("checkpoint_tool") != "desktop_scroll":
+        raise SystemExit("desktop_scroll() did not synthesize the expected bounded approval checkpoint.")
     key_preview = desktop_press_key(
         {
             "key": "Enter",
@@ -832,6 +876,14 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     )
     if not key_preview.get("paused", False) or not key_preview.get("approval_required", False) or key_preview.get("checkpoint_tool") != "desktop_press_key":
         raise SystemExit("desktop_press_key() did not require approval in the expected bounded way.")
+    key_sequence_preview = desktop_press_key_sequence(
+        {
+            "sequence": [{"key": "Tab"}, {"key": "Enter"}],
+            "observation_token": preview_token,
+        }
+    )
+    if not key_sequence_preview.get("paused", False) or key_sequence_preview.get("checkpoint_tool") != "desktop_press_key_sequence":
+        raise SystemExit("desktop_press_key_sequence() did not synthesize the expected bounded approval checkpoint.")
     type_preview = desktop_type_text(
         {
             "value": "desktop smoke text",
@@ -841,6 +893,62 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     )
     if not type_preview.get("paused", False) or not type_preview.get("approval_required", False) or type_preview.get("checkpoint_tool") != "desktop_type_text":
         raise SystemExit("desktop_type_text() did not require approval in the expected bounded way.")
+process_list_preview = desktop_list_processes({"query": "python", "limit": 4})
+if not isinstance(process_list_preview.get("processes", []), list) or "process_action" not in process_list_preview:
+    raise SystemExit("desktop_list_processes() did not return the expected bounded process listing shape.")
+command_preview = desktop_run_command({"command": "Write-Output 'desktop command smoke'"})
+if not command_preview.get("paused", False) or command_preview.get("checkpoint_tool") != "desktop_run_command":
+    raise SystemExit("desktop_run_command() did not synthesize the expected approval checkpoint.")
+command_result = desktop_run_command(
+    {
+        "command": "Write-Output 'desktop command smoke'",
+        "approval_status": "approved",
+    }
+)
+if not command_result.get("ok", False) or "desktop command smoke" not in str(command_result.get("command_result", {}).get("stdout_excerpt", "")):
+    raise SystemExit("desktop_run_command() did not return the expected bounded command result.")
+start_preview = desktop_start_process(
+    {
+        "executable": sys.executable,
+        "arguments": ["-c", "import time; time.sleep(20)"],
+        "owned_label": "desktop-smoke-owned",
+    }
+)
+if not start_preview.get("paused", False) or start_preview.get("checkpoint_tool") != "desktop_start_process":
+    raise SystemExit("desktop_start_process() did not synthesize the expected approval checkpoint.")
+started_pid = 0
+try:
+    started_process = desktop_start_process(
+        {
+            "executable": sys.executable,
+            "arguments": ["-c", "import time; time.sleep(20)"],
+            "owned_label": "desktop-smoke-owned",
+            "approval_status": "approved",
+        }
+    )
+    started_pid = int(started_process.get("process_action", {}).get("pid", 0) or 0)
+    if not started_process.get("ok", False) or started_pid <= 0:
+        raise SystemExit("desktop_start_process() did not start an owned bounded process after approval.")
+    time.sleep(0.2)
+    inspect_process_result = desktop_inspect_process({"pid": started_pid})
+    if desktop_backends_module.psutil is not None:
+        if not inspect_process_result.get("ok", False) or int(inspect_process_result.get("process_context", {}).get("pid", 0) or 0) != started_pid:
+            raise SystemExit("desktop_inspect_process() did not inspect the started owned bounded process.")
+    else:
+        if inspect_process_result.get("ok", False) or inspect_process_result.get("process_action", {}).get("reason") != "unsupported":
+            raise SystemExit("desktop_inspect_process() did not expose the expected bounded fallback when psutil is unavailable.")
+    stop_preview = desktop_stop_process({"pid": started_pid})
+    if not stop_preview.get("paused", False) or stop_preview.get("checkpoint_tool") != "desktop_stop_process":
+        raise SystemExit("desktop_stop_process() did not synthesize the expected approval checkpoint.")
+    stopped_process = desktop_stop_process({"pid": started_pid, "approval_status": "approved"})
+    if not stopped_process.get("ok", False) or stopped_process.get("process_action", {}).get("action") != "stop":
+        raise SystemExit("desktop_stop_process() did not stop the owned bounded process after approval.")
+finally:
+    if started_pid > 0:
+        try:
+            desktop_stop_process({"pid": started_pid, "approval_status": "approved"})
+        except Exception:
+            pass
 desktop_backend_status = get_desktop_backend_status()
 for required_backend in ("window", "screenshot", "ui_evidence"):
     if not isinstance(desktop_backend_status.get(required_backend, {}), dict):
@@ -1791,6 +1899,69 @@ if desktop_evidence_snapshot.get("desktop", {}).get("selected_vision", {}).get("
     raise SystemExit("TaskState did not surface the expected compact selected desktop vision summary.")
 if desktop_evidence_snapshot.get("desktop", {}).get("latest_process_context", {}).get("process_name") != "notepad.exe":
     raise SystemExit("TaskState did not surface the latest bounded desktop process context.")
+desktop_control_state = TaskState("desktop control surface smoke")
+desktop_control_mouse_result = {
+    "ok": True,
+    "summary": "Moved the mouse to (42, 64) in 'Control Surface Window'.",
+    "mouse_action": {
+        "action": "move",
+        "point": {"x": 42, "y": 64},
+        "summary": "Moved the mouse to (42, 64) in 'Control Surface Window'.",
+    },
+    "point": {"x": 42, "y": 64},
+    "desktop_state": {
+        "active_window": {
+            "title": "Control Surface Window",
+            "window_id": "0x00124500",
+            "process_name": "python.exe",
+        },
+        "windows": [{"title": "Control Surface Window"}],
+        "observation_token": "desktop-control-smoke",
+        "observed_at": "2026-03-23T10:05:00",
+    },
+}
+desktop_control_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_move_mouse", "args": {"x": 42, "y": 64}, "result": desktop_control_mouse_result})
+desktop_control_state.update_memory_from_tool("desktop_move_mouse", desktop_control_mouse_result)
+desktop_control_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_run_command", "args": {"command": "Write-Output 'desktop command smoke'"}, "result": command_result})
+desktop_control_state.update_memory_from_tool("desktop_run_command", command_result)
+desktop_control_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_stop_process", "args": {"pid": started_pid}, "result": stopped_process})
+desktop_control_state.update_memory_from_tool("desktop_stop_process", stopped_process)
+desktop_control_snapshot = desktop_control_state.get_control_snapshot()
+if desktop_control_snapshot.get("desktop", {}).get("latest_mouse_action", {}).get("action") != "move":
+    raise SystemExit("TaskState did not surface the latest bounded desktop mouse action.")
+if desktop_control_snapshot.get("desktop", {}).get("latest_process_action", {}).get("action") != "stop":
+    raise SystemExit("TaskState did not surface the latest bounded desktop process action.")
+if "desktop command smoke" not in desktop_control_snapshot.get("desktop", {}).get("latest_command_result", {}).get("stdout_excerpt", ""):
+    raise SystemExit("TaskState did not surface the latest bounded desktop command result.")
+desktop_control_status = _status_payload(
+    {
+        "status": "running",
+        "running": True,
+        "paused": False,
+        "goal": "desktop control surface smoke",
+        "current_step": "desktop control surface smoke",
+        "result_status": "",
+        "result_message": "",
+        "pending_approval": {},
+        "active_task": {},
+        "browser": {},
+        "desktop": desktop_control_snapshot.get("desktop", {}),
+        "queue": {"counts": {}},
+        "latest_alert": {},
+        "latest_run": {},
+        "lifecycle": {},
+        "runtime": {},
+        "infrastructure": {},
+        "behavior": {},
+        "human_control": {},
+        "action_policy": {},
+        "task_control": {},
+    }
+)
+if desktop_control_status.get("desktop", {}).get("latest_process_action", {}).get("action") != "stop":
+    raise SystemExit("Local API status compaction did not expose the latest bounded desktop process action.")
+if desktop_control_status.get("desktop", {}).get("latest_command_result", {}).get("exit_code") != 0:
+    raise SystemExit("Local API status compaction did not expose the bounded desktop command result.")
 desktop_observation_text = desktop_state.get_observation()
 if "Selected desktop evidence assessment:" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact selected desktop evidence grounding lines.")

@@ -169,6 +169,10 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_scene": _compact_scene_payload(desktop.get("checkpoint_scene", {})),
             "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
             "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
+            "latest_mouse_action": _compact_mouse_action(desktop.get("latest_mouse_action", {})),
+            "latest_process_action": _compact_process_action(desktop.get("latest_process_action", {})),
+            "latest_command_result": _compact_command_result(desktop.get("latest_command_result", {})),
+            "latest_processes": [_compact_process_preview(item) for item in list(desktop.get("latest_processes", []))[:4] if isinstance(item, dict)],
             "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
         "queue_counts": queue.get("counts", {}),
@@ -296,6 +300,52 @@ def _compact_vision_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "primary_evidence_id": _trim_text(vision.get("primary_evidence_id", ""), limit=80),
         "comparison_evidence_id": _trim_text(vision.get("comparison_evidence_id", ""), limit=80),
         "images": images,
+    }
+
+
+def _compact_mouse_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    action = value if isinstance(value, dict) else {}
+    return {
+        "action": _trim_text(action.get("action", ""), limit=40),
+        "button": _trim_text(action.get("button", ""), limit=20),
+        "click_count": _coerce_int(action.get("click_count", 0), 0, minimum=0, maximum=4),
+        "point": _trim_text(action.get("point", ""), limit=80),
+        "summary": _trim_text(action.get("summary", ""), limit=220),
+    }
+
+
+def _compact_process_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    preview = value if isinstance(value, dict) else {}
+    return {
+        "pid": _coerce_int(preview.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(preview.get("process_name", ""), limit=120),
+        "status": _trim_text(preview.get("status", ""), limit=60),
+        "owned": bool(preview.get("owned", False)),
+    }
+
+
+def _compact_process_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    action = value if isinstance(value, dict) else {}
+    return {
+        "action": _trim_text(action.get("action", ""), limit=40),
+        "pid": _coerce_int(action.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(action.get("process_name", ""), limit=120),
+        "owned": bool(action.get("owned", False)),
+        "owned_label": _trim_text(action.get("owned_label", ""), limit=120),
+        "summary": _trim_text(action.get("summary", ""), limit=220),
+    }
+
+
+def _compact_command_result(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    result = value if isinstance(value, dict) else {}
+    return {
+        "command": _trim_text(result.get("command", ""), limit=220),
+        "shell_kind": _trim_text(result.get("shell_kind", ""), limit=40),
+        "exit_code": _coerce_int(result.get("exit_code", 0), 0, minimum=-1_000_000, maximum=1_000_000),
+        "timed_out": bool(result.get("timed_out", False)),
+        "stdout_excerpt": _trim_text(result.get("stdout_excerpt", ""), limit=220),
+        "stderr_excerpt": _trim_text(result.get("stderr_excerpt", ""), limit=220),
+        "summary": _trim_text(result.get("summary", ""), limit=220),
     }
 
 

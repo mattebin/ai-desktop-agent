@@ -164,6 +164,56 @@ Sequential handoff rules:
 - desktop evidence, recent scene history, and approval context may carry forward when relevant
 - stale `active_task_id`, stale queued task views, and stale running snapshots should not carry forward across a new run boundary
 
+### 8. Bounded control surface
+
+Primary files:
+
+- `tools/desktop.py`
+- `tools/desktop_backends.py`
+- `core/tool_runtime.py`
+- `core/state.py`
+- `core/local_api.py`
+- `core/local_api_events.py`
+- `core/loop.py`
+
+Responsibilities:
+
+- expose one integrated bounded control layer instead of isolated primitives
+- keep risky controls approval-gated and checkpoint-linked from day one
+- surface mouse/process/command results through the same state and local API path as evidence and recovery
+- make future bounded controls plug into the same approval, evidence, scene, and run-outcome model
+
+Current bounded control suites:
+
+- mouse:
+  - move
+  - hover
+  - left click
+  - right click
+  - double click
+  - bounded scroll
+- keyboard:
+  - safe navigation keys
+  - bounded Ctrl/Shift shortcuts
+  - short safe key sequences
+  - bounded text entry
+- process:
+  - list relevant processes
+  - inspect one process
+  - start one owned bounded process
+  - stop one owned bounded process
+- command:
+  - run one bounded local command with timeout and captured output
+
+Guardrails:
+
+- no drag/drop
+- no unrestricted global hotkeys
+- no freeform macro playback
+- no kill-anything process control
+- no giant shell-agent behavior
+- no autonomous desktop navigation loops
+
 ## Bounded matching model
 
 The matching subsystem is deliberately constrained.
