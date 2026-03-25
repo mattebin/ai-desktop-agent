@@ -416,6 +416,7 @@ class ExecutionManager:
         self._scheduler_thread: threading.Thread | None = None
         self._scheduler_stop = threading.Event()
         self._control_requests: Dict[str, Dict[str, Any]] = {}
+        self._last_lifecycle_event: Dict[str, Any] = {}
         self._state_scope_id = DEFAULT_STATE_SCOPE_ID
         active_task = self._active_task_locked()
         if active_task is not None:
@@ -516,6 +517,63 @@ class ExecutionManager:
     def _set_last_result(self, result: Dict[str, Any] | None):
         self._last_result = result if isinstance(result, dict) else {}
         self._last_result_message = str(self._last_result.get("message", "")).strip()
+
+    def _record_lifecycle_event_locked(
+        self,
+        event: str,
+        *,
+        task: Dict[str, Any] | None = None,
+        session_id: str = "",
+        state_scope_id: str = "",
+        reason: str = "",
+        detail: str = "",
+        from_status: str = "",
+        to_status: str = "",
+    ):
+        effective_task = task if isinstance(task, dict) else {}
+        effective_session_id = self._normalize_session_id(session_id or effective_task.get("session_id", ""))
+        effective_scope_id = self._normalize_state_scope_id(
+            state_scope_id or effective_task.get("state_scope_id", ""),
+            session_id=effective_session_id,
+        )
+        self._last_lifecycle_event = {
+            "event": _trim_text(event, limit=60),
+            "task_id": _trim_text(effective_task.get("task_id", ""), limit=60),
+            "session_id": effective_session_id,
+            "state_scope_id": effective_scope_id,
+            "reason": _trim_text(reason, limit=80),
+            "detail": _trim_text(detail, limit=220),
+            "from_status": _trim_text(from_status or effective_task.get("status", ""), limit=40),
+            "to_status": _trim_text(to_status, limit=40),
+            "timestamp": _iso_timestamp(),
+        }
+
+    def _lifecycle_matches_locked(self, event: Dict[str, Any], *, session_id: str = "", state_scope_id: str = "") -> bool:
+        if not isinstance(event, dict):
+            return False
+        normalized_session_id = self._normalize_session_id(session_id)
+        normalized_scope_id = self._normalize_state_scope_id(state_scope_id, session_id=normalized_session_id)
+        if normalized_session_id and self._normalize_session_id(event.get("session_id", "")) != normalized_session_id:
+            return False
+        if normalized_scope_id and self._normalize_state_scope_id(event.get("state_scope_id", ""), session_id=event.get("session_id", "")) != normalized_scope_id:
+            return False
+        return True
+
+    def _lifecycle_snapshot_locked(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
+        event = self._last_lifecycle_event if self._lifecycle_matches_locked(self._last_lifecycle_event, session_id=session_id, state_scope_id=state_scope_id) else {}
+        if not isinstance(event, dict):
+            event = {}
+        return {
+            "event": _trim_text(event.get("event", ""), limit=60),
+            "task_id": _trim_text(event.get("task_id", ""), limit=60),
+            "session_id": _trim_text(event.get("session_id", ""), limit=80),
+            "state_scope_id": _trim_text(event.get("state_scope_id", ""), limit=120),
+            "reason": _trim_text(event.get("reason", ""), limit=80),
+            "detail": _trim_text(event.get("detail", ""), limit=220),
+            "from_status": _trim_text(event.get("from_status", ""), limit=40),
+            "to_status": _trim_text(event.get("to_status", ""), limit=40),
+            "timestamp": _trim_text(event.get("timestamp", ""), limit=40),
+        }
 
     def _set_task_control_fields_locked(
         self,
@@ -718,8 +776,86 @@ class ExecutionManager:
                 return task
         return None
 
+    def _canonical_task_locked(self, task: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not isinstance(task, dict):
+            return None
+        task_id = _trim_text(task.get("task_id", ""), limit=60)
+        if not task_id:
+            return None
+        return self._find_task_locked(task_id) or task
+
+    def _reconcile_active_task_locked(self) -> tuple[Dict[str, Any] | None, bool]:
+        task = self._find_task_locked(self._active_task_id)
+        changed = False
+        if task is None:
+            if self._active_task_id:
+                previous_id = self._active_task_id
+                self._active_task_id = ""
+                changed = True
+                self._record_lifecycle_event_locked(
+                    "active_task_reset",
+                    reason="missing_active_task",
+                    detail=f"Cleared stale active task pointer for {previous_id}.",
+                    from_status="unknown",
+                    to_status="idle",
+                )
+            return None, changed
+
+        task_status = _normalize_status(task.get("status", "queued"))
+        if task_status in QUEUE_ACTIVE_STATUSES:
+            return task, changed
+
+        if task_status == "queued" and self._is_running():
+            state = self._load_state_for_scope_locked(self._task_state_scope_id_locked(task), clear_pending_for_new_goal=False)
+            pending = state.get_control_snapshot().get("pending_approval", {})
+            reconciled_status = "paused" if pending.get("kind") or str(state.status).strip() == "paused" else ""
+            if not reconciled_status and str(state.status).strip() == "running":
+                reconciled_status = "running"
+            if reconciled_status:
+                previous_status = task_status
+                task["status"] = reconciled_status
+                task["started_at"] = task.get("started_at") or _iso_timestamp()
+                task["ended_at"] = ""
+                task["paused"] = reconciled_status == "paused"
+                if reconciled_status == "paused":
+                    task["approval_needed"] = bool(pending.get("kind"))
+                    task["approval_reason"] = _trim_text(pending.get("reason", "") or pending.get("summary", ""), limit=180)
+                    if not task.get("last_message"):
+                        task["last_message"] = "Paused and waiting for approval."
+                else:
+                    task["approval_needed"] = False
+                    task["approval_reason"] = ""
+                    if not task.get("last_message"):
+                        task["last_message"] = "Running in background."
+                changed = True
+                self._record_lifecycle_event_locked(
+                    "active_task_reconciled",
+                    task=task,
+                    reason="queued_running_handoff_reconciled",
+                    detail="Promoted a stale queued active task into the current running/paused lifecycle state.",
+                    from_status=previous_status,
+                    to_status=reconciled_status,
+                )
+                return task, changed
+
+        previous_status = task_status
+        self._active_task_id = ""
+        changed = True
+        self._record_lifecycle_event_locked(
+            "active_task_reset",
+            task=task,
+            reason="terminal_active_task_reset" if task_status in QUEUE_TERMINAL_STATUSES else "non_active_status_reset",
+            detail="Cleared a stale active task pointer that no longer represented live work.",
+            from_status=previous_status,
+            to_status="idle",
+        )
+        return None, changed
+
     def _active_task_locked(self) -> Dict[str, Any] | None:
-        return self._find_task_locked(self._active_task_id)
+        task, changed = self._reconcile_active_task_locked()
+        if changed:
+            self._persist_queue_locked()
+        return task
 
     def _has_queued_tasks_locked(self) -> bool:
         return any(task.get("status") == "queued" for task in self._tasks)
@@ -1145,11 +1281,14 @@ class ExecutionManager:
         )
         self._tasks.append(task)
         self._tasks = self.queue_store._trim_tasks(self._tasks, self._active_task_id)
-        if not any(existing.get("task_id") == task.get("task_id") for existing in self._tasks):
+        task_id = _trim_text(task.get("task_id", ""), limit=60)
+        live_task = self._find_task_locked(task_id)
+        if live_task is None:
             return None
-        return task
+        return live_task
 
     def _can_start_next_locked(self) -> bool:
+        self._active_task_locked()
         if self._is_running():
             return False
         active_task = self._active_task_locked()
@@ -1669,7 +1808,9 @@ class ExecutionManager:
         return changed, auto_start
 
     def _update_task_from_result_locked(self, task: Dict[str, Any], state: TaskState, result: Dict[str, Any]):
+        task = self._canonical_task_locked(task) or task
         queue_status, keep_active, pending = self._task_queue_status_from_state(state, result)
+        previous_status = _normalize_status(task.get("status", "queued"))
         task["goal"] = _trim_text(state.goal, limit=MAX_TASK_GOAL_CHARS)
         task["status"] = queue_status
         task["run_id"] = _trim_text(result.get("run_id", ""), limit=60)
@@ -1694,6 +1835,15 @@ class ExecutionManager:
             task["ended_at"] = _iso_timestamp()
             if self._active_task_id == task.get("task_id", ""):
                 self._active_task_id = ""
+        lifecycle_reason = "approval_needed" if queue_status == "paused" else "terminal_desktop_outcome" if queue_status in {"completed", "blocked", "incomplete"} else "result_status"
+        self._record_lifecycle_event_locked(
+            "task_finalized" if queue_status in QUEUE_TERMINAL_STATUSES else "task_paused" if queue_status == "paused" else "task_status_updated",
+            task=task,
+            reason=lifecycle_reason,
+            detail=_trim_text(result.get("message", "") or state.last_summary, limit=220),
+            from_status=previous_status,
+            to_status=queue_status,
+        )
         self._append_task_status_alert_locked(task, state, result, queue_status=queue_status, pending=pending)
         self._sync_scheduled_tasks_locked()
         self._process_watches_locked(force_check=False)
@@ -1713,6 +1863,8 @@ class ExecutionManager:
         replacement_goal: str = "",
         resume_available: bool = False,
     ):
+        task = self._canonical_task_locked(task) or task
+        previous_status = _normalize_status(task.get("status", "queued"))
         effective_event = control_event or (getattr(state, "task_control_event", "") if state is not None else "")
         effective_replacement_task_id = replacement_task_id or (getattr(state, "task_replacement_task_id", "") if state is not None else "")
         effective_replacement_goal = replacement_goal or (getattr(state, "task_replacement_goal", "") if state is not None else "")
@@ -1745,6 +1897,14 @@ class ExecutionManager:
                 self._active_task_id = ""
         if state is not None:
             self._append_manual_status_alert_locked(task, state, status=status, message=message)
+        self._record_lifecycle_event_locked(
+            "task_manual_update",
+            task=task,
+            reason=effective_event or status or "manual_update",
+            detail=message,
+            from_status=previous_status,
+            to_status=status,
+        )
         self._sync_scheduled_tasks_locked()
         self._process_watches_locked(force_check=False)
 
@@ -1845,6 +2005,7 @@ class ExecutionManager:
         planning_goal: str | None = None,
         history_start_index: int | None = None,
     ):
+        task = self._canonical_task_locked(task) or task
         state_scope_id = self._task_state_scope_id_locked(task)
         session_id = self._task_session_id_locked(task)
         state = self.agent.load_task_state(task.get("goal", ""), state_scope_id=state_scope_id)
@@ -1865,6 +2026,14 @@ class ExecutionManager:
         state.clear_task_control()
         self._active_task_id = task.get("task_id", "")
         self._set_last_result({})
+        self._record_lifecycle_event_locked(
+            "task_started",
+            task=task,
+            reason="start_goal" if run_source == "goal_run" else run_source or "task_started",
+            detail="Started queued work in the bounded background operator loop.",
+            from_status="queued",
+            to_status="running",
+        )
         if task.get("scheduled_task_id") or str(task.get("source", "")).strip() == "scheduled_goal":
             self._append_alert_locked(
                 severity="info",
@@ -1963,6 +2132,14 @@ class ExecutionManager:
                 self._start_task_locked(task, run_source=source)
                 started = True
             else:
+                self._record_lifecycle_event_locked(
+                    "task_queued",
+                    task=task,
+                    reason="queued_behind_running_task" if self._is_running() else "queued_waiting_start",
+                    detail="Queued follow-up work and left it waiting for a clean bounded start.",
+                    from_status="queued",
+                    to_status="queued",
+                )
                 self._persist_all_locked()
 
         response = {
@@ -2197,6 +2374,7 @@ class ExecutionManager:
 
     def start_next(self, *, auto_trigger: bool = False) -> Dict[str, Any]:
         with self._lock:
+            self._active_task_locked()
             if self._is_running():
                 return {"ok": False, "message": "A background task is already running."}
 
@@ -2791,6 +2969,10 @@ class ExecutionManager:
             snapshot["queue"] = queue_snapshot
             snapshot["active_task"] = queue_snapshot.get("active_task", {})
             snapshot["queued_tasks"] = queue_snapshot.get("queued_tasks", [])
+            snapshot["lifecycle"] = self._lifecycle_snapshot_locked(
+                session_id=normalized_session_id if filtered_view else "",
+                state_scope_id=normalized_scope_id if filtered_view else "",
+            )
             snapshot["scheduled"] = scheduled_snapshot
             snapshot["scheduled_tasks"] = scheduled_snapshot.get("tasks", [])
             snapshot["watches"] = watch_snapshot

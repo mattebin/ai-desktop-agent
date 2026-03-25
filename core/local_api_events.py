@@ -45,6 +45,21 @@ def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
+def _compact_lifecycle(lifecycle: Dict[str, Any] | None) -> Dict[str, Any]:
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    return {
+        "event": _trim_text(lifecycle.get("event", ""), limit=60),
+        "task_id": _trim_text(lifecycle.get("task_id", ""), limit=60),
+        "session_id": _trim_text(lifecycle.get("session_id", ""), limit=80),
+        "state_scope_id": _trim_text(lifecycle.get("state_scope_id", ""), limit=120),
+        "reason": _trim_text(lifecycle.get("reason", ""), limit=80),
+        "detail": _trim_text(lifecycle.get("detail", ""), limit=220),
+        "from_status": _trim_text(lifecycle.get("from_status", ""), limit=40),
+        "to_status": _trim_text(lifecycle.get("to_status", ""), limit=40),
+        "timestamp": _trim_text(lifecycle.get("timestamp", ""), limit=40),
+    }
+
+
 def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
     pending = pending if isinstance(pending, dict) else {}
     return {
@@ -281,6 +296,7 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
         "pending_approval": _compact_pending(snapshot.get("pending_approval", {})),
         "browser": _compact_browser(snapshot.get("browser", {})),
         "desktop": _compact_desktop(snapshot.get("desktop", {})),
+        "lifecycle": _compact_lifecycle(snapshot.get("lifecycle", {})),
         "latest_run": {
             "run_id": _trim_text(latest_run.get("run_id", ""), limit=60),
             "final_status": _trim_text(latest_run.get("final_status", ""), limit=40),

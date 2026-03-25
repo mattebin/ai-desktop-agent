@@ -226,6 +226,192 @@ finally:
     shutil.rmtree(postprocess_smoke_root, ignore_errors=True)
 print("[OK] execution manager postprocess guard")
 
+canonical_handoff_root = Path("data") / "smoke_execution_manager_handoff"
+shutil.rmtree(canonical_handoff_root, ignore_errors=True)
+canonical_handoff_root.mkdir(parents=True, exist_ok=True)
+
+
+class _CanonicalStartSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+        self.history_store = SimpleNamespace(
+            get_recent_runs=lambda limit=6, session_id="", state_scope_id="": [],
+            get_latest_run=lambda session_id="", state_scope_id="": {},
+        )
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def get_runtime_config(self):
+        return {"active_model": "gpt-5.4", "reasoning_effort": "medium"}
+
+    def run_state(self, state: TaskState, **kwargs):
+        state.status = "completed"
+        state.add_note("Canonical start smoke completed.")
+        return {"ok": True, "status": "completed", "message": "Canonical start smoke completed.", "steps": state.steps}
+
+
+canonical_handoff_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(canonical_handoff_root / "session_state.json"),
+    "run_history_path": str(canonical_handoff_root / "run_history.json"),
+    "queue_state_path": str(canonical_handoff_root / "task_queue.json"),
+    "scheduled_task_state_path": str(canonical_handoff_root / "scheduled_tasks.json"),
+    "watch_state_path": str(canonical_handoff_root / "watch_state.json"),
+    "alert_state_path": str(canonical_handoff_root / "alert_history.json"),
+    "desktop_evidence_root": str(canonical_handoff_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+canonical_manager = ExecutionManager(agent=_CanonicalStartSmokeAgent(canonical_handoff_settings))
+original_start_worker_locked = canonical_manager._start_worker_locked
+try:
+    canonical_manager._start_worker_locked = lambda *args, **kwargs: None
+    canonical_dispatch = canonical_manager.start_goal("canonical start smoke", session_id="session-canonical")
+    if not canonical_dispatch.get("ok", False) or not canonical_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager did not start the canonical handoff smoke task immediately.")
+    canonical_task = canonical_manager._find_task_locked(canonical_dispatch.get("task_id", ""))
+    if canonical_task is None or canonical_task.get("status") != "running" or not canonical_task.get("started_at", ""):
+        raise SystemExit("ExecutionManager did not update the canonical queued task entry when starting immediate work.")
+    if canonical_manager._active_task_id != canonical_dispatch.get("task_id", ""):
+        raise SystemExit("ExecutionManager did not keep the active task pointer aligned with the canonical started task.")
+    canonical_snapshot = canonical_manager.get_snapshot(session_id="session-canonical")
+    if canonical_snapshot.get("active_task", {}).get("status") != "running":
+        raise SystemExit("ExecutionManager snapshot did not expose the canonical started task as running.")
+    if canonical_snapshot.get("lifecycle", {}).get("event") != "task_started":
+        raise SystemExit("ExecutionManager lifecycle snapshot did not expose the expected task_started event for immediate work.")
+finally:
+    canonical_manager._start_worker_locked = original_start_worker_locked
+    canonical_manager.shutdown()
+    shutil.rmtree(canonical_handoff_root, ignore_errors=True)
+print("[OK] execution manager canonical task handoff")
+
+sequential_handoff_root = Path("data") / "smoke_execution_manager_sequential"
+shutil.rmtree(sequential_handoff_root, ignore_errors=True)
+sequential_handoff_root.mkdir(parents=True, exist_ok=True)
+
+
+class _SequentialHandoffSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+        self.history_store = SimpleNamespace(
+            get_recent_runs=lambda limit=6, session_id="", state_scope_id="": [],
+            get_latest_run=lambda session_id="", state_scope_id="": {},
+        )
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def get_runtime_config(self):
+        return {"active_model": "gpt-5.4", "reasoning_effort": "medium"}
+
+    def run_state(self, state: TaskState, **kwargs):
+        if "first sequential" in state.goal.lower():
+            time.sleep(0.25)
+            state.status = "incomplete"
+            state.add_note("First sequential smoke run ended incomplete.")
+            return {"ok": False, "status": "incomplete", "message": "First sequential smoke run ended incomplete.", "steps": state.steps}
+        state.status = "completed"
+        state.add_note("Follow-up sequential smoke run completed.")
+        return {"ok": True, "status": "completed", "message": "Follow-up sequential smoke run completed.", "steps": state.steps}
+
+
+sequential_handoff_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(sequential_handoff_root / "session_state.json"),
+    "run_history_path": str(sequential_handoff_root / "run_history.json"),
+    "queue_state_path": str(sequential_handoff_root / "task_queue.json"),
+    "scheduled_task_state_path": str(sequential_handoff_root / "scheduled_tasks.json"),
+    "watch_state_path": str(sequential_handoff_root / "watch_state.json"),
+    "alert_state_path": str(sequential_handoff_root / "alert_history.json"),
+    "desktop_evidence_root": str(sequential_handoff_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+sequential_manager = ExecutionManager(agent=_SequentialHandoffSmokeAgent(sequential_handoff_settings))
+try:
+    first_dispatch = sequential_manager.start_goal("first sequential desktop handoff smoke", session_id="session-first")
+    if not first_dispatch.get("ok", False) or not first_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager could not start the first sequential handoff smoke task.")
+    second_dispatch = sequential_manager.start_goal("second sequential desktop handoff smoke", session_id="session-second")
+    if not second_dispatch.get("ok", False) or second_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager did not queue the follow-up sequential task behind a running first task.")
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        worker = sequential_manager._worker
+        queued = any(task.get("status") == "queued" for task in sequential_manager._tasks)
+        running = any(task.get("status") == "running" for task in sequential_manager._tasks)
+        if (worker is None or not worker.is_alive()) and not queued and not running:
+            break
+        time.sleep(0.1)
+
+    if sequential_manager._worker is not None and sequential_manager._worker.is_alive():
+        raise SystemExit("ExecutionManager did not finish the sequential handoff smoke tasks.")
+
+    first_task = sequential_manager._find_task_locked(first_dispatch.get("task_id", ""))
+    second_task = sequential_manager._find_task_locked(second_dispatch.get("task_id", ""))
+    if first_task is None or first_task.get("status") != "incomplete":
+        raise SystemExit("ExecutionManager did not preserve the first sequential task as incomplete.")
+    if second_task is None or second_task.get("status") != "completed" or not second_task.get("started_at", ""):
+        raise SystemExit("ExecutionManager did not start and finalize the follow-up sequential task cleanly after an incomplete run.")
+    if sequential_manager._active_task_id:
+        raise SystemExit("ExecutionManager did not clear the active task pointer after the sequential handoff smoke tasks finished.")
+    if any(task.get("status") == "queued" for task in sequential_manager._tasks):
+        raise SystemExit("ExecutionManager left a queued task stranded after the sequential handoff smoke tasks finished.")
+    sequential_snapshot = sequential_manager.get_snapshot(session_id="session-second")
+    if sequential_snapshot.get("status") != "completed" or sequential_snapshot.get("running", False):
+        raise SystemExit("ExecutionManager snapshot did not expose the follow-up sequential task as cleanly completed.")
+    if sequential_snapshot.get("lifecycle", {}).get("event") != "task_finalized":
+        raise SystemExit("ExecutionManager lifecycle snapshot did not expose a terminal lifecycle event after sequential handoff.")
+finally:
+    sequential_manager.shutdown()
+    shutil.rmtree(sequential_handoff_root, ignore_errors=True)
+print("[OK] execution manager sequential handoff")
+
+stale_active_root = Path("data") / "smoke_execution_manager_stale_active"
+shutil.rmtree(stale_active_root, ignore_errors=True)
+stale_active_root.mkdir(parents=True, exist_ok=True)
+stale_active_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(stale_active_root / "session_state.json"),
+    "run_history_path": str(stale_active_root / "run_history.json"),
+    "queue_state_path": str(stale_active_root / "task_queue.json"),
+    "scheduled_task_state_path": str(stale_active_root / "scheduled_tasks.json"),
+    "watch_state_path": str(stale_active_root / "watch_state.json"),
+    "alert_state_path": str(stale_active_root / "alert_history.json"),
+    "desktop_evidence_root": str(stale_active_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+stale_active_manager = ExecutionManager(agent=_CanonicalStartSmokeAgent(stale_active_settings))
+try:
+    with stale_active_manager._lock:
+        stale_task = stale_active_manager._enqueue_task_locked(
+            "stale active queued smoke",
+            source="goal_run",
+            session_id="session-stale",
+            state_scope_id="chat:session-stale",
+        )
+        if stale_task is None:
+            raise SystemExit("ExecutionManager could not create the stale-active smoke task.")
+        stale_active_manager._active_task_id = stale_task.get("task_id", "")
+        stale_active_manager._persist_all_locked()
+    stale_snapshot = stale_active_manager.get_snapshot(session_id="session-stale")
+    if stale_snapshot.get("running", False):
+        raise SystemExit("ExecutionManager left a stale queued active task looking like live running work.")
+    if stale_snapshot.get("active_task", {}).get("status") != "queued":
+        raise SystemExit("ExecutionManager did not leave the stale queued task in an explicitly queued state after clearing the active pointer.")
+    if stale_snapshot.get("lifecycle", {}).get("event") != "active_task_reset":
+        raise SystemExit("ExecutionManager did not expose the stale-active cleanup lifecycle event.")
+finally:
+    stale_active_manager.shutdown()
+    shutil.rmtree(stale_active_root, ignore_errors=True)
+print("[OK] execution manager stale active cleanup")
+
 scheduler_backend = create_scheduler_backend({"scheduler_backend": "apscheduler"})
 scheduler_backend.sync_scheduled_tasks(
     [
@@ -1685,6 +1871,48 @@ if "desktop_capture_screenshot" not in executed_recovery_tools:
     raise SystemExit("Desktop action recovery did not include the expected bounded screenshot refresh tool after the grouped recovery step.")
 if any(tool not in {"desktop_inspect_window_state", "desktop_recover_window", "desktop_wait_for_window_ready", "desktop_capture_screenshot"} for tool in executed_recovery_tools):
     raise SystemExit(f"Desktop action recovery used unexpected grouped recovery tools: {executed_recovery_tools}")
+
+hidden_recovery_state = TaskState("Inspect the desktop window titled 'Approval Target Window' and stop if it is not visibly recoverable.")
+hidden_recovery_state.add_step({"type": "tool", "status": "completed", "tool": "desktop_get_active_window", "args": {}, "result": desktop_refresh_result})
+hidden_recovery_state.update_memory_from_tool("desktop_get_active_window", desktop_refresh_result)
+hidden_inspect_failure = {
+    "ok": False,
+    "summary": "Show the hidden window if possible, then verify foreground focus.",
+    "error": "Show the hidden window if possible, then verify foreground focus.",
+    "recovery": {
+        "state": "needs_recovery",
+        "reason": "target_hidden",
+        "summary": "Show the hidden window if possible, then verify foreground focus.",
+        "attempt_count": 0,
+        "max_attempts": 2,
+    },
+}
+hidden_recovery_state.add_step(
+    {
+        "type": "tool",
+        "status": "failed",
+        "tool": "desktop_inspect_window_state",
+        "args": {"title": "Approval Target Window", "expected_window_title": "Approval Target Window"},
+        "result": hidden_inspect_failure,
+    }
+)
+hidden_recovery_state.update_memory_from_tool("desktop_inspect_window_state", hidden_inspect_failure)
+hidden_recovery_runtime = _DesktopRecoveryRuntime(desktop_ready_result)
+hidden_recovery_progress = _maybe_recover_desktop_action_failure(
+    _DesktopApprovalStubLLM(),
+    hidden_recovery_runtime,
+    hidden_recovery_state,
+    hidden_recovery_state.goal,
+    "desktop_inspect_window_state",
+    hidden_inspect_failure,
+)
+if not isinstance(hidden_recovery_progress, dict) or not hidden_recovery_progress.get("continue_loop", False):
+    raise SystemExit("Failed desktop inspection did not enter the grouped bounded recovery flow for a hidden target window.")
+hidden_recovery_tools = [call[1] for call in hidden_recovery_runtime.calls if call[0] == "execute"]
+if "desktop_recover_window" not in hidden_recovery_tools:
+    raise SystemExit("Failed desktop inspection did not invoke desktop_recover_window during grouped hidden-window recovery.")
+if any(tool not in {"desktop_recover_window", "desktop_wait_for_window_ready", "desktop_capture_screenshot", "desktop_get_active_window"} for tool in hidden_recovery_tools):
+    raise SystemExit(f"Hidden-window inspection recovery used unexpected grouped recovery tools: {hidden_recovery_tools}")
 
 evidence_server = LocalOperatorApiServer(port=0, settings=SMOKE_SETTINGS)
 evidence_server.start_in_thread()

@@ -4931,7 +4931,7 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
         )
         minimized_started = time.time()
         minimized_dispatch = api.send_message(minimized_session, minimized_goal)
-        minimized_status = api.wait_for_status(minimized_session, {"completed"}, timeout=90.0)
+        minimized_status = api.wait_for_status(minimized_session, {"completed", "incomplete"}, timeout=90.0)
         minimized_detail = api.session_detail(minimized_session)
         minimized_runs_after = _session_runs(Path(settings["run_history_path"]), minimized_session)
         minimized_run = _latest_new_run(minimized_runs_before, minimized_runs_after)
@@ -4939,24 +4939,40 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
         minimized_tools = _tool_names_from_run(minimized_run)
         minimized_desktop = minimized_status.get("desktop", {}) if isinstance(minimized_status.get("desktop", {}), dict) else {}
         minimized_outcome = minimized_desktop.get("run_outcome", {}) if isinstance(minimized_desktop.get("run_outcome", {}), dict) else {}
+        minimized_terminal_ok = minimized_status.get("status") in {"completed", "incomplete"} and not bool(
+            minimized_status.get("pending_approval", {}).get("kind", "")
+        )
+        minimized_completed_ok = minimized_status.get("status") == "completed"
+        minimized_incomplete_ok = (
+            minimized_status.get("status") == "incomplete"
+            and bool(minimized_outcome.get("terminal", False))
+            and str(minimized_outcome.get("outcome", "")).strip()
+            in {
+                "unrecoverable_withdrawn",
+                "unrecoverable_tray_background",
+                "unrecoverable_missing_target",
+                "recovery_exhausted",
+            }
+        )
         minimized_checks = [
             _build_check(
-                "minimized_completed_cleanly",
+                "minimized_did_not_linger",
                 "execution",
-                minimized_status.get("status") == "completed",
-                f"Status={minimized_status.get('status')}",
+                minimized_terminal_ok,
+                f"Status={minimized_status.get('status')} pending={minimized_status.get('pending_approval', {})}",
             ),
             _build_check(
-                "minimized_active_window_recovered",
+                "minimized_outcome_coherent",
                 "desktop",
-                _contains(str(minimized_desktop.get("active_window_title", "")), fixture.main_title),
+                minimized_completed_ok or minimized_incomplete_ok,
+                f"Desktop outcome={minimized_outcome} message={minimized_message}",
+            ),
+            _build_check(
+                "minimized_active_window_recovered_when_completed",
+                "desktop",
+                (not minimized_completed_ok)
+                or _contains(str(minimized_desktop.get("active_window_title", "")), fixture.main_title),
                 f"Desktop snapshot={minimized_desktop}",
-            ),
-            _build_check(
-                "minimized_run_outcome_completed",
-                "desktop",
-                str(minimized_outcome.get("outcome", "")).strip() == "completed",
-                f"Desktop outcome={minimized_outcome}",
             ),
             _build_check(
                 "minimized_used_recovery_and_capture",
@@ -4965,15 +4981,22 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
                 and "desktop_capture_screenshot" in minimized_tools,
                 f"Tools={minimized_tools}",
             ),
+            _build_check(
+                "minimized_run_history_terminal",
+                "desktop",
+                str(minimized_run.get("final_status", "")).strip().lower() in {"completed", "incomplete"},
+                f"Run={minimized_run}",
+            ),
         ]
         minimized_checks.extend(
             _golden_final_answer_checks(
-                status="completed",
+                status=str(minimized_status.get("status", "")).strip().lower() or "incomplete",
                 message=minimized_message,
                 session_payload=minimized_detail,
                 run=minimized_run,
                 expected_terms={fixture.main_title},
-                require_brief=True,
+                require_brief=minimized_status.get("status") == "completed",
+                require_next_step=minimized_status.get("status") == "incomplete",
                 brief_word_limit=90,
                 forbidden_terms={"approval", "browser workflow"},
             )

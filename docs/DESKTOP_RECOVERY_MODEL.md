@@ -115,6 +115,9 @@ Preferred behavior:
 - pause only for real actionable approvals
 - finalize as `incomplete` when the target is missing, withdrawn, tray/background-like, or otherwise not visibly recoverable in the current bounded pass
 - avoid leaving known non-actionable desktop runs stuck in `running`
+- let follow-up desktop runs start from a clean queued/running lifecycle boundary after a terminal desktop outcome
+- route failed desktop inspection through the same bounded recovery/finalization seam as failed focus/action steps when the recovery state already shows `needs_recovery`, `waiting`, or `missing`
+- expose compact lifecycle reasons so queued -> running -> paused/terminal handoffs are debuggable across sequential runs
 
 This is the foundation that the next bounded primitive should build on.
 

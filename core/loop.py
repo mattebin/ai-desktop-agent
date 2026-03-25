@@ -1414,7 +1414,13 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
 
 
 def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner_goal: str, tool_name: str, result, session_store=None):
-    if tool_name not in {"desktop_focus_window", "desktop_click_point", "desktop_press_key", "desktop_type_text"}:
+    if tool_name not in {
+        "desktop_inspect_window_state",
+        "desktop_focus_window",
+        "desktop_click_point",
+        "desktop_press_key",
+        "desktop_type_text",
+    }:
         return None
     if not isinstance(result, dict) or result.get("ok", False) or result.get("paused", False):
         return None

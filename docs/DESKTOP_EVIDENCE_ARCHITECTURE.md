@@ -133,6 +133,9 @@ Responsibilities:
 - convert scene/recovery/evidence state into a bounded terminal desktop outcome when continuation is no longer appropriate
 - keep approval-needed desktop checkpoints non-terminal and explicit
 - expose a compact desktop run outcome through state, local API, event stream, and run history
+- reset stale queued/running state cleanly when a follow-up desktop run starts after a terminal outcome
+- treat sequential desktop runs as first-class lifecycle transitions instead of implicit task reuse
+- surface compact lifecycle events so queued -> running -> paused/terminal handoffs are debuggable without dumping raw queue state
 
 Current normalized desktop outcomes:
 
@@ -147,6 +150,12 @@ Current normalized desktop outcomes:
 - `recovery_exhausted`
 
 This is important for future bounded primitives. Step 3 primitives should plug into this outcome model instead of inventing their own retry/finalization behavior.
+
+Sequential handoff rules:
+
+- terminal desktop outcomes end the current run boundary; the next desktop run must start from a fresh queued/running lifecycle state
+- desktop evidence, recent scene history, and approval context may carry forward when relevant
+- stale `active_task_id`, stale queued task views, and stale running snapshots should not carry forward across a new run boundary
 
 ## Bounded matching model
 
