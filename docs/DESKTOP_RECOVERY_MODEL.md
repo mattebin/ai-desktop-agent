@@ -61,6 +61,8 @@ Readiness is currently bounded and local-only:
 - window metadata via PyWinCtl/native state
 - read-only UI probing via pywinauto
 - lightweight visual stability checks via mss sample comparison
+- minimized, hidden, or withdrawn-like targets can short-circuit to metadata-backed not-ready or missing states before deeper UIA probing
+- pywinauto control-tree probes are bounded lazily so they do not materialize an entire descendant tree before slicing
 
 The system should prefer one bounded recovery pass and then a clear report over repeated blind retries.
 
@@ -118,6 +120,7 @@ Preferred behavior:
 - let follow-up desktop runs start from a clean queued/running lifecycle boundary after a terminal desktop outcome
 - route failed desktop inspection through the same bounded recovery/finalization seam as failed focus/action steps when the recovery state already shows `needs_recovery`, `waiting`, or `missing`
 - expose compact lifecycle reasons so queued -> running -> paused/terminal handoffs are debuggable across sequential runs
+- when a desktop run is already paused or terminal in a grounded way, prefer a compact deterministic final reply over another long desktop-specific model round trip
 
 This is the foundation that the next bounded primitive should build on.
 
@@ -128,6 +131,8 @@ Recent focused live validation confirmed the improved minimized / wrong-foregrou
 The main remaining live boundary is fully withdrawn or tray-like hidden windows. In that state, the bounded stack now tries a stricter native exact-title lookup and relaxed hidden enumeration first. If Windows still only surfaces a withdrawn-like handle with no visible recoverable state, the recovery model now classifies that as `target_withdrawn` and stops with a clear tray/background-style report instead of guessing.
 
 That limitation is explicit and currently preferred over guessing or widening control.
+
+The next narrow live blocker after these lifecycle/readiness improvements is the approval-path focus entry seam: a follow-up desktop approval run can still hang at the first `desktop_focus_window` tool attempt before it reaches a clean paused checkpoint.
 
 ## What this prepares
 

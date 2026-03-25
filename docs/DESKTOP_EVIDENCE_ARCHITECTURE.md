@@ -70,6 +70,12 @@ Responsibilities:
 - read-only UI/control-tree evidence
 - lightweight visual-stability checks
 
+Current guardrails:
+
+- deep pywinauto descendant walks are bounded lazily instead of materializing the full tree first
+- minimized, hidden, and withdrawn-like windows can short-circuit to metadata-backed readiness results instead of attempting deeper UIA probing first
+- `desktop_wait_for_window_ready` now returns early for non-waiting recovery states so recovery/finalization can take over instead of polling a state that already needs recovery
+
 ### 4. Evidence store and selection
 
 Primary file:
@@ -136,6 +142,7 @@ Responsibilities:
 - reset stale queued/running state cleanly when a follow-up desktop run starts after a terminal outcome
 - treat sequential desktop runs as first-class lifecycle transitions instead of implicit task reuse
 - surface compact lifecycle events so queued -> running -> paused/terminal handoffs are debuggable without dumping raw queue state
+- short-circuit terminal desktop reply rendering to a compact grounded fallback when a paused or terminal desktop state is already authoritative enough
 
 Current normalized desktop outcomes:
 

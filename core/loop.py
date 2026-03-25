@@ -66,20 +66,31 @@ def _emit_progress(progress_callback, stage: str, *, detail: str = "", tool_name
 def _fallback_finalize_message(task_state) -> str:
     status = str(getattr(task_state, "status", "")).strip().lower()
     desktop_snapshot = {}
+    pending_approval = {}
     try:
         control_snapshot = task_state.get_control_snapshot()
         desktop_snapshot = control_snapshot.get("desktop", {}) if isinstance(control_snapshot, dict) else {}
+        pending_approval = control_snapshot.get("pending_approval", {}) if isinstance(control_snapshot, dict) else {}
     except Exception:
         desktop_snapshot = {}
+        pending_approval = {}
     desktop_outcome = desktop_snapshot.get("run_outcome", {}) if isinstance(desktop_snapshot.get("run_outcome", {}), dict) else {}
     outcome_summary = str(desktop_outcome.get("summary", "")).strip()
     active_window = str(getattr(task_state, "desktop_active_window_title", "")).strip()
+    target_window = str(desktop_outcome.get("target_window_title", "")).strip() or str(getattr(task_state, "desktop_last_target_window", "")).strip()
     screenshot_path = str(getattr(task_state, "desktop_last_screenshot_path", "")).strip()
     notes = [str(item).strip() for item in list(getattr(task_state, "memory_notes", []))[-3:] if str(item).strip()]
     summary = str(getattr(task_state, "last_summary", "")).strip()
+    outcome_reason = str(desktop_outcome.get("reason", "")).strip().lower()
+    outcome_name = str(desktop_outcome.get("outcome", "")).strip().lower()
+    pending_kind = str((pending_approval or {}).get("kind", "")).strip().lower()
+    pending_tool = str((pending_approval or {}).get("tool", "")).strip()
+    pending_target = str((pending_approval or {}).get("target", "")).strip()
+    next_step = ""
 
     if status == "completed":
-        lead = f"I completed the bounded desktop run for {active_window}." if active_window else "I completed the bounded desktop run."
+        lead_target = target_window or active_window
+        lead = f"I completed the bounded desktop run for '{lead_target}'." if lead_target else "I completed the bounded desktop run."
         details: list[str] = []
         if outcome_summary:
             details.append(outcome_summary)
@@ -89,26 +100,78 @@ def _fallback_finalize_message(task_state) -> str:
             else:
                 details.append("I captured a screenshot of the active window.")
     elif status == "paused":
-        lead = "I paused at an approval checkpoint and need your decision before continuing."
+        if pending_kind == "desktop_action":
+            tool_label = pending_tool or "the requested desktop action"
+            target_label = pending_target or target_window or active_window
+            lead = f"I paused at a desktop approval checkpoint before {tool_label}."
+            if target_label:
+                lead = f"{lead} The current target is '{target_label}'."
+            next_step = "Reply yes to approve the paused desktop action or no to reject it."
+        else:
+            lead = "I paused at an approval checkpoint and need your decision before continuing."
         details = [outcome_summary] if outcome_summary else []
     elif status == "blocked":
-        lead = "I stopped because the bounded desktop path could not continue safely."
+        lead = (
+            f"I stopped because the bounded desktop path could not continue safely for '{target_window}'."
+            if target_window
+            else "I stopped because the bounded desktop path could not continue safely."
+        )
         details = [outcome_summary] if outcome_summary else []
     elif status == "incomplete":
-        lead = "I reached a bounded stopping point without fully completing the desktop run."
+        lead = (
+            f"I reached a bounded stopping point for '{target_window}' without fully completing the desktop run."
+            if target_window
+            else "I reached a bounded stopping point without fully completing the desktop run."
+        )
         details = [outcome_summary] if outcome_summary else []
     else:
         lead = "I finished the bounded operator run."
         details = [outcome_summary] if outcome_summary else []
 
+    if active_window and active_window != target_window and status in {"blocked", "incomplete"}:
+        details.append(f"The active window I could still observe was '{active_window}'.")
     if not details and notes:
         details.extend(notes[:2])
     if not details and summary:
         details.append(summary)
+    if screenshot_path and status in {"completed", "paused"}:
+        details.append(f"Latest screenshot evidence: {screenshot_path}.")
+
+    if not next_step and outcome_name in {
+        "unrecoverable_missing_target",
+        "unrecoverable_tray_background",
+        "unrecoverable_withdrawn",
+    }:
+        if target_window:
+            next_step = f"The next step is to bring '{target_window}' back visibly or reopen it, then ask me to re-check."
+        else:
+            next_step = "The next step is to bring the requested window back visibly or reopen it, then ask me to re-check."
+    elif not next_step and outcome_name == "recovery_exhausted":
+        next_step = "The next step is to narrow the desktop target or put the intended window into a visibly ready state before retrying."
+    elif not next_step and status == "blocked" and outcome_reason in {"post_result_timeout", "loop_entry_timeout", "first_progress_timeout"}:
+        next_step = "The next step is to retry once the window is visibly ready and the bounded desktop path can progress cleanly."
+    if next_step:
+        details.append(next_step)
 
     rendered = " ".join(part.strip() for part in [lead, *details] if part and part.strip())
     rendered = re.sub(r"\s+", " ", rendered).strip()
     return rendered or lead
+
+
+def _should_short_circuit_desktop_finalization(task_state) -> bool:
+    status = str(getattr(task_state, "status", "")).strip().lower()
+    if status not in {"paused", "blocked", "incomplete"}:
+        return False
+    try:
+        control_snapshot = task_state.get_control_snapshot()
+    except Exception:
+        control_snapshot = {}
+    pending_approval = control_snapshot.get("pending_approval", {}) if isinstance(control_snapshot, dict) else {}
+    if status == "paused" and str((pending_approval or {}).get("kind", "")).strip().lower() == "desktop_action":
+        return True
+    desktop_snapshot = control_snapshot.get("desktop", {}) if isinstance(control_snapshot, dict) else {}
+    desktop_outcome = desktop_snapshot.get("run_outcome", {}) if isinstance(desktop_snapshot.get("run_outcome", {}), dict) else {}
+    return bool(desktop_outcome.get("terminal", False))
 
 
 def _finalize_message(llm, task_state, *, progress_callback=None) -> str:
@@ -117,6 +180,13 @@ def _finalize_message(llm, task_state, *, progress_callback=None) -> str:
         "final_reply_rendering",
         detail="Rendering the authoritative final reply from the bounded task state.",
     )
+    if _should_short_circuit_desktop_finalization(task_state):
+        _emit_progress(
+            progress_callback,
+            "final_reply_rendering",
+            detail="Using compact grounded fallback for a bounded desktop terminal or approval state.",
+        )
+        return _fallback_finalize_message(task_state)
     try:
         return llm.finalize(
             task_state.goal,

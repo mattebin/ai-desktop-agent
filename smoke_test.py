@@ -488,6 +488,49 @@ if not any("using compact fallback" in event.get("detail", "").lower() for event
     raise SystemExit(f"Bounded final reply rendering did not expose the fallback detail after timeout: {finalize_progress_events}")
 if "Desktop Eval Main" not in finalize_timeout_message or "screenshot" not in finalize_timeout_message.lower():
     raise SystemExit(f"Bounded final reply fallback did not preserve grounded desktop details: {finalize_timeout_message}")
+
+
+class _ShortCircuitDesktopFinalizeSmokeLLM:
+    def __init__(self):
+        self.called = False
+
+    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None, timeout_seconds=None):
+        self.called = True
+        raise RuntimeError("desktop short-circuit finalization should not call the LLM")
+
+
+short_circuit_llm = _ShortCircuitDesktopFinalizeSmokeLLM()
+short_circuit_state = TaskState("Inspect the current state of the desktop window titled 'Desktop Eval Main'.")
+short_circuit_state.status = "incomplete"
+short_circuit_state.desktop_active_window_title = "Desktop Eval Sidecar"
+short_circuit_state.desktop_last_target_window = "Desktop Eval Main"
+short_circuit_state.set_desktop_run_outcome(
+    normalize_desktop_run_outcome(
+        {
+            "outcome": "unrecoverable_tray_background",
+            "status": "incomplete",
+            "terminal": True,
+            "reason": "unrecoverable_tray_background",
+            "summary": "Desktop Eval Main is not visibly present and appears tray-like or background-only.",
+            "target_window_title": "Desktop Eval Main",
+            "active_window_title": "Desktop Eval Sidecar",
+        }
+    )
+)
+short_circuit_progress: List[Dict[str, str]] = []
+short_circuit_message = _finalize_message(
+    short_circuit_llm,
+    short_circuit_state,
+    progress_callback=lambda stage, **payload: short_circuit_progress.append(
+        {"stage": str(stage), "detail": str(payload.get("detail", "")).strip()}
+    ),
+)
+if short_circuit_llm.called:
+    raise SystemExit("Bounded desktop finalization did not short-circuit the LLM for a terminal incomplete desktop outcome.")
+if not any("grounded fallback" in event.get("detail", "").lower() for event in short_circuit_progress):
+    raise SystemExit(f"Bounded desktop finalization did not expose the expected short-circuit progress detail: {short_circuit_progress}")
+if "Desktop Eval Main" not in short_circuit_message or "next step" not in short_circuit_message.lower():
+    raise SystemExit(f"Bounded desktop finalization did not preserve a grounded next-step message for terminal incomplete desktop outcomes: {short_circuit_message}")
 print("[OK] bounded final reply rendering fallback")
 
 startup_timeout_root = Path("data") / "smoke_execution_manager_startup_timeout"
@@ -571,8 +614,8 @@ try:
         "Inspect the desktop window titled 'Startup Timeout Window' as the second startup timeout desktop smoke run.",
         session_id="session-timeout-second",
     )
-    if not followup_dispatch.get("ok", False) or followup_dispatch.get("started", False):
-        raise SystemExit("ExecutionManager did not queue the follow-up startup-timeout smoke task behind the running task.")
+    if not followup_dispatch.get("ok", False):
+        raise SystemExit("ExecutionManager could not create the follow-up startup-timeout smoke task.")
 
     timeout_snapshot = {}
     followup_snapshot = {}
@@ -882,6 +925,89 @@ if missing_window_recovery.get("recovery", {}).get("strategy") != "report_missin
 missing_window_wait = desktop_wait_for_window_ready({"title": "__codex_missing_window__", "exact": True, "wait_seconds": 0.25})
 if missing_window_wait.get("recovery", {}).get("reason") not in {"tray_or_background_state", "target_not_found"}:
     raise SystemExit("desktop_wait_for_window_ready() did not report the expected bounded missing-target readiness state.")
+original_pywinauto_desktop = desktop_backends_module.PyWinAutoDesktop
+try:
+    class _BoundedSmokeChild:
+        def __init__(self, index):
+            self.element_info = SimpleNamespace(name=f"Control {index}", control_type="Button", automation_id=f"auto-{index}")
+
+        def window_text(self):
+            return f"Control {self.element_info.name}"
+
+    class _BoundedSmokeWindow:
+        def __init__(self):
+            self.element_info = SimpleNamespace(handle=0xABCDEF)
+
+        def window_text(self):
+            return "Bounded Probe Window"
+
+        def is_visible(self):
+            return True
+
+        def is_enabled(self):
+            return True
+
+        def has_keyboard_focus(self):
+            return True
+
+        def descendants(self):
+            yield _BoundedSmokeChild(0)
+            yield _BoundedSmokeChild(1)
+            yield _BoundedSmokeChild(2)
+            raise RuntimeError("descendants walked past the bounded limit")
+
+    class _BoundedSmokeDesktop:
+        def __init__(self, backend="uia"):
+            self.backend = backend
+
+        def windows(self):
+            return [_BoundedSmokeWindow()]
+
+    desktop_backends_module.PyWinAutoDesktop = _BoundedSmokeDesktop
+    bounded_readiness = desktop_backends_module.probe_window_readiness(target="active_window", limit=2)
+    if not bounded_readiness.get("ok", False) or bounded_readiness.get("data", {}).get("control_count") != 2:
+        raise SystemExit(f"probe_window_readiness() did not bound descendant enumeration correctly: {bounded_readiness}")
+    bounded_ui = desktop_backends_module.PyWinAutoEvidenceBackend().probe(target="active_window", limit=2)
+    if not bounded_ui.get("ok", False) or len(bounded_ui.get("data", {}).get("controls", [])) != 2:
+        raise SystemExit(f"probe_ui_evidence() did not bound descendant enumeration correctly: {bounded_ui}")
+finally:
+    desktop_backends_module.PyWinAutoDesktop = original_pywinauto_desktop
+original_readiness_probe = desktop_module.probe_window_readiness
+original_inspect_window_state_internal = desktop_module._inspect_window_state_internal
+try:
+    desktop_module.probe_window_readiness = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("minimized metadata should bypass deep readiness probing"))
+    minimized_metadata_readiness = desktop_module._readiness_probe_for_window(
+        {
+            "window_id": "0x00004001",
+            "title": "Minimized Smoke Window",
+            "is_visible": True,
+            "is_minimized": True,
+            "is_active": False,
+            "rect": {"x": 0, "y": 0, "width": 1280, "height": 720},
+        }
+    )
+    if minimized_metadata_readiness.get("reason") != "target_minimized" or minimized_metadata_readiness.get("backend") != "window_metadata":
+        raise SystemExit(f"_readiness_probe_for_window() did not short-circuit minimized metadata cleanly: {minimized_metadata_readiness}")
+
+    wait_calls = {"count": 0}
+
+    def _stubbed_minimized_inspect(args, *, source_action, include_ui_evidence=True, include_visual_stability=True):
+        wait_calls["count"] += 1
+        return {
+            "recovery": {
+                "state": "needs_recovery",
+                "reason": "target_minimized",
+                "summary": "Window is minimized and should be restored before waiting again.",
+            }
+        }
+
+    desktop_module._inspect_window_state_internal = _stubbed_minimized_inspect
+    minimized_wait = desktop_wait_for_window_ready({"title": "Minimized Smoke Window", "wait_seconds": 1.0, "poll_interval_seconds": 0.05})
+    if wait_calls["count"] != 1 or minimized_wait.get("recovery", {}).get("reason") != "target_minimized":
+        raise SystemExit(f"desktop_wait_for_window_ready() did not exit immediately for a non-waiting minimized recovery state: calls={wait_calls} result={minimized_wait}")
+finally:
+    desktop_module.probe_window_readiness = original_readiness_probe
+    desktop_module._inspect_window_state_internal = original_inspect_window_state_internal
 original_window_backend = desktop_module._WINDOW_BACKEND
 original_enum_windows_native = desktop_module._enum_windows_native
 original_find_window_by_exact_title_native = desktop_module._find_window_by_exact_title_native

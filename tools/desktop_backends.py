@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -104,6 +105,14 @@ def _normalize_path_text(value: Any) -> str:
         return str(Path(text).resolve())
     except Exception:
         return text
+
+
+def _bounded_descendants(window: Any, *, limit: int) -> List[Any]:
+    bounded_limit = max(1, int(limit or 1))
+    try:
+        return list(islice(window.descendants(), bounded_limit))
+    except Exception:
+        return []
 
 
 def _window_title_matches(title: str, requested_title: str, *, exact: bool) -> bool:
@@ -758,7 +767,7 @@ class PyWinAutoEvidenceBackend(StubUiEvidenceBackend):
 
             descendants: List[Dict[str, Any]] = []
             try:
-                for child in list(target_window.descendants())[:max(1, int(limit or 8))]:
+                for child in _bounded_descendants(target_window, limit=max(1, int(limit or 8))):
                     descendants.append(
                         {
                             "name": _trim_text(getattr(child.element_info, "name", ""), limit=160),
@@ -944,7 +953,7 @@ def probe_window_readiness(*, target: str = "active_window", window_id: str = ""
 
         control_count = 0
         try:
-            control_count = len(list(target_window.descendants())[: max(1, int(limit or 8))])
+            control_count = len(_bounded_descendants(target_window, limit=max(1, int(limit or 8))))
         except Exception:
             control_count = 0
 

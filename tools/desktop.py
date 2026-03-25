@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from core.backend_schemas import normalize_desktop_window_readiness
 from core.desktop_evidence import (
     build_desktop_evidence_bundle,
     collect_display_metadata,
@@ -591,9 +592,80 @@ def _window_probe_target(window: Dict[str, Any], fallback: str = "active_window"
     return title or fallback
 
 
+def _metadata_readiness_for_window(window: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(window, dict) or not window.get("window_id"):
+        return {}
+    title = str(window.get("title", "")).strip()
+    rect = window.get("rect", {}) if isinstance(window.get("rect", {}), dict) else {}
+    width = max(0, int(rect.get("width", 0) or 0))
+    height = max(0, int(rect.get("height", 0) or 0))
+    visible = bool(window.get("is_visible", False))
+    minimized = bool(window.get("is_minimized", False))
+    hidden = bool((not visible) or bool(window.get("is_cloaked", False)))
+    withdrawn = bool(hidden and width <= 4 and height <= 4)
+    if minimized:
+        return normalize_desktop_window_readiness(
+            {
+                "state": "not_ready",
+                "ready": False,
+                "visible": visible,
+                "enabled": False,
+                "focused": bool(window.get("is_active", False)),
+                "interactable": False,
+                "target": _window_probe_target(window),
+                "target_window_id": str(window.get("window_id", "")).strip(),
+                "window_title": title,
+                "control_count": 0,
+                "backend": "window_metadata",
+                "reason": "target_minimized",
+                "summary": f"'{title or 'The target window'}' is minimized, so bounded readiness probing should restore it before deeper inspection.",
+            }
+        )
+    if withdrawn:
+        return normalize_desktop_window_readiness(
+            {
+                "state": "missing",
+                "ready": False,
+                "visible": False,
+                "enabled": False,
+                "focused": False,
+                "interactable": False,
+                "target": _window_probe_target(window),
+                "target_window_id": str(window.get("window_id", "")).strip(),
+                "window_title": title,
+                "control_count": 0,
+                "backend": "window_metadata",
+                "reason": "target_withdrawn",
+                "summary": f"'{title or 'The target window'}' looks withdrawn or tray-like, so bounded readiness probing should stop and report it instead of waiting.",
+            }
+        )
+    if hidden:
+        return normalize_desktop_window_readiness(
+            {
+                "state": "not_ready",
+                "ready": False,
+                "visible": False,
+                "enabled": False,
+                "focused": bool(window.get("is_active", False)),
+                "interactable": False,
+                "target": _window_probe_target(window),
+                "target_window_id": str(window.get("window_id", "")).strip(),
+                "window_title": title,
+                "control_count": 0,
+                "backend": "window_metadata",
+                "reason": "target_hidden",
+                "summary": f"'{title or 'The target window'}' is hidden or cloaked, so bounded readiness probing should recover it before deeper inspection.",
+            }
+        )
+    return {}
+
+
 def _readiness_probe_for_window(window: Dict[str, Any], *, limit: int = 8) -> Dict[str, Any]:
     if not isinstance(window, dict) or not window.get("window_id"):
         return {}
+    metadata_readiness = _metadata_readiness_for_window(window)
+    if metadata_readiness:
+        return metadata_readiness
     result = probe_window_readiness(
         target=_window_probe_target(window),
         window_id=str(window.get("window_id", "")).strip(),
@@ -1314,7 +1386,7 @@ def _wait_for_window_ready(
         recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
         if recovery.get("state") == "ready":
             return inspected
-        if recovery.get("reason") in {"target_not_found", "tray_or_background_state", "target_mismatch"}:
+        if recovery.get("state") != "waiting":
             return inspected
         time.sleep(interval_seconds)
 
