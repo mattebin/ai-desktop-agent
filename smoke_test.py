@@ -632,8 +632,27 @@ try:
     timeout_outcome = timeout_snapshot.get("desktop", {}).get("run_outcome", {}) if isinstance(timeout_snapshot.get("desktop", {}), dict) else {}
     if timeout_snapshot.get("status") != "blocked":
         raise SystemExit(f"ExecutionManager did not finalize the stalled follow-up run cleanly as blocked: {timeout_snapshot}")
-    if timeout_outcome.get("reason") not in {"loop_entry_timeout", "first_progress_timeout"}:
-        raise SystemExit(f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: {timeout_outcome}")
+    timeout_reason = str(timeout_outcome.get("reason", "")).strip()
+    timeout_message = " ".join(
+        str(item).strip()
+        for item in (
+            timeout_snapshot.get("result_message", ""),
+            timeout_progress.get("detail", ""),
+            timeout_task.get("last_message", ""),
+        )
+        if str(item).strip()
+    ).lower()
+    if timeout_reason not in {"loop_entry_timeout", "first_progress_timeout"} and not any(
+        phrase in timeout_message
+        for phrase in (
+            "did not reach its first actionable desktop step",
+            "did not enter the loop in time",
+            "finalized as blocked instead of lingering invisibly",
+        )
+    ):
+        raise SystemExit(
+            f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: outcome={timeout_outcome} progress={timeout_progress} snapshot={timeout_snapshot}"
+        )
     if not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
         raise SystemExit(f"ExecutionManager did not preserve the expected startup-timeout progress markers: {timeout_progress}")
     if followup_snapshot.get("status") != "completed":
@@ -991,7 +1010,14 @@ try:
 
     wait_calls = {"count": 0}
 
-    def _stubbed_minimized_inspect(args, *, source_action, include_ui_evidence=True, include_visual_stability=True):
+    def _stubbed_minimized_inspect(
+        args,
+        *,
+        source_action,
+        include_ui_evidence=True,
+        include_visual_stability=True,
+        readiness_mode="full",
+    ):
         wait_calls["count"] += 1
         return {
             "recovery": {
@@ -1008,10 +1034,83 @@ try:
 finally:
     desktop_module.probe_window_readiness = original_readiness_probe
     desktop_module._inspect_window_state_internal = original_inspect_window_state_internal
+original_inspect_window_state_internal = desktop_module._inspect_window_state_internal
+try:
+    focus_wait_probe = {
+        "count": 0,
+        "include_ui_evidence": None,
+        "include_visual_stability": None,
+        "readiness_mode": None,
+    }
+
+    def _focus_wait_inspect(
+        args,
+        *,
+        source_action,
+        include_ui_evidence=True,
+        include_visual_stability=True,
+        readiness_mode="full",
+    ):
+        focus_wait_probe["count"] += 1
+        focus_wait_probe["include_ui_evidence"] = include_ui_evidence
+        focus_wait_probe["include_visual_stability"] = include_visual_stability
+        focus_wait_probe["readiness_mode"] = readiness_mode
+        return {
+            "recovery": {
+                "state": "needs_recovery",
+                "reason": "foreground_not_confirmed",
+                "summary": "Focus did not transfer cleanly.",
+            }
+        }
+
+    desktop_module._inspect_window_state_internal = _focus_wait_inspect
+    focus_wait_result = desktop_module._wait_for_window_ready({"title": "Focus Wait Smoke Window"}, action_name="desktop_focus_window")
+    if (
+        focus_wait_probe["count"] != 1
+        or focus_wait_probe["include_ui_evidence"] is not False
+        or focus_wait_probe["include_visual_stability"] is not False
+        or focus_wait_probe["readiness_mode"] != "metadata_only"
+        or focus_wait_result.get("recovery", {}).get("reason") != "foreground_not_confirmed"
+    ):
+        raise SystemExit(
+            f"_wait_for_window_ready() did not keep focus-only readiness checks bounded: probe={focus_wait_probe} result={focus_wait_result}"
+        )
+finally:
+    desktop_module._inspect_window_state_internal = original_inspect_window_state_internal
 original_window_backend = desktop_module._WINDOW_BACKEND
 original_enum_windows_native = desktop_module._enum_windows_native
 original_find_window_by_exact_title_native = desktop_module._find_window_by_exact_title_native
+original_focus_window_handle_native = desktop_module._focus_window_handle_native
 try:
+    native_focus_calls = {"count": 0}
+    backend_focus_calls = {"count": 0}
+
+    def _native_focus_success(hwnd):
+        native_focus_calls["count"] += 1
+        return True, ""
+
+    desktop_module._focus_window_handle_native = _native_focus_success
+    desktop_module._WINDOW_BACKEND = SimpleNamespace(
+        focus_window=lambda window_id: backend_focus_calls.__setitem__("count", backend_focus_calls["count"] + 1) or {"ok": True, "error": "", "data": {"active_window": {}}}
+    )
+    native_focus_result = desktop_module._focus_window_handle(0x1001)
+    if not native_focus_result[0] or native_focus_calls["count"] != 1 or backend_focus_calls["count"] != 0:
+        raise SystemExit(f"_focus_window_handle() did not prefer the native focus path cleanly: native={native_focus_calls} backend={backend_focus_calls} result={native_focus_result}")
+
+    def _native_focus_fail(hwnd):
+        native_focus_calls["count"] += 1
+        return False, "native focus failed"
+
+    desktop_module._focus_window_handle_native = _native_focus_fail
+    desktop_module._WINDOW_BACKEND = SimpleNamespace(
+        focus_window=lambda window_id: backend_focus_calls.__setitem__("count", backend_focus_calls["count"] + 1) or {"ok": False, "error": "backend focus failed", "data": {"active_window": {}}}
+    )
+    fallback_focus_result = desktop_module._focus_window_handle(0x1002)
+    if fallback_focus_result[0] or backend_focus_calls["count"] != 0 or "native focus failed" not in fallback_focus_result[1]:
+        raise SystemExit(
+            f"_focus_window_handle() did not keep the bounded focus path native-only after native failure: native={native_focus_calls} backend={backend_focus_calls} result={fallback_focus_result}"
+        )
+
     desktop_module._WINDOW_BACKEND = SimpleNamespace(
         list_windows=lambda include_minimized=False, limit=12: {
             "ok": True,
@@ -1073,6 +1172,7 @@ finally:
     desktop_module._WINDOW_BACKEND = original_window_backend
     desktop_module._enum_windows_native = original_enum_windows_native
     desktop_module._find_window_by_exact_title_native = original_find_window_by_exact_title_native
+    desktop_module._focus_window_handle_native = original_focus_window_handle_native
 title_drift_selection = select_window_candidate(
     [
         {

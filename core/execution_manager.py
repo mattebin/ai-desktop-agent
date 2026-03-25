@@ -3324,6 +3324,12 @@ class ExecutionManager:
             if filtered_view and not live_scope_running and latest_run_status:
                 if not primary_task or snapshot["result_status"] in QUEUE_TERMINAL_STATUSES:
                     snapshot["result_status"] = latest_run_status
+            if filtered_view and not live_scope_running:
+                primary_status = _trim_text(primary_task.get("status", ""), limit=40)
+                if primary_status in QUEUE_TERMINAL_STATUSES or primary_status == "paused":
+                    snapshot["status"] = primary_status
+                elif latest_run_status and snapshot.get("status", "") in {"", "idle", "queued", "running"}:
+                    snapshot["status"] = latest_run_status
             if not snapshot["result_status"] and not filtered_view:
                 snapshot["result_status"] = str(self._last_result.get("status", snapshot.get("status", ""))).strip()
 

@@ -709,18 +709,24 @@ def _inspect_window_state_internal(
     source_action: str,
     include_ui_evidence: bool = True,
     include_visual_stability: bool = True,
+    readiness_mode: str = "full",
 ) -> Dict[str, Any]:
     limit = max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30))
     target_window, candidates, lookup_error, match_info = _find_window(args)
     visible_windows = _enum_windows(limit=min(limit, DESKTOP_DEFAULT_WINDOW_LIMIT))
     active_window = _active_window_info()
-    readiness = _readiness_probe_for_window(
-        target_window or active_window,
-        limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=16),
-    )
+    probe_window = target_window or active_window
+    normalized_readiness_mode = str(readiness_mode or "full").strip().lower()
+    if normalized_readiness_mode == "metadata_only":
+        readiness = _metadata_readiness_for_window(probe_window)
+    else:
+        readiness = _readiness_probe_for_window(
+            probe_window,
+            limit=_coerce_int(args.get("ui_limit", 8), 8, minimum=1, maximum=16),
+        )
     visual_stability = (
         _visual_stability_for_window(
-            target_window or active_window,
+            probe_window,
             samples=_coerce_int(args.get("stability_samples", 3), 3, minimum=2, maximum=4),
             interval_ms=_coerce_int(args.get("stability_interval_ms", 120), 120, minimum=40, maximum=400),
         )
@@ -1356,10 +1362,10 @@ def _capture_bitmap_native(path: Path, *, x: int, y: int, width: int, height: in
 
 
 def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
-    result = _get_window_backend().focus_window(window_id=_hex_hwnd(hwnd))
-    if not isinstance(result, dict):
-        return False, "Could not focus the requested window."
-    return bool(result.get("ok", False)), str(result.get("error", "") or "")
+    ok, error = _focus_window_handle_native(hwnd)
+    if ok:
+        return True, ""
+    return False, str(error or "Could not focus the requested window.").strip()
 
 
 def _wait_for_window_ready(
@@ -1372,6 +1378,9 @@ def _wait_for_window_ready(
     interval_seconds = max(0.08, min(0.4, float(args.get("poll_interval_seconds", 0.16) or 0.16)))
     deadline = time.time() + wait_seconds
     last_view: Dict[str, Any] = {}
+    include_ui_evidence = action_name not in {"desktop_focus_window"}
+    include_visual_stability = action_name not in {"desktop_focus_window"}
+    readiness_mode = "metadata_only" if action_name == "desktop_focus_window" else "full"
 
     while time.time() < deadline:
         current_args = dict(args)
@@ -1379,8 +1388,9 @@ def _wait_for_window_ready(
         inspected = _inspect_window_state_internal(
             current_args,
             source_action=action_name,
-            include_ui_evidence=True,
-            include_visual_stability=True,
+            include_ui_evidence=include_ui_evidence,
+            include_visual_stability=include_visual_stability,
+            readiness_mode=readiness_mode,
         )
         last_view = inspected
         recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
@@ -1394,11 +1404,15 @@ def _wait_for_window_ready(
 
 
 def _execute_window_recovery(args: Dict[str, Any], *, action_name: str) -> Dict[str, Any]:
+    include_ui_evidence = action_name not in {"desktop_focus_window"}
+    include_visual_stability = action_name not in {"desktop_focus_window"}
+    readiness_mode = "metadata_only" if action_name == "desktop_focus_window" else "full"
     inspected = _inspect_window_state_internal(
         args,
         source_action=action_name,
-        include_ui_evidence=True,
-        include_visual_stability=True,
+        include_ui_evidence=include_ui_evidence,
+        include_visual_stability=include_visual_stability,
+        readiness_mode=readiness_mode,
     )
     recovery = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else {}
     target_window = inspected.get("target_window", {}) if isinstance(inspected.get("target_window", {}), dict) else {}
@@ -1452,8 +1466,9 @@ def _execute_window_recovery(args: Dict[str, Any], *, action_name: str) -> Dict[
         inspected = _inspect_window_state_internal(
             refreshed_args,
             source_action=action_name,
-            include_ui_evidence=True,
-            include_visual_stability=True,
+            include_ui_evidence=include_ui_evidence,
+            include_visual_stability=include_visual_stability,
+            readiness_mode=readiness_mode,
         )
         target_window = inspected.get("target_window", {}) if isinstance(inspected.get("target_window", {}), dict) else target_window
         current = inspected.get("recovery", {}) if isinstance(inspected.get("recovery", {}), dict) else current
