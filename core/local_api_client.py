@@ -53,12 +53,14 @@ def _authoritative_session_reply(session_payload: Dict[str, Any] | None) -> str:
 def _status_wait_debug(snapshot: Dict[str, Any] | None, session_payload: Dict[str, Any] | None = None) -> str:
     current = snapshot if isinstance(snapshot, dict) else {}
     active_task = current.get("active_task", {}) if isinstance(current.get("active_task", {}), dict) else {}
+    progress = active_task.get("progress", {}) if isinstance(active_task.get("progress", {}), dict) else {}
     latest_run = current.get("latest_run", {}) if isinstance(current.get("latest_run", {}), dict) else {}
     pending = current.get("pending_approval", {}) if isinstance(current.get("pending_approval", {}), dict) else {}
     parts = [
         f"status={_trim_text(current.get('status', ''), limit=40) or '<none>'}",
         f"running={bool(current.get('running', False))}",
         f"active_task_status={_trim_text(active_task.get('status', ''), limit=40) or '<none>'}",
+        f"progress_stage={_trim_text(progress.get('stage', ''), limit=40) or '<none>'}",
         f"latest_run_status={_trim_text(latest_run.get('final_status', ''), limit=40) or '<none>'}",
         f"pending_approval={_trim_text(pending.get('kind', ''), limit=40) or '<none>'}",
     ]

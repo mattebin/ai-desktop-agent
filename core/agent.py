@@ -123,12 +123,18 @@ class Agent:
         run_source: str = "goal_run",
         session_id: str = "",
         control_callback=None,
+        progress_callback=None,
     ):
         normalized_scope_id = self._normalize_state_scope_id(getattr(state, "state_scope_id", DEFAULT_STATE_SCOPE_ID))
         state.state_scope_id = normalized_scope_id
         step_start_index = len(state.steps) if history_start_index is None else max(0, int(history_start_index))
         started_at = time.time()
         self.session_store.save(state, scope_id=normalized_scope_id)
+        if callable(progress_callback):
+            try:
+                progress_callback("run_state_entered", detail="Entered agent run_state.")
+            except Exception:
+                pass
 
         try:
             result = run_task_loop(
@@ -139,6 +145,7 @@ class Agent:
                 session_store=self.session_store,
                 planning_goal=planning_goal,
                 control_callback=control_callback,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             state.status = "blocked"

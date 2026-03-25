@@ -34,6 +34,7 @@ def _json_fingerprint(value: Any) -> str:
 
 def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
     task = task if isinstance(task, dict) else {}
+    progress = task.get("progress", {}) if isinstance(task.get("progress", {}), dict) else {}
     return {
         "task_id": _trim_text(task.get("task_id", ""), limit=60),
         "status": _trim_text(task.get("status", ""), limit=40),
@@ -42,6 +43,19 @@ def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
         "run_id": _trim_text(task.get("run_id", ""), limit=60),
         "approval_needed": bool(task.get("approval_needed", False)),
         "approval_reason": _trim_text(task.get("approval_reason", ""), limit=180),
+        "progress": {
+            "stage": _trim_text(progress.get("stage", ""), limit=60),
+            "detail": _trim_text(progress.get("detail", ""), limit=220),
+            "result_status": _trim_text(progress.get("result_status", ""), limit=40),
+            "at": _trim_text(progress.get("at", ""), limit=40),
+            "worker_started_at": _trim_text(progress.get("worker_started_at", ""), limit=40),
+            "run_state_entered_at": _trim_text(progress.get("run_state_entered_at", ""), limit=40),
+            "first_loop_at": _trim_text(progress.get("first_loop_at", ""), limit=40),
+            "first_step_at": _trim_text(progress.get("first_step_at", ""), limit=40),
+            "first_result_at": _trim_text(progress.get("first_result_at", ""), limit=40),
+            "terminal_at": _trim_text(progress.get("terminal_at", ""), limit=40),
+            "meaningful_progress": bool(progress.get("meaningful_progress", False)),
+        },
     }
 
 

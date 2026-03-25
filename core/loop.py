@@ -40,6 +40,7 @@ _DESKTOP_RECOVERY_TOOLS = {
     "desktop_recover_window",
     "desktop_wait_for_window_ready",
 }
+FINALIZE_MESSAGE_TIMEOUT_SECONDS = 30
 
 
 def _persist_session_state(session_store, task_state):
@@ -48,21 +49,97 @@ def _persist_session_state(session_store, task_state):
     session_store.save(task_state)
 
 
-def _finalize_message(llm, task_state) -> str:
-    return llm.finalize(
-        task_state.goal,
-        task_state.steps,
-        task_state.get_observation(),
-        task_state.get_final_context(),
-        desktop_vision=task_state.get_desktop_vision_context(
-            purpose="desktop_final",
-            prompt_text=task_state.goal,
-            prefer_before_after=True,
-        ),
+def _emit_progress(progress_callback, stage: str, *, detail: str = "", tool_name: str = "", result_status: str = ""):
+    if not callable(progress_callback):
+        return
+    try:
+        progress_callback(
+            stage,
+            detail=detail,
+            tool_name=tool_name,
+            result_status=result_status,
+        )
+    except Exception:
+        pass
+
+
+def _fallback_finalize_message(task_state) -> str:
+    status = str(getattr(task_state, "status", "")).strip().lower()
+    desktop_snapshot = {}
+    try:
+        control_snapshot = task_state.get_control_snapshot()
+        desktop_snapshot = control_snapshot.get("desktop", {}) if isinstance(control_snapshot, dict) else {}
+    except Exception:
+        desktop_snapshot = {}
+    desktop_outcome = desktop_snapshot.get("run_outcome", {}) if isinstance(desktop_snapshot.get("run_outcome", {}), dict) else {}
+    outcome_summary = str(desktop_outcome.get("summary", "")).strip()
+    active_window = str(getattr(task_state, "desktop_active_window_title", "")).strip()
+    screenshot_path = str(getattr(task_state, "desktop_last_screenshot_path", "")).strip()
+    notes = [str(item).strip() for item in list(getattr(task_state, "memory_notes", []))[-3:] if str(item).strip()]
+    summary = str(getattr(task_state, "last_summary", "")).strip()
+
+    if status == "completed":
+        lead = f"I completed the bounded desktop run for {active_window}." if active_window else "I completed the bounded desktop run."
+        details: list[str] = []
+        if outcome_summary:
+            details.append(outcome_summary)
+        if screenshot_path:
+            if active_window:
+                details.append(f"I captured a screenshot of the active window '{active_window}'.")
+            else:
+                details.append("I captured a screenshot of the active window.")
+    elif status == "paused":
+        lead = "I paused at an approval checkpoint and need your decision before continuing."
+        details = [outcome_summary] if outcome_summary else []
+    elif status == "blocked":
+        lead = "I stopped because the bounded desktop path could not continue safely."
+        details = [outcome_summary] if outcome_summary else []
+    elif status == "incomplete":
+        lead = "I reached a bounded stopping point without fully completing the desktop run."
+        details = [outcome_summary] if outcome_summary else []
+    else:
+        lead = "I finished the bounded operator run."
+        details = [outcome_summary] if outcome_summary else []
+
+    if not details and notes:
+        details.extend(notes[:2])
+    if not details and summary:
+        details.append(summary)
+
+    rendered = " ".join(part.strip() for part in [lead, *details] if part and part.strip())
+    rendered = re.sub(r"\s+", " ", rendered).strip()
+    return rendered or lead
+
+
+def _finalize_message(llm, task_state, *, progress_callback=None) -> str:
+    _emit_progress(
+        progress_callback,
+        "final_reply_rendering",
+        detail="Rendering the authoritative final reply from the bounded task state.",
     )
+    try:
+        return llm.finalize(
+            task_state.goal,
+            task_state.steps,
+            task_state.get_observation(),
+            task_state.get_final_context(),
+            desktop_vision=task_state.get_desktop_vision_context(
+                purpose="desktop_final",
+                prompt_text=task_state.goal,
+                prefer_before_after=True,
+            ),
+            timeout_seconds=FINALIZE_MESSAGE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        _emit_progress(
+            progress_callback,
+            "final_reply_rendering",
+            detail=f"Final reply rendering failed ({type(exc).__name__}); using compact fallback.",
+        )
+        return _fallback_finalize_message(task_state)
 
 
-def _finalize_control_request(llm, task_state, request, *, session_store=None):
+def _finalize_control_request(llm, task_state, request, *, session_store=None, progress_callback=None):
     action = str((request or {}).get("action", "")).strip().lower()
     reason = str((request or {}).get("reason", "")).strip()
     replacement_task_id = str((request or {}).get("replacement_task_id", "")).strip()
@@ -110,7 +187,7 @@ def _finalize_control_request(llm, task_state, request, *, session_store=None):
     return {
         "ok": True,
         "status": status,
-        "message": _finalize_message(llm, task_state),
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
     }
 
@@ -133,7 +210,7 @@ def _record_tool_result(task_state, tool_name, args, result):
         task_state.set_summary(" | ".join(recent_notes))
 
 
-def _finalize_guarded_completion(llm, task_state, note: str, *, tool_name="", args=None, session_store=None):
+def _finalize_guarded_completion(llm, task_state, note: str, *, tool_name="", args=None, session_store=None, progress_callback=None):
     task_state.add_step(
         {
             "type": "system",
@@ -152,7 +229,7 @@ def _finalize_guarded_completion(llm, task_state, note: str, *, tool_name="", ar
     return {
         "ok": True,
         "status": "completed",
-        "message": _finalize_message(llm, task_state),
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
     }
 
@@ -411,10 +488,32 @@ def _desktop_partial_evidence_allows_checkpoint(task_state, planner_goal: str, *
     return True
 
 
-def _execute_desktop_tool_step(tool_runtime, task_state, tool_name: str, seed_args: dict, planner_goal: str, *, session_store=None):
+def _execute_desktop_tool_step(
+    tool_runtime,
+    task_state,
+    tool_name: str,
+    seed_args: dict,
+    planner_goal: str,
+    *,
+    session_store=None,
+    progress_callback=None,
+):
     args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
+    _emit_progress(
+        progress_callback,
+        "tool_step_attempted",
+        detail=f"Attempting bounded tool step: {tool_name}.",
+        tool_name=tool_name,
+    )
     result = tool_runtime.execute(tool_name, args)
     _record_tool_result(task_state, tool_name, args, result)
+    _emit_progress(
+        progress_callback,
+        "tool_result_recorded",
+        detail=f"Recorded result from bounded tool step: {tool_name}.",
+        tool_name=tool_name,
+        result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
+    )
     _persist_session_state(session_store, task_state)
     return args, result
 
@@ -796,6 +895,7 @@ def _maybe_prepare_desktop_recovery_context(
     *,
     require_screenshot: bool = False,
     session_store=None,
+    progress_callback=None,
 ):
     seed_args = _desktop_target_seed_args(task_state, planner_goal)
     if not seed_args.get("title") and not seed_args.get("window_id"):
@@ -813,6 +913,7 @@ def _maybe_prepare_desktop_recovery_context(
             seed_args,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         executed_any = True
         latest_recovery = inspect_result.get("recovery", {}) if isinstance(inspect_result.get("recovery", {}), dict) else {}
@@ -826,6 +927,7 @@ def _maybe_prepare_desktop_recovery_context(
             seed_args,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         executed_any = True
         latest_recovery = recover_result.get("recovery", {}) if isinstance(recover_result.get("recovery", {}), dict) else {}
@@ -839,6 +941,7 @@ def _maybe_prepare_desktop_recovery_context(
             seed_args,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         executed_any = True
         latest_recovery = waited_result.get("recovery", {}) if isinstance(waited_result.get("recovery", {}), dict) else {}
@@ -862,6 +965,7 @@ def _maybe_prepare_desktop_recovery_context(
             seed_args,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         executed_any = True
         latest_recovery = waited_result.get("recovery", {}) if isinstance(waited_result.get("recovery", {}), dict) else latest_recovery
@@ -882,6 +986,7 @@ def _maybe_prepare_desktop_recovery_context(
             {"scope": "active_window"},
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         executed_any = True
         if not capture_result.get("ok", False):
@@ -892,7 +997,7 @@ def _maybe_prepare_desktop_recovery_context(
     return None
 
 
-def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=None):
+def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=None, progress_callback=None):
     note = f"Stopped repeating {tool_name} after the current desktop evidence was already sufficient and finalized from the latest desktop observation."
     return _finalize_guarded_completion(
         llm,
@@ -901,10 +1006,11 @@ def _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_
         tool_name=tool_name,
         args={},
         session_store=session_store,
+        progress_callback=progress_callback,
     )
 
 
-def _finalize_desktop_run_outcome(llm, task_state, outcome: dict, *, session_store=None):
+def _finalize_desktop_run_outcome(llm, task_state, outcome: dict, *, session_store=None, progress_callback=None):
     if not isinstance(outcome, dict) or not str(outcome.get("outcome", "")).strip():
         return None
     task_state.set_desktop_run_outcome(outcome)
@@ -928,13 +1034,13 @@ def _finalize_desktop_run_outcome(llm, task_state, outcome: dict, *, session_sto
     return {
         "ok": status == "completed",
         "status": status,
-        "message": _finalize_message(llm, task_state),
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
         "desktop_run_outcome": dict(outcome),
     }
 
 
-def _maybe_finalize_desktop_terminal_outcome(llm, task_state, planner_goal: str, *, session_store=None):
+def _maybe_finalize_desktop_terminal_outcome(llm, task_state, planner_goal: str, *, session_store=None, progress_callback=None):
     outcome = _desktop_terminal_outcome(task_state, planner_goal)
     if not outcome.get("terminal", False):
         return None
@@ -943,6 +1049,7 @@ def _maybe_finalize_desktop_terminal_outcome(llm, task_state, planner_goal: str,
         task_state,
         outcome,
         session_store=session_store,
+        progress_callback=progress_callback,
     )
 
 
@@ -956,6 +1063,7 @@ def _finalize_synthesized_desktop_pause(
     resume_args: dict,
     note: str,
     session_store=None,
+    progress_callback=None,
 ):
     evidence_id = str(getattr(task_state, "desktop_last_evidence_id", "")).strip()
     if resume_args.get("x") is not None and resume_args.get("y") is not None:
@@ -1018,7 +1126,7 @@ def _finalize_synthesized_desktop_pause(
     return {
         "ok": False,
         "status": "paused",
-        "message": _finalize_message(llm, task_state),
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
     }
 
@@ -1176,7 +1284,7 @@ def _maybe_pause_for_browser_checkpoint(llm, tool_runtime, task_state, planner_g
     }
 
 
-def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal: str, session_store=None, *, allow_recovery: bool = True):
+def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal: str, session_store=None, *, allow_recovery: bool = True, progress_callback=None):
     if getattr(task_state, "desktop_checkpoint_pending", False):
         return None
     if tool_runtime.goal_has_explicit_desktop_approval(planner_goal):
@@ -1209,6 +1317,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             planner_goal,
             require_screenshot=bool(click_point),
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if recovery_prepared is not None and recovery_prepared.get("continue_loop", False):
             return _maybe_pause_for_desktop_action(
@@ -1218,6 +1327,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
                 planner_goal,
                 session_store=session_store,
                 allow_recovery=False,
+                progress_callback=progress_callback,
             )
 
     if _goal_mentions_desktop_focus(planner_goal) and not _desktop_has_completed_focus_context(task_state):
@@ -1285,6 +1395,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             resume_args=resume_args,
             note=note,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
 
     if key_request and not _has_completed_or_paused_tool_step(task_state, "desktop_press_key"):
@@ -1350,6 +1461,7 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             resume_args=resume_args,
             note=note,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
 
     if type_request and not _has_completed_or_paused_tool_step(task_state, "desktop_type_text"):
@@ -1409,11 +1521,21 @@ def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal:
             resume_args=resume_args,
             note=note,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
     return None
 
 
-def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner_goal: str, tool_name: str, result, session_store=None):
+def _maybe_recover_desktop_action_failure(
+    llm,
+    tool_runtime,
+    task_state,
+    planner_goal: str,
+    tool_name: str,
+    result,
+    session_store=None,
+    progress_callback=None,
+):
     if tool_name not in {
         "desktop_inspect_window_state",
         "desktop_focus_window",
@@ -1459,14 +1581,20 @@ def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner
         planner_goal,
         require_screenshot=tool_name == "desktop_click_point",
         session_store=session_store,
+        progress_callback=progress_callback,
     )
     if recovery_progress is None and refresh_needed:
         refresh_tool = "desktop_capture_screenshot" if tool_name == "desktop_click_point" else "desktop_get_active_window"
         refresh_seed_args = {"scope": "active_window"} if refresh_tool == "desktop_capture_screenshot" else {}
-        refresh_args = tool_runtime.prepare_args(refresh_tool, refresh_seed_args, task_state, planning_goal=planner_goal)
-        refresh_result = tool_runtime.execute(refresh_tool, refresh_args)
-        _record_tool_result(task_state, refresh_tool, refresh_args, refresh_result)
-        _persist_session_state(session_store, task_state)
+        refresh_args, refresh_result = _execute_desktop_tool_step(
+            tool_runtime,
+            task_state,
+            refresh_tool,
+            refresh_seed_args,
+            planner_goal,
+            session_store=session_store,
+            progress_callback=progress_callback,
+        )
         if refresh_result.get("ok", False):
             recovery_progress = {"continue_loop": True}
     if recovery_progress is None:
@@ -1488,7 +1616,7 @@ def _maybe_recover_desktop_action_failure(llm, tool_runtime, task_state, planner
     return None
 
 
-def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal: str, session_store=None):
+def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal: str, session_store=None, progress_callback=None):
     if not getattr(task_state, "desktop_checkpoint_pending", False):
         return None
     if not tool_runtime.goal_has_explicit_desktop_approval(planner_goal):
@@ -1519,7 +1647,7 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         return {
             "ok": False,
             "status": "paused",
-            "message": _finalize_message(llm, task_state),
+            "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
             "steps": task_state.steps,
         }
 
@@ -1539,21 +1667,37 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         return {
             "ok": True,
             "status": "completed",
-            "message": _finalize_message(llm, task_state),
+            "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
             "steps": task_state.steps,
         }
 
     return None
 
 
-def run_task_loop(llm, tools, task_state, settings, session_store=None, planning_goal: str | None = None, control_callback=None):
+def run_task_loop(
+    llm,
+    tools,
+    task_state,
+    settings,
+    session_store=None,
+    planning_goal: str | None = None,
+    control_callback=None,
+    progress_callback=None,
+):
     tool_runtime = tools if isinstance(tools, ToolRuntime) else ToolRuntime(tools)
     max_iterations = int(settings.get("max_iterations", 12))
     planner_goal = str(planning_goal or task_state.goal).strip() or task_state.goal
+    _emit_progress(progress_callback, "loop_entered", detail="Entered the bounded operator loop.")
 
     for _ in range(max_iterations):
         if callable(control_callback):
-            control_result = _finalize_control_request(llm, task_state, control_callback(), session_store=session_store)
+            control_result = _finalize_control_request(
+                llm,
+                task_state,
+                control_callback(),
+                session_store=session_store,
+                progress_callback=progress_callback,
+            )
             if control_result is not None:
                 return control_result
 
@@ -1579,6 +1723,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             task_state,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if resumed_desktop_action is not None:
             return resumed_desktop_action
@@ -1599,6 +1744,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             task_state,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if synthesized_desktop_pause is not None:
             return synthesized_desktop_pause
@@ -1608,6 +1754,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             task_state,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if terminal_desktop_outcome is not None:
             return terminal_desktop_outcome
@@ -1625,6 +1772,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             if _goal_is_desktop_related(planner_goal, task_state)
             else {}
         )
+        _emit_progress(progress_callback, "planning_started", detail="Started planning the next bounded step.")
         plan = llm.plan_next_action(
             planner_goal,
             observation,
@@ -1649,7 +1797,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             return {
                 "ok": True,
                 "status": "completed",
-                "message": _finalize_message(llm, task_state),
+                "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
                 "steps": task_state.steps,
             }
 
@@ -1676,10 +1824,29 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             return _finalize_redundant_browser_follow_up(llm, task_state, tool_name, args, session_store=session_store)
 
         if _is_redundant_desktop_observation(task_state, tool_name, planner_goal):
-            return _finalize_redundant_desktop_observation(llm, task_state, tool_name, session_store=session_store)
+            return _finalize_redundant_desktop_observation(
+                llm,
+                task_state,
+                tool_name,
+                session_store=session_store,
+                progress_callback=progress_callback,
+            )
 
+        _emit_progress(
+            progress_callback,
+            "tool_step_attempted",
+            detail=f"Attempting bounded tool step: {tool_name}.",
+            tool_name=tool_name,
+        )
         result = tool_runtime.execute(tool_name, args)
         _record_tool_result(task_state, tool_name, args, result)
+        _emit_progress(
+            progress_callback,
+            "tool_result_recorded",
+            detail=f"Recorded result from bounded tool step: {tool_name}.",
+            tool_name=tool_name,
+            result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
+        )
         if result.get("paused", False):
             if tool_name.startswith("desktop_"):
                 task_state.set_desktop_run_outcome(
@@ -1697,7 +1864,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             return {
                 "ok": False,
                 "status": "paused",
-                "message": _finalize_message(llm, task_state),
+                "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
                 "steps": task_state.steps,
             }
         desktop_recovery = _maybe_recover_desktop_action_failure(
@@ -1708,6 +1875,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             tool_name,
             result,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if desktop_recovery is not None:
             if desktop_recovery.get("continue_loop", False):
@@ -1718,6 +1886,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             task_state,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if terminal_desktop_outcome is not None:
             return terminal_desktop_outcome
@@ -1736,11 +1905,18 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
             task_state,
             planner_goal,
             session_store=session_store,
+            progress_callback=progress_callback,
         )
         if synthesized_desktop_pause is not None:
             return synthesized_desktop_pause
         if callable(control_callback):
-            control_result = _finalize_control_request(llm, task_state, control_callback(), session_store=session_store)
+            control_result = _finalize_control_request(
+                llm,
+                task_state,
+                control_callback(),
+                session_store=session_store,
+                progress_callback=progress_callback,
+            )
             if control_result is not None:
                 return control_result
         _persist_session_state(session_store, task_state)
@@ -1750,6 +1926,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
         task_state,
         planner_goal,
         session_store=session_store,
+        progress_callback=progress_callback,
     )
     if terminal_desktop_outcome is not None:
         return terminal_desktop_outcome
@@ -1769,7 +1946,7 @@ def run_task_loop(llm, tools, task_state, settings, session_store=None, planning
     return {
         "ok": False,
         "status": "incomplete",
-        "message": _finalize_message(llm, task_state),
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
     }
 

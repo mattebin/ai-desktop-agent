@@ -607,7 +607,7 @@ class HostedLLMClient:
             "source": "config/settings.yaml",
         }
 
-    def _call(self, messages, tools=None):
+    def _call(self, messages, tools=None, *, timeout_seconds=None):
         payload = {
             "model": self.model,
             "messages": messages,
@@ -629,11 +629,18 @@ class HostedLLMClient:
             if isinstance(message, dict)
         )
 
+        timeout = 120 if has_images else 60
+        try:
+            if timeout_seconds is not None:
+                timeout = max(5, float(timeout_seconds))
+        except (TypeError, ValueError):
+            timeout = 120 if has_images else 60
+
         r = requests.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=120 if has_images else 60,
+            timeout=timeout,
         )
         r.raise_for_status()
         return r.json()
@@ -785,7 +792,7 @@ class HostedLLMClient:
         data = self._call(messages)
         return data["choices"][0]["message"]["content"].strip()
 
-    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None):
+    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None, timeout_seconds=None):
         messages = [
             {
                 "role": "developer",
@@ -835,6 +842,6 @@ class HostedLLMClient:
                 ),
             },
         ]
-        data = self._call(messages)
+        data = self._call(messages, timeout_seconds=timeout_seconds)
         message = data["choices"][0]["message"]["content"].strip()
         return _ensure_core_final_sections(message, goal, final_context)

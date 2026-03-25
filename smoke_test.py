@@ -88,6 +88,7 @@ from core.llm_client import _content_with_desktop_vision, _goal_requests_brief_a
 from core.local_api import LocalOperatorApiServer, _status_payload
 from core.local_api_client import LocalOperatorApiClient, wait_for_local_api_status
 from core.loop import (
+    _finalize_message,
     _is_redundant_desktop_observation,
     _maybe_finalize_desktop_terminal_outcome,
     _maybe_pause_for_desktop_action,
@@ -372,6 +373,240 @@ finally:
     sequential_manager.shutdown()
     shutil.rmtree(sequential_handoff_root, ignore_errors=True)
 print("[OK] execution manager sequential handoff")
+
+startup_progress_root = Path("data") / "smoke_execution_manager_progress"
+shutil.rmtree(startup_progress_root, ignore_errors=True)
+startup_progress_root.mkdir(parents=True, exist_ok=True)
+
+
+class _ProgressLifecycleSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+        self._runs = []
+        self.history_store = SimpleNamespace(
+            get_recent_runs=lambda limit=6, session_id="", state_scope_id="": list(self._runs)[:limit],
+            get_latest_run=lambda session_id="", state_scope_id="": (dict(self._runs[0]) if self._runs else {}),
+        )
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def get_runtime_config(self):
+        return {"active_model": "gpt-5.4", "reasoning_effort": "medium"}
+
+    def record_run_history(self, state: TaskState, *, result: Dict[str, Any] | None, **kwargs):
+        entry = {
+            "run_id": f"run-progress-{len(self._runs) + 1}",
+            "final_status": str((result or {}).get("status", state.status)).strip(),
+            "result_message": str((result or {}).get("message", "")).strip(),
+        }
+        self._runs.insert(0, entry)
+        return entry
+
+    def run_state(self, state: TaskState, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if callable(progress_callback):
+            progress_callback("run_state_entered", detail="Entered agent run_state.")
+            progress_callback("loop_entered", detail="Entered the bounded operator loop.")
+            progress_callback("planning_started", detail="Started planning the next bounded step.")
+            progress_callback("tool_step_attempted", detail="Attempting bounded tool step: desktop_inspect_window_state.", tool_name="desktop_inspect_window_state")
+            progress_callback("tool_result_recorded", detail="Recorded result from bounded tool step: desktop_inspect_window_state.", tool_name="desktop_inspect_window_state", result_status="completed")
+        state.status = "completed"
+        state.add_note("Progress lifecycle smoke completed.")
+        return {"ok": True, "status": "completed", "message": "Progress lifecycle smoke completed.", "steps": state.steps}
+
+
+startup_progress_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(startup_progress_root / "session_state.json"),
+    "run_history_path": str(startup_progress_root / "run_history.json"),
+    "queue_state_path": str(startup_progress_root / "task_queue.json"),
+    "scheduled_task_state_path": str(startup_progress_root / "scheduled_tasks.json"),
+    "watch_state_path": str(startup_progress_root / "watch_state.json"),
+    "alert_state_path": str(startup_progress_root / "alert_history.json"),
+    "desktop_evidence_root": str(startup_progress_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+startup_progress_manager = ExecutionManager(agent=_ProgressLifecycleSmokeAgent(startup_progress_settings))
+try:
+    progress_dispatch = startup_progress_manager.start_goal("progress lifecycle desktop smoke", session_id="session-progress")
+    if not progress_dispatch.get("ok", False) or not progress_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager could not start the progress lifecycle smoke task.")
+    deadline = time.time() + 5.0
+    progress_snapshot = {}
+    while time.time() < deadline:
+        progress_snapshot = startup_progress_manager.get_snapshot(session_id="session-progress")
+        if progress_snapshot.get("status") == "completed" and not progress_snapshot.get("running", False):
+            break
+        time.sleep(0.05)
+    progress_task = progress_snapshot.get("active_task", {}) if isinstance(progress_snapshot.get("active_task", {}), dict) else {}
+    progress_payload = progress_task.get("progress", {}) if isinstance(progress_task.get("progress", {}), dict) else {}
+    if progress_snapshot.get("status") != "completed":
+        raise SystemExit("ExecutionManager progress lifecycle smoke did not complete cleanly.")
+    if not progress_payload.get("worker_started_at", "") or not progress_payload.get("run_state_entered_at", "") or not progress_payload.get("first_loop_at", ""):
+        raise SystemExit(f"ExecutionManager did not expose the expected worker/run-state/loop progress markers: {progress_payload}")
+    if not progress_payload.get("first_step_at", "") or not progress_payload.get("first_result_at", "") or not bool(progress_payload.get("meaningful_progress", False)):
+        raise SystemExit(f"ExecutionManager did not expose the expected first meaningful progress markers: {progress_payload}")
+finally:
+    startup_progress_manager.shutdown()
+    shutil.rmtree(startup_progress_root, ignore_errors=True)
+print("[OK] execution manager progress visibility")
+
+
+class _FinalizeTimeoutSmokeLLM:
+    def __init__(self):
+        self.timeout_seconds = None
+
+    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None, timeout_seconds=None):
+        self.timeout_seconds = timeout_seconds
+        raise TimeoutError("smoke final reply timeout")
+
+
+finalize_timeout_llm = _FinalizeTimeoutSmokeLLM()
+finalize_timeout_state = TaskState("Inspect the current state of the desktop window titled 'Desktop Eval Main'.")
+finalize_timeout_state.status = "completed"
+finalize_timeout_state.desktop_active_window_title = "Desktop Eval Main"
+finalize_timeout_state.desktop_last_screenshot_path = "C:\\capture.png"
+finalize_timeout_state.add_note("Captured a screenshot of the active window 'Desktop Eval Main'.")
+finalize_timeout_state.set_summary("Captured a screenshot of the active window 'Desktop Eval Main'.")
+finalize_progress_events: List[Dict[str, str]] = []
+finalize_timeout_message = _finalize_message(
+    finalize_timeout_llm,
+    finalize_timeout_state,
+    progress_callback=lambda stage, **payload: finalize_progress_events.append(
+        {"stage": str(stage), "detail": str(payload.get("detail", "")).strip()}
+    ),
+)
+if finalize_timeout_llm.timeout_seconds != 30:
+    raise SystemExit(f"Bounded final reply rendering did not pass the expected timeout override: {finalize_timeout_llm.timeout_seconds}")
+if not finalize_progress_events or finalize_progress_events[0].get("stage") != "final_reply_rendering":
+    raise SystemExit(f"Bounded final reply rendering did not emit the expected progress stage: {finalize_progress_events}")
+if not any("using compact fallback" in event.get("detail", "").lower() for event in finalize_progress_events):
+    raise SystemExit(f"Bounded final reply rendering did not expose the fallback detail after timeout: {finalize_progress_events}")
+if "Desktop Eval Main" not in finalize_timeout_message or "screenshot" not in finalize_timeout_message.lower():
+    raise SystemExit(f"Bounded final reply fallback did not preserve grounded desktop details: {finalize_timeout_message}")
+print("[OK] bounded final reply rendering fallback")
+
+startup_timeout_root = Path("data") / "smoke_execution_manager_startup_timeout"
+shutil.rmtree(startup_timeout_root, ignore_errors=True)
+startup_timeout_root.mkdir(parents=True, exist_ok=True)
+
+
+class _StartupTimeoutSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+        self._runs = []
+        self.history_store = SimpleNamespace(
+            get_recent_runs=lambda limit=6, session_id="", state_scope_id="": list(self._runs)[:limit],
+            get_latest_run=lambda session_id="", state_scope_id="": (dict(self._runs[0]) if self._runs else {}),
+        )
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def get_runtime_config(self):
+        return {"active_model": "gpt-5.4", "reasoning_effort": "medium"}
+
+    def record_run_history(self, state: TaskState, *, result: Dict[str, Any] | None, **kwargs):
+        entry = {
+            "run_id": f"run-startup-timeout-{len(self._runs) + 1}",
+            "final_status": str((result or {}).get("status", state.status)).strip(),
+            "result_message": str((result or {}).get("message", "")).strip(),
+        }
+        self._runs.insert(0, entry)
+        return entry
+
+    def run_state(self, state: TaskState, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        goal_text = str(state.goal).lower()
+        if "first startup timeout" in goal_text:
+            if callable(progress_callback):
+                progress_callback("run_state_entered", detail="Entered agent run_state.")
+                progress_callback("loop_entered", detail="Entered the bounded operator loop.")
+                progress_callback("planning_started", detail="Started planning the next bounded step.")
+            time.sleep(1.0)
+            state.status = "completed"
+            state.add_note("Late startup-timeout smoke result should be ignored.")
+            return {"ok": True, "status": "completed", "message": "Late startup-timeout smoke result should be ignored.", "steps": state.steps}
+
+        if callable(progress_callback):
+            progress_callback("run_state_entered", detail="Entered agent run_state.")
+            progress_callback("loop_entered", detail="Entered the bounded operator loop.")
+            progress_callback("planning_started", detail="Started planning the next bounded step.")
+            progress_callback("tool_step_attempted", detail="Attempting bounded tool step: desktop_inspect_window_state.", tool_name="desktop_inspect_window_state")
+            progress_callback("tool_result_recorded", detail="Recorded result from bounded tool step: desktop_inspect_window_state.", tool_name="desktop_inspect_window_state", result_status="completed")
+        state.status = "completed"
+        state.add_note("Follow-up startup-timeout smoke completed.")
+        return {"ok": True, "status": "completed", "message": "Follow-up startup-timeout smoke completed.", "steps": state.steps}
+
+
+startup_timeout_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(startup_timeout_root / "session_state.json"),
+    "run_history_path": str(startup_timeout_root / "run_history.json"),
+    "queue_state_path": str(startup_timeout_root / "task_queue.json"),
+    "scheduled_task_state_path": str(startup_timeout_root / "scheduled_tasks.json"),
+    "watch_state_path": str(startup_timeout_root / "watch_state.json"),
+    "alert_state_path": str(startup_timeout_root / "alert_history.json"),
+    "desktop_evidence_root": str(startup_timeout_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+startup_timeout_manager = ExecutionManager(agent=_StartupTimeoutSmokeAgent(startup_timeout_settings))
+startup_timeout_manager.task_startup_timeout_seconds = 0.6
+startup_timeout_manager.task_post_result_timeout_seconds = 0.6
+try:
+    timeout_dispatch = startup_timeout_manager.start_goal(
+        "Inspect the desktop window titled 'Startup Timeout Window' as the first startup timeout desktop smoke run.",
+        session_id="session-timeout-first",
+    )
+    if not timeout_dispatch.get("ok", False) or not timeout_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager could not start the first startup-timeout smoke task.")
+    followup_dispatch = startup_timeout_manager.start_goal(
+        "Inspect the desktop window titled 'Startup Timeout Window' as the second startup timeout desktop smoke run.",
+        session_id="session-timeout-second",
+    )
+    if not followup_dispatch.get("ok", False) or followup_dispatch.get("started", False):
+        raise SystemExit("ExecutionManager did not queue the follow-up startup-timeout smoke task behind the running task.")
+
+    timeout_snapshot = {}
+    followup_snapshot = {}
+    deadline = time.time() + 8.0
+    while time.time() < deadline:
+        timeout_snapshot = startup_timeout_manager.get_snapshot(session_id="session-timeout-first")
+        followup_snapshot = startup_timeout_manager.get_snapshot(session_id="session-timeout-second")
+        if timeout_snapshot.get("status") == "blocked" and followup_snapshot.get("status") == "completed" and not followup_snapshot.get("running", False):
+            break
+        time.sleep(0.05)
+
+    timeout_task = timeout_snapshot.get("active_task", {}) if isinstance(timeout_snapshot.get("active_task", {}), dict) else {}
+    timeout_progress = timeout_task.get("progress", {}) if isinstance(timeout_task.get("progress", {}), dict) else {}
+    timeout_outcome = timeout_snapshot.get("desktop", {}).get("run_outcome", {}) if isinstance(timeout_snapshot.get("desktop", {}), dict) else {}
+    if timeout_snapshot.get("status") != "blocked":
+        raise SystemExit(f"ExecutionManager did not finalize the stalled follow-up run cleanly as blocked: {timeout_snapshot}")
+    if timeout_outcome.get("reason") not in {"loop_entry_timeout", "first_progress_timeout"}:
+        raise SystemExit(f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: {timeout_outcome}")
+    if not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
+        raise SystemExit(f"ExecutionManager did not preserve the expected startup-timeout progress markers: {timeout_progress}")
+    if followup_snapshot.get("status") != "completed":
+        raise SystemExit(f"ExecutionManager did not start and complete the follow-up task after the blocked startup-timeout run: {followup_snapshot}")
+
+    time.sleep(1.1)
+    timeout_task_after = startup_timeout_manager._find_task_locked(timeout_dispatch.get("task_id", ""))
+    followup_task_after = startup_timeout_manager._find_task_locked(followup_dispatch.get("task_id", ""))
+    if timeout_task_after is None or timeout_task_after.get("status") != "blocked":
+        raise SystemExit("ExecutionManager let a late abandoned worker overwrite the blocked startup-timeout task status.")
+    if followup_task_after is None or followup_task_after.get("status") != "completed":
+        raise SystemExit("ExecutionManager let a late abandoned worker disturb the completed follow-up task status.")
+finally:
+    startup_timeout_manager.shutdown()
+    shutil.rmtree(startup_timeout_root, ignore_errors=True)
+print("[OK] execution manager startup timeout handoff")
 
 stale_active_root = Path("data") / "smoke_execution_manager_stale_active"
 shutil.rmtree(stale_active_root, ignore_errors=True)

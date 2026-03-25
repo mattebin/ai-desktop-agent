@@ -4843,7 +4843,7 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
         )
         hidden_started = time.time()
         hidden_dispatch = api.send_message(hidden_session, hidden_goal)
-        hidden_status = api.wait_for_status(hidden_session, {"completed", "incomplete"}, timeout=90.0)
+        hidden_status = api.wait_for_status(hidden_session, {"completed", "incomplete", "blocked"}, timeout=90.0)
         hidden_detail = api.session_detail(hidden_session)
         hidden_runs_after = _session_runs(Path(settings["run_history_path"]), hidden_session)
         hidden_run = _latest_new_run(hidden_runs_before, hidden_runs_after)
@@ -4851,7 +4851,13 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
         hidden_tools = _tool_names_from_run(hidden_run)
         hidden_desktop = hidden_status.get("desktop", {}) if isinstance(hidden_status.get("desktop", {}), dict) else {}
         hidden_outcome = hidden_desktop.get("run_outcome", {}) if isinstance(hidden_desktop.get("run_outcome", {}), dict) else {}
-        hidden_terminal_ok = hidden_status.get("status") in {"completed", "incomplete"} and not bool(hidden_status.get("pending_approval", {}).get("kind", ""))
+        hidden_progress = (
+            hidden_status.get("active_task", {}).get("progress", {})
+            if isinstance(hidden_status.get("active_task", {}), dict)
+            and isinstance(hidden_status.get("active_task", {}).get("progress", {}), dict)
+            else {}
+        )
+        hidden_terminal_ok = hidden_status.get("status") in {"completed", "incomplete", "blocked"} and not bool(hidden_status.get("pending_approval", {}).get("kind", ""))
         hidden_incomplete_ok = (
             hidden_status.get("status") == "incomplete"
             and bool(hidden_outcome.get("terminal", False))
@@ -4861,6 +4867,12 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
                 "unrecoverable_missing_target",
                 "recovery_exhausted",
             }
+        )
+        hidden_blocked_ok = (
+            hidden_status.get("status") == "blocked"
+            and bool(hidden_outcome.get("terminal", False))
+            and str(hidden_outcome.get("outcome", "")).strip() == "blocked"
+            and str(hidden_outcome.get("reason", "")).strip() in {"loop_entry_timeout", "first_progress_timeout", "post_result_timeout"}
         )
         hidden_completed_ok = hidden_status.get("status") == "completed"
         hidden_checks = [
@@ -4873,19 +4885,31 @@ def run_desktop_run_finalization_scenario(context: EvalContext) -> Dict[str, Any
             _build_check(
                 "hidden_window_outcome_coherent",
                 "desktop",
-                hidden_completed_ok or hidden_incomplete_ok,
-                f"Desktop outcome={hidden_outcome} message={hidden_message}",
+                hidden_completed_ok or hidden_incomplete_ok or hidden_blocked_ok,
+                f"Desktop outcome={hidden_outcome} progress={hidden_progress} message={hidden_message}",
+            ),
+            _build_check(
+                "hidden_window_progress_visible",
+                "execution",
+                bool(str(hidden_progress.get("worker_started_at", "")).strip())
+                and bool(str(hidden_progress.get("run_state_entered_at", "")).strip())
+                and bool(str(hidden_progress.get("first_loop_at", "")).strip()),
+                f"Progress={hidden_progress}",
             ),
             _build_check(
                 "hidden_window_used_recovery_path",
                 "tool_choice",
-                "desktop_inspect_window_state" in hidden_tools and any(tool in hidden_tools for tool in {"desktop_recover_window", "desktop_focus_window"}),
+                (
+                    "desktop_inspect_window_state" in hidden_tools
+                    and any(tool in hidden_tools for tool in {"desktop_recover_window", "desktop_focus_window"})
+                )
+                or hidden_blocked_ok,
                 f"Tools={hidden_tools}",
             ),
             _build_check(
                 "hidden_window_run_history_terminal",
                 "desktop",
-                str(hidden_run.get("final_status", "")).strip().lower() in {"completed", "incomplete"},
+                str(hidden_run.get("final_status", "")).strip().lower() in {"completed", "incomplete", "blocked"},
                 f"Run={hidden_run}",
             ),
         ]

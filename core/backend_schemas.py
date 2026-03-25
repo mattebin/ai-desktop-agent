@@ -94,6 +94,9 @@ BACKEND_REASON_CODES = {
     "unrecoverable_missing_target",
     "unrecoverable_tray_background",
     "unrecoverable_withdrawn",
+    "loop_entry_timeout",
+    "first_progress_timeout",
+    "post_result_timeout",
     "error",
 }
 
