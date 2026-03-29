@@ -62,6 +62,20 @@ def _management_payload() -> Dict[str, Any]:
     }
 
 
+def _desktop_shutdown_allowed(body: Dict[str, Any] | None) -> tuple[bool, str]:
+    management = _management_payload()
+    if not management.get("managed_by_desktop", False):
+        return False, "This local API process is not desktop-managed."
+    payload = body if isinstance(body, dict) else {}
+    requested_token = _trim_text(payload.get("owner_token", ""), limit=160)
+    requested_pid = _coerce_int(payload.get("owner_pid", 0), 0, minimum=0, maximum=2**31 - 1)
+    if not requested_token or requested_pid <= 0:
+        return False, "Desktop shutdown requires the current owner token and owner pid."
+    if requested_token != management.get("owner_token", "") or requested_pid != management.get("owner_pid", 0):
+        return False, "Desktop shutdown ownership did not match the running local API process."
+    return True, ""
+
+
 def _trim_text(value: Any, limit: int = 240) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -243,6 +257,10 @@ def _compact_evidence_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "has_screenshot": bool(preview.get("has_screenshot", False)),
         "has_artifact": bool(preview.get("has_artifact", False)),
         "screenshot_scope": _trim_text(preview.get("screenshot_scope", ""), limit=60),
+        "screenshot_backend": _trim_text(preview.get("screenshot_backend", ""), limit=60),
+        "monitor_count": _coerce_int(preview.get("monitor_count", 0), 0, minimum=0, maximum=16),
+        "primary_monitor_label": _trim_text(preview.get("primary_monitor_label", ""), limit=120),
+        "screen_capture_policy": _trim_text(preview.get("screen_capture_policy", ""), limit=60),
         "ui_evidence_present": bool(preview.get("ui_evidence_present", False)),
         "ui_control_count": _coerce_int(preview.get("ui_control_count", 0), 0, minimum=0, maximum=128),
         "is_partial": bool(preview.get("is_partial", False)),
@@ -872,6 +890,15 @@ class LocalOperatorApiServer:
                         self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)), "session": session_update.get("session", {})})
                     else:
                         self._respond_error(400, result.get("message", "Unable to reject pending action."))
+                    return
+
+                if path == "/shutdown":
+                    allowed, message = _desktop_shutdown_allowed(body)
+                    if not allowed:
+                        self._respond_error(403, message)
+                        return
+                    self._respond_ok({"accepted": True, "management": _management_payload()})
+                    threading.Timer(0.05, server_ref.shutdown).start()
                     return
 
                 self._respond_error(404, f"Unknown endpoint: {path}")

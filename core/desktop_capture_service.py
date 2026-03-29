@@ -11,6 +11,7 @@ from tools.desktop import capture_desktop_evidence_frame, record_captured_deskto
 
 DEFAULT_DESKTOP_AUTO_CAPTURE_INTERVAL_SECONDS = 3.0
 DEFAULT_DESKTOP_AUTO_CAPTURE_MAX_EVENTS = 18
+DEFAULT_DESKTOP_AUTO_CAPTURE_SCOPE = "primary_monitor"
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -54,7 +55,7 @@ class DesktopCaptureService:
             minimum=0.5,
             maximum=60.0,
         )
-        self.scope = str(self.settings.get("desktop_auto_capture_scope", "active_window")).strip().lower() or "active_window"
+        self.scope = str(self.settings.get("desktop_auto_capture_scope", DEFAULT_DESKTOP_AUTO_CAPTURE_SCOPE)).strip().lower() or DEFAULT_DESKTOP_AUTO_CAPTURE_SCOPE
         self.max_events = max(4, min(int(self.settings.get("desktop_auto_capture_max_events", DEFAULT_DESKTOP_AUTO_CAPTURE_MAX_EVENTS) or DEFAULT_DESKTOP_AUTO_CAPTURE_MAX_EVENTS), 64))
         self._lock = threading.RLock()
         self._stop = threading.Event()

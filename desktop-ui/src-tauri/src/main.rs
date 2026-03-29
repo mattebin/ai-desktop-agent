@@ -91,6 +91,11 @@ struct HealthEnvelope {
 }
 
 #[derive(Deserialize, Default)]
+struct BasicEnvelope {
+    ok: bool,
+}
+
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct HealthPayload {
     runtime: Option<RuntimePayload>,
@@ -403,6 +408,40 @@ fn api_health(base_url: &str) -> Option<HealthPayload> {
     Some(parsed.data)
 }
 
+fn request_api_shutdown(base_url: &str, owner_token: &str, owner_pid: u32) -> bool {
+    let Some((host, port)) = parse_local_api_endpoint(base_url) else {
+        return false;
+    };
+    let address = format!("{host}:{port}");
+    let Some(socket_address) = address.parse().ok() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, Duration::from_millis(1200)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
+    let body = serde_json::json!({
+        "owner_token": owner_token,
+        "owner_pid": owner_pid,
+    })
+    .to_string();
+    let request = format!(
+        "POST /shutdown HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.as_bytes().len(),
+        body
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let Some(response_body) = read_http_json_body(&mut stream) else {
+        return false;
+    };
+    serde_json::from_str::<BasicEnvelope>(&response_body)
+        .map(|parsed| parsed.ok)
+        .unwrap_or(false)
+}
+
 fn parse_local_api_endpoint(base_url: &str) -> Option<(String, u16)> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let target = trimmed.strip_prefix("http://")?;
@@ -453,6 +492,37 @@ fn extract_http_json_body(response: &[u8]) -> Option<String> {
     let index = response.windows(separator.len()).position(|window| window == separator)?;
     let body = &response[index + separator.len()..];
     String::from_utf8(body.to_vec()).ok()
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let start = SystemTime::now();
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        if SystemTime::now()
+            .duration_since(start)
+            .unwrap_or_default()
+            >= timeout
+        {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+#[cfg(windows)]
+fn stop_process_tree(pid: u32) -> bool {
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    status.map(|value| value.success()).unwrap_or(false)
 }
 
 fn port_available(host: &str, port: u16) -> bool {
@@ -728,6 +798,18 @@ fn release_managed_process(
         .is_some()
     {
         return Ok(ManagedProcessRelease::AlreadyExited { base_url, child_pid });
+    }
+
+    if request_api_shutdown(&process.base_url, owner_token, owner_pid)
+        && wait_for_child_exit(&mut process.child, Duration::from_secs(4))
+    {
+        return Ok(ManagedProcessRelease::Stopped { base_url, child_pid });
+    }
+
+    #[cfg(windows)]
+    if stop_process_tree(process.child_pid) {
+        let _ = process.child.wait();
+        return Ok(ManagedProcessRelease::Stopped { base_url, child_pid });
     }
 
     process

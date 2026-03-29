@@ -596,23 +596,58 @@ def stop_owned_process(*, pid: int = 0, owned_label: str = "", wait_seconds: flo
     resolved_pid = int(entry.get("pid", 0) or 0)
     process_name = ""
     stopped = False
+    already_stopped = False
     error_text = ""
     try:
         process = psutil.Process(resolved_pid) if psutil is not None else entry.get("process")
         process_name = _trim_text(getattr(process, "name", lambda: "")() if process is not None and callable(getattr(process, "name", None)) else "", limit=120)
         if psutil is not None and process is not None:
-            process.terminate()
+            is_running = False
             try:
-                process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+                is_running = bool(process.is_running())
             except Exception:
-                process.kill()
-                process.wait(timeout=1.0)
+                is_running = False
+            if not is_running:
+                stopped = True
+                already_stopped = True
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+                except Exception:
+                    process.kill()
+                    process.wait(timeout=1.0)
         elif process is not None:
-            process.terminate()
-            process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+            poll = None
+            try:
+                poll = process.poll() if callable(getattr(process, "poll", None)) else None
+            except Exception:
+                poll = None
+            if poll is not None:
+                stopped = True
+                already_stopped = True
+            else:
+                process.terminate()
+                process.wait(timeout=max(0.5, min(5.0, float(wait_seconds or 2.0))))
+        else:
+            stopped = True
+            already_stopped = True
         stopped = True
     except Exception as exc:
         error_text = _trim_text(exc, limit=240)
+        lowered_error = error_text.lower()
+        no_such_process = getattr(psutil, "NoSuchProcess", None) if psutil is not None else None
+        zombie_process = getattr(psutil, "ZombieProcess", None) if psutil is not None else None
+        if (
+            (no_such_process is not None and isinstance(exc, no_such_process))
+            or (zombie_process is not None and isinstance(exc, zombie_process))
+            or "pid not found" in lowered_error
+            or "no such process" in lowered_error
+            or "process no longer exists" in lowered_error
+        ):
+            stopped = True
+            already_stopped = True
+            error_text = ""
     finally:
         if stopped:
             _drop_owned_process(resolved_pid)
@@ -628,7 +663,9 @@ def stop_owned_process(*, pid: int = 0, owned_label: str = "", wait_seconds: flo
             "backend": "subprocess",
             "reason": "process_stopped" if stopped else "error",
             "summary": (
-                f"Stopped owned process '{process_name or resolved_pid}'."
+                f"Owned process '{process_name or resolved_pid}' was already not running."
+                if stopped and already_stopped
+                else f"Stopped owned process '{process_name or resolved_pid}'."
                 if stopped
                 else f"Could not stop owned process '{process_name or resolved_pid}'."
             ),

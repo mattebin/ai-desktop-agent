@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import mimetypes
 import threading
@@ -7,6 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 from uuid import uuid4
+
+try:
+    from ctypes import wintypes
+except Exception:
+    wintypes = None  # type: ignore[assignment]
 
 from core.backend_schemas import (
     normalize_desktop_evidence_ref,
@@ -29,6 +35,43 @@ try:
     import mss
 except Exception:
     mss = None  # type: ignore[assignment]
+
+
+MONITORINFOF_PRIMARY = 0x00000001
+
+if wintypes is not None and getattr(ctypes, "WinDLL", None) is not None:
+    class _RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+
+    class _MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", _RECT),
+            ("rcWork", _RECT),
+            ("dwFlags", wintypes.DWORD),
+            ("szDevice", wintypes.WCHAR * 32),
+        ]
+
+
+    _MONITORENUMPROC = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(_RECT),
+        wintypes.LPARAM,
+    )
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+else:
+    _RECT = None  # type: ignore[assignment]
+    _MONITORINFOEXW = None  # type: ignore[assignment]
+    _MONITORENUMPROC = None  # type: ignore[assignment]
+    _user32 = None
 
 
 DEFAULT_DESKTOP_EVIDENCE_ROOT = "data/desktop_evidence"
@@ -115,6 +158,62 @@ def _sanitize_controls(value: Any, *, limit: int = 12) -> List[Dict[str, Any]]:
             }
         )
     return normalized
+
+
+def _native_display_monitors() -> List[Dict[str, Any]]:
+    if _user32 is None or _MONITORENUMPROC is None or _MONITORINFOEXW is None:
+        return []
+
+    monitors: List[Dict[str, Any]] = []
+
+    @_MONITORENUMPROC
+    def _callback(hmonitor, _hdc, _rect, _lparam):
+        info = _MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
+        if not _user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return True
+        index = len(monitors) + 1
+        left = int(info.rcMonitor.left)
+        top = int(info.rcMonitor.top)
+        width = max(0, int(info.rcMonitor.right - info.rcMonitor.left))
+        height = max(0, int(info.rcMonitor.bottom - info.rcMonitor.top))
+        device_name = _trim_text(str(info.szDevice).rstrip("\x00"), limit=120)
+        monitors.append(
+            {
+                "index": index,
+                "monitor_id": _trim_text(device_name, limit=80) or f"monitor-{index}",
+                "device_name": device_name,
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
+                "is_primary": bool(int(info.dwFlags) & MONITORINFOF_PRIMARY),
+            }
+        )
+        return True
+
+    try:
+        _user32.EnumDisplayMonitors(None, None, _callback, 0)
+    except Exception:
+        return []
+    return monitors
+
+
+def _virtual_rect_from_monitors(monitors: List[Dict[str, Any]]) -> Dict[str, int]:
+    usable = [
+        item
+        for item in monitors
+        if isinstance(item, dict)
+        and int(item.get("width", 0) or 0) > 0
+        and int(item.get("height", 0) or 0) > 0
+    ]
+    if not usable:
+        return {"x": 0, "y": 0, "width": 0, "height": 0}
+    left = min(int(item.get("left", 0) or 0) for item in usable)
+    top = min(int(item.get("top", 0) or 0) for item in usable)
+    right = max(int(item.get("left", 0) or 0) + int(item.get("width", 0) or 0) for item in usable)
+    bottom = max(int(item.get("top", 0) or 0) + int(item.get("height", 0) or 0) for item in usable)
+    return {"x": left, "y": top, "width": max(0, right - left), "height": max(0, bottom - top)}
 
 
 def _sanitize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
@@ -271,8 +370,23 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
     active_title = _trim_text(active_window.get("title", ""), limit=180)
     target_title = _trim_text(target_window.get("title", ""), limit=180)
     screen_virtual = screen.get("virtual_screen", {}) if isinstance(screen.get("virtual_screen", {}), dict) else {}
+    primary_monitor = screen.get("primary_monitor", {}) if isinstance(screen.get("primary_monitor", {}), dict) else {}
     width = _coerce_int(screen_virtual.get("width", 0), 0, minimum=0, maximum=100_000)
     height = _coerce_int(screen_virtual.get("height", 0), 0, minimum=0, maximum=100_000)
+    primary_label = _trim_text(
+        primary_monitor.get("device_name", "")
+        or (
+            f"monitor {int(primary_monitor.get('index', 0) or 0)}"
+            if int(primary_monitor.get("index", 0) or 0) > 0
+            else ""
+        ),
+        limit=120,
+    )
+    capture_policy = (
+        _trim_text(screen.get("metadata", {}).get("capture_policy", ""), limit=60)
+        if isinstance(screen.get("metadata", {}), dict)
+        else ""
+    )
     backend_label = " / ".join(
         value
         for value in [
@@ -309,12 +423,14 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
     )
     if width and height:
         screen_summary = _trim_text(
-            f"{width}x{height} across {int(screen.get('monitor_count', 0) or 0)} monitor(s)",
+            f"{width}x{height} across {int(screen.get('monitor_count', 0) or 0)} monitor(s)"
+            + (f"; primary {primary_label}" if primary_label else ""),
             limit=180,
         )
     else:
         screen_summary = _trim_text(
-            f"{int(screen.get('monitor_count', 0) or 0)} monitor(s) observed",
+            f"{int(screen.get('monitor_count', 0) or 0)} monitor(s) observed"
+            + (f"; primary {primary_label}" if primary_label else ""),
             limit=180,
         )
 
@@ -346,6 +462,9 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
             "window_count": int(normalized.get("window_count", 0) or 0),
             "monitor_count": int(screen.get("monitor_count", 0) or 0),
             "screen_size": {"width": width, "height": height},
+            "primary_monitor": primary_monitor,
+            "primary_monitor_label": primary_label,
+            "screen_capture_policy": capture_policy,
             "window_summary": window_summary,
             "screen_summary": screen_summary,
             "has_screenshot": has_screenshot,
@@ -390,10 +509,14 @@ def compact_evidence_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "has_screenshot": bool(normalized.get("has_screenshot", False)),
         "has_artifact": bool(normalized.get("has_artifact", False)),
         "screenshot_scope": normalized.get("screenshot_scope", ""),
+        "screenshot_backend": normalized.get("screenshot_backend", ""),
         "ui_evidence_present": bool(normalized.get("ui_evidence_present", False)),
         "ui_control_count": int(normalized.get("ui_control_count", 0) or 0),
         "is_partial": bool(normalized.get("is_partial", False)),
         "recency_seconds": int(normalized.get("recency_seconds", 0) or 0),
+        "monitor_count": int(normalized.get("monitor_count", 0) or 0),
+        "primary_monitor_label": normalized.get("primary_monitor_label", ""),
+        "screen_capture_policy": normalized.get("screen_capture_policy", ""),
         "selection_reason": normalized.get("selection_reason", ""),
         "capture_mode": normalized.get("capture_mode", ""),
         "importance": normalized.get("importance", ""),
@@ -1004,31 +1127,43 @@ def select_task_evidence(
 
 
 def collect_display_metadata(virtual_screen: Dict[str, Any]) -> Dict[str, Any]:
-    monitors: List[Dict[str, Any]] = []
-    backend = "native"
-    if mss is not None:
+    monitors: List[Dict[str, Any]] = _native_display_monitors()
+    backend = "windows_native" if monitors else "native"
+    if not monitors and mss is not None:
         try:
             with mss.mss() as capture:
                 backend = "mss"
-                for monitor in list(capture.monitors[1:])[:8]:
+                for index, monitor in enumerate(list(capture.monitors[1:])[:8], start=1):
                     if not isinstance(monitor, dict):
                         continue
                     monitors.append(
                         {
+                            "index": index,
+                            "monitor_id": f"monitor-{index}",
+                            "device_name": "",
                             "left": _coerce_int(monitor.get("left", 0), 0, minimum=-100_000, maximum=100_000),
                             "top": _coerce_int(monitor.get("top", 0), 0, minimum=-100_000, maximum=100_000),
                             "width": _coerce_int(monitor.get("width", 0), 0, minimum=0, maximum=100_000),
                             "height": _coerce_int(monitor.get("height", 0), 0, minimum=0, maximum=100_000),
+                            "is_primary": index == 1,
                         }
                     )
         except Exception:
             monitors = []
             backend = "native"
+    normalized_virtual = (
+        virtual_screen
+        if isinstance(virtual_screen, dict)
+        and int(virtual_screen.get("width", 0) or 0) > 0
+        and int(virtual_screen.get("height", 0) or 0) > 0
+        else _virtual_rect_from_monitors(monitors)
+    )
     return normalize_screen_observation(
-        virtual_screen=virtual_screen,
+        virtual_screen=normalized_virtual,
         monitors=monitors,
         backend=backend,
         reason="inspected",
+        metadata={"capture_policy": "full_primary_first"},
     )
 
 

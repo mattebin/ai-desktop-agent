@@ -42,8 +42,9 @@ from tools.desktop_backends import (
 DESKTOP_DEFAULT_WINDOW_LIMIT = 12
 DESKTOP_DEFAULT_MAX_OBSERVATION_AGE_SECONDS = 45
 DESKTOP_DEFAULT_TYPE_MAX_CHARS = 160
-DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH = 2200
-DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT = 1600
+DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH = 7680
+DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT = 4320
+DESKTOP_DEFAULT_CAPTURE_SCOPE = "primary_monitor"
 DESKTOP_OBSERVATION_LIMIT = 24
 DESKTOP_TOOL_NAMES = {
     "desktop_list_windows",
@@ -505,13 +506,14 @@ def _window_rect(hwnd: int) -> Dict[str, int]:
     }
 
 
-def _window_info(hwnd: int) -> Dict[str, Any]:
+def _window_info(hwnd: int, *, display: Dict[str, Any] | None = None) -> Dict[str, Any]:
     handle = int(hwnd or 0)
     if handle <= 0 or not user32.IsWindow(ctypes.c_void_p(handle)):
         return {}
 
     title = _get_window_text(handle)
     rect = _window_rect(handle)
+    monitor_metadata = _window_monitor_metadata(rect, display=display)
     pid = ctypes.c_uint32(0)
     user32.GetWindowThreadProcessId(ctypes.c_void_p(handle), ctypes.byref(pid))
     active_hwnd = int(user32.GetForegroundWindow() or 0)
@@ -527,6 +529,7 @@ def _window_info(hwnd: int) -> Dict[str, Any]:
         "is_minimized": bool(user32.IsIconic(ctypes.c_void_p(handle))),
         "is_maximized": bool(user32.IsZoomed(ctypes.c_void_p(handle))),
         "is_cloaked": _is_window_cloaked(handle),
+        **monitor_metadata,
     }
 
 
@@ -558,13 +561,14 @@ def _enum_windows_native(
     limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
 ) -> List[Dict[str, Any]]:
     windows: List[Dict[str, Any]] = []
+    display = _display_metadata()
 
     @EnumWindowsProc
     def callback(hwnd, _lparam):
         if len(windows) >= limit:
             return False
         if _window_is_listable(int(hwnd), include_minimized=include_minimized, include_hidden=include_hidden):
-            info = _window_info(int(hwnd))
+            info = _window_info(int(hwnd), display=display)
             if info:
                 windows.append(info)
         return True
@@ -576,7 +580,7 @@ def _enum_windows_native(
 
 def _active_window_info_native() -> Dict[str, Any]:
     hwnd = int(user32.GetForegroundWindow() or 0)
-    return _window_info(hwnd)
+    return _window_info(hwnd, display=_display_metadata())
 
 
 def _get_window_backend():
@@ -613,6 +617,7 @@ def get_desktop_backend_status() -> Dict[str, Any]:
         screenshot_backend=_get_screenshot_backend(),
         ui_evidence_backend=_get_ui_evidence_backend(),
     )
+    status["display"] = _display_metadata()
     try:
         store = get_desktop_evidence_store()
         status["evidence_store"] = {
@@ -945,6 +950,7 @@ def _enum_windows(
     include_hidden: bool = False,
     limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
 ) -> List[Dict[str, Any]]:
+    display = _display_metadata()
     result = _get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
     data = result.get("data", {}) if isinstance(result, dict) else {}
     windows = data.get("windows", []) if isinstance(data, dict) else []
@@ -957,7 +963,7 @@ def _enum_windows(
                 continue
             if not include_hidden and bool(item.get("is_cloaked", False)):
                 continue
-            filtered.append(item)
+            filtered.append(_enrich_window_monitor_metadata(item, display=display))
 
     if include_hidden:
         native_windows = _enum_windows_native(
@@ -976,7 +982,7 @@ def _enum_windows(
                 if dedupe_key in seen_ids:
                     continue
                 seen_ids.add(dedupe_key)
-                merged.append(item)
+                merged.append(_enrich_window_monitor_metadata(item, display=display))
         merged.sort(
             key=lambda item: (
                 not bool(item.get("is_active", False)),
@@ -1004,10 +1010,13 @@ def _find_window_by_exact_title_native(title: str) -> Dict[str, Any]:
 
 
 def _active_window_info() -> Dict[str, Any]:
+    display = _display_metadata()
     result = _get_window_backend().get_active_window()
     data = result.get("data", {}) if isinstance(result, dict) else {}
     active_window = data.get("active_window", {}) if isinstance(data, dict) else {}
-    return active_window if isinstance(active_window, dict) else {}
+    if not isinstance(active_window, dict):
+        return {}
+    return _enrich_window_monitor_metadata(active_window, display=display)
 
 
 def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str, Dict[str, Any]]:
@@ -1085,6 +1094,84 @@ def _virtual_screen_rect() -> Dict[str, int]:
     return {"x": x, "y": y, "width": width, "height": height}
 
 
+def _display_metadata() -> Dict[str, Any]:
+    return collect_display_metadata(_virtual_screen_rect())
+
+
+def _monitor_rect(monitor: Dict[str, Any]) -> Dict[str, int]:
+    return {
+        "x": int(monitor.get("left", 0) or 0),
+        "y": int(monitor.get("top", 0) or 0),
+        "width": max(0, int(monitor.get("width", 0) or 0)),
+        "height": max(0, int(monitor.get("height", 0) or 0)),
+    }
+
+
+def _primary_monitor_info(display: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    metadata = display if isinstance(display, dict) else _display_metadata()
+    primary = metadata.get("primary_monitor", {}) if isinstance(metadata.get("primary_monitor", {}), dict) else {}
+    if primary:
+        return primary
+    monitors = metadata.get("monitors", []) if isinstance(metadata.get("monitors", []), list) else []
+    for item in monitors:
+        if isinstance(item, dict) and item.get("is_primary", False):
+            return item
+    return monitors[0] if monitors and isinstance(monitors[0], dict) else {}
+
+
+def _rect_intersection(a: Dict[str, int], b: Dict[str, int]) -> Dict[str, int]:
+    left = max(int(a.get("x", 0) or 0), int(b.get("x", 0) or 0))
+    top = max(int(a.get("y", 0) or 0), int(b.get("y", 0) or 0))
+    right = min(int(a.get("x", 0) or 0) + int(a.get("width", 0) or 0), int(b.get("x", 0) or 0) + int(b.get("width", 0) or 0))
+    bottom = min(int(a.get("y", 0) or 0) + int(a.get("height", 0) or 0), int(b.get("y", 0) or 0) + int(b.get("height", 0) or 0))
+    return {"x": left, "y": top, "width": max(0, right - left), "height": max(0, bottom - top)}
+
+
+def _rect_area(rect: Dict[str, int]) -> int:
+    return max(0, int(rect.get("width", 0) or 0)) * max(0, int(rect.get("height", 0) or 0))
+
+
+def _window_monitor_metadata(rect: Dict[str, int], *, display: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    metadata = display if isinstance(display, dict) else _display_metadata()
+    monitors = metadata.get("monitors", []) if isinstance(metadata.get("monitors", []), list) else []
+    if not monitors:
+        return {}
+    best: Dict[str, Any] = {}
+    best_area = -1
+    for monitor in monitors:
+        if not isinstance(monitor, dict):
+            continue
+        overlap = _rect_intersection(rect, _monitor_rect(monitor))
+        area = _rect_area(overlap)
+        if area > best_area:
+            best = dict(monitor)
+            best_area = area
+    if not best:
+        return {}
+    return {
+        "monitor_id": str(best.get("monitor_id", "")).strip(),
+        "monitor_index": int(best.get("index", 0) or 0),
+        "monitor_device_name": str(best.get("device_name", "")).strip(),
+        "is_on_primary_monitor": bool(best.get("is_primary", False)),
+    }
+
+
+def _enrich_window_monitor_metadata(window: Dict[str, Any], *, display: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    if not isinstance(window, dict):
+        return {}
+    rect = window.get("rect", {}) if isinstance(window.get("rect", {}), dict) else {}
+    metadata = _window_monitor_metadata(rect, display=display)
+    if not metadata:
+        return dict(window)
+    enriched = dict(window)
+    enriched.update(metadata)
+    return enriched
+
+
+def _window_is_on_primary_monitor(window: Dict[str, Any]) -> bool:
+    return bool(window.get("is_on_primary_monitor", False))
+
+
 def _point_in_rect(x: int, y: int, rect: Dict[str, int]) -> bool:
     return (
         x >= int(rect.get("x", 0))
@@ -1096,6 +1183,7 @@ def _point_in_rect(x: int, y: int, rect: Dict[str, int]) -> bool:
 
 def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[str, Any]], screenshot_path: str = "", screenshot_scope: str = "") -> Dict[str, Any]:
     global _OBSERVATION_COUNTER
+    primary_monitor = _primary_monitor_info()
 
     with _OBSERVATION_LOCK:
         _OBSERVATION_COUNTER += 1
@@ -1107,6 +1195,7 @@ def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[s
             "active_window_title": str(active_window.get("title", "")).strip(),
             "screenshot_path": str(screenshot_path).strip(),
             "screenshot_scope": str(screenshot_scope).strip(),
+            "primary_monitor_id": str(primary_monitor.get("monitor_id", "")).strip(),
         }
         if len(_DESKTOP_OBSERVATIONS) > DESKTOP_OBSERVATION_LIMIT:
             ordered = sorted(_DESKTOP_OBSERVATIONS.items(), key=lambda item: item[1].get("created_at", 0.0))
@@ -1121,6 +1210,7 @@ def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[s
         "windows": windows[:DESKTOP_DEFAULT_WINDOW_LIMIT],
         "screenshot_path": screenshot_path,
         "screenshot_scope": screenshot_scope,
+        "primary_monitor": primary_monitor,
     }
 
 
@@ -1734,9 +1824,81 @@ def _file_sha1(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _primary_monitor_bounds(display: Dict[str, Any] | None = None) -> Tuple[Dict[str, int], Dict[str, Any]]:
+    metadata = display if isinstance(display, dict) else _display_metadata()
+    primary = _primary_monitor_info(metadata)
+    if isinstance(primary, dict) and int(primary.get("width", 0) or 0) > 0 and int(primary.get("height", 0) or 0) > 0:
+        return _monitor_rect(primary), primary
+    return _virtual_screen_rect(), {}
+
+
+def _clip_bounds_to_rect(bounds: Dict[str, int], clip_rect: Dict[str, int]) -> Dict[str, int]:
+    return _rect_intersection(bounds, clip_rect)
+
+
+def _capture_derived_active_window_crop(
+    *,
+    captured_path: str,
+    active_window: Dict[str, Any],
+    primary_bounds: Dict[str, int],
+    active_window_title: str,
+) -> Dict[str, Any]:
+    window_rect = active_window.get("rect", {}) if isinstance(active_window.get("rect", {}), dict) else {}
+    clipped = _clip_bounds_to_rect(
+        {
+            "x": int(window_rect.get("x", 0) or 0),
+            "y": int(window_rect.get("y", 0) or 0),
+            "width": int(window_rect.get("width", 0) or 0),
+            "height": int(window_rect.get("height", 0) or 0),
+        },
+        primary_bounds,
+    )
+    if _rect_area(clipped) <= 0:
+        return {}
+    base_path = Path(str(captured_path).strip())
+    if not str(base_path):
+        return {}
+    derived_path = base_path.with_name(f"{base_path.stem}-active-window{base_path.suffix}")
+    derived = _capture_with_backend(
+        derived_path,
+        x=int(clipped.get("x", 0) or 0),
+        y=int(clipped.get("y", 0) or 0),
+        width=max(1, min(int(clipped.get("width", 0) or 0), DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH)),
+        height=max(1, min(int(clipped.get("height", 0) or 0), DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT)),
+        scope="derived_active_window",
+        active_window_title=active_window_title,
+    )
+    derived_data = derived.get("data", {}) if isinstance(derived.get("data", {}), dict) else {}
+    if not bool(derived.get("ok", False)):
+        return {}
+    return {
+        "path": str(derived_data.get("path", "") or derived_path),
+        "bounds": clipped,
+        "scope": "derived_active_window",
+    }
+
+
+def _primary_monitor_activity_error(action: str, active_window: Dict[str, Any], *, windows: List[Dict[str, Any]], desktop_evidence_ref: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    state = _register_observation(active_window=active_window, windows=windows)
+    window_title = str(active_window.get("title", "") or "the active window").strip()
+    message = (
+        f"Bounded desktop activity currently stays on the Windows primary monitor. "
+        f"'{window_title}' is not on the primary display, so {action.replace('_', ' ')} was skipped."
+    )
+    return _desktop_result(
+        ok=False,
+        action=action,
+        summary=message,
+        desktop_state=state,
+        error=message,
+        desktop_evidence_ref=desktop_evidence_ref or {},
+        target_window=active_window,
+    )
+
+
 def capture_desktop_evidence_frame(
     *,
-    scope: str = "active_window",
+    scope: str = DESKTOP_DEFAULT_CAPTURE_SCOPE,
     source_action: str = "desktop_capture_screenshot",
     limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
     capture_name: str = "",
@@ -1754,11 +1916,13 @@ def capture_desktop_evidence_frame(
     record_on_error: bool = True,
     record_evidence: bool = True,
 ) -> Dict[str, Any]:
-    requested_scope = str(scope or "active_window").strip().lower()
+    requested_scope = str(scope or DESKTOP_DEFAULT_CAPTURE_SCOPE).strip().lower()
     active_window = _active_window_info()
     windows = _enum_windows(
         limit=_coerce_int(limit, DESKTOP_DEFAULT_WINDOW_LIMIT, minimum=1, maximum=20)
     )
+    display = _display_metadata()
+    primary_bounds, primary_monitor = _primary_monitor_bounds(display)
     evidence_id = get_desktop_evidence_store().next_evidence_id()
     args: Dict[str, Any] = {}
     if capture_name:
@@ -1769,6 +1933,11 @@ def capture_desktop_evidence_frame(
         capture_label = "desktop"
         target_window: Dict[str, Any] = {}
         capture_scope = "desktop"
+    elif requested_scope in {"primary", "primary_display", "primary_monitor", "screen", "full_screen"}:
+        bounds = dict(primary_bounds)
+        capture_label = "primary display"
+        target_window = dict(active_window) if _window_is_on_primary_monitor(active_window) else {}
+        capture_scope = "primary_monitor"
     else:
         capture_scope = "active_window"
         if not active_window:
@@ -1832,6 +2001,26 @@ def capture_desktop_evidence_frame(
     error = str(capture_result.get("error", "") or "").strip()
     capture_data = capture_result.get("data", {}) if isinstance(capture_result.get("data", {}), dict) else {}
     captured_path = str(capture_data.get("path", "") or "").strip() or str(path)
+    capture_metadata = dict(capture_data.get("metadata", {})) if isinstance(capture_data.get("metadata", {}), dict) else {}
+    capture_metadata["capture_policy"] = "full_primary_first" if capture_scope == "primary_monitor" else "explicit_scope"
+    if primary_monitor:
+        capture_metadata["primary_monitor_id"] = str(primary_monitor.get("monitor_id", "")).strip()
+        capture_metadata["primary_monitor_device_name"] = str(primary_monitor.get("device_name", "")).strip()
+    if (
+        ok
+        and capture_scope == "primary_monitor"
+        and active_window
+        and _window_is_on_primary_monitor(active_window)
+        and (capture_mode == "manual" or checkpoint_pending)
+    ):
+        derived_crop = _capture_derived_active_window_crop(
+            captured_path=captured_path,
+            active_window=active_window,
+            primary_bounds=primary_bounds,
+            active_window_title=str(active_window.get("title", "") or ""),
+        )
+        if derived_crop:
+            capture_metadata["derived_active_window_crop"] = derived_crop
     capture_signature = _file_sha1(captured_path) if ok else ""
     observation = _register_observation(
         active_window=active_window,
@@ -1853,6 +2042,7 @@ def capture_desktop_evidence_frame(
                 "scope": capture_scope,
                 "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
                 "active_window_title": str(active_window.get("title", "") or ""),
+                "metadata": capture_metadata,
             },
             target_window=target_window,
             include_ui_evidence=include_ui_evidence,
@@ -1869,6 +2059,7 @@ def capture_desktop_evidence_frame(
                 "checkpoint_tool": checkpoint_tool,
                 "checkpoint_target": checkpoint_target,
                 "capture_signature": capture_signature,
+                "primary_monitor_id": str(primary_monitor.get("monitor_id", "")).strip(),
             },
         )
     return {
@@ -1884,6 +2075,7 @@ def capture_desktop_evidence_frame(
             "scope": capture_scope,
             "bounds": {"x": capture_x, "y": capture_y, "width": width, "height": height},
             "active_window_title": str(active_window.get("title", "") or ""),
+            "metadata": capture_metadata,
         },
         "evidence_bundle": evidence_bundle,
         "evidence_ref": evidence_ref,
@@ -1891,6 +2083,7 @@ def capture_desktop_evidence_frame(
         "screenshot_scope": capture_scope,
         "capture_signature": capture_signature,
         "target_window": target_window,
+        "screen": display,
     }
 
 
@@ -2085,7 +2278,7 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
-    scope = str(args.get("scope", "active_window")).strip().lower()
+    scope = str(args.get("scope", DESKTOP_DEFAULT_CAPTURE_SCOPE)).strip().lower() or DESKTOP_DEFAULT_CAPTURE_SCOPE
     capture = capture_desktop_evidence_frame(
         scope=scope,
         source_action="desktop_capture_screenshot",
@@ -2191,6 +2384,16 @@ def _prepare_pointer_action_context(
                 summary=message,
                 desktop_state=state,
                 error=message,
+                desktop_evidence_ref=evidence_ref,
+            ),
+        }
+    if active_window and not _window_is_on_primary_monitor(active_window) and _evidence_ref_has_screenshot(evidence_ref):
+        return {
+            "ok": False,
+            "result": _primary_monitor_activity_error(
+                action,
+                active_window,
+                windows=windows,
                 desktop_evidence_ref=evidence_ref,
             ),
         }
@@ -2836,6 +3039,13 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             typed_text_preview=_trim_text(value, limit=60),
             desktop_evidence_ref=evidence_ref,
         )
+    if active_window and not _window_is_on_primary_monitor(active_window):
+        return _primary_monitor_activity_error(
+            "desktop_type_text",
+            active_window,
+            windows=windows,
+            desktop_evidence_ref=evidence_ref,
+        )
 
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
         f"Typing into '{field_label}' in '{active_window.get('title', 'the active window')}' requires explicit approval in this bounded control pass."
@@ -2948,6 +3158,13 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=state,
             error=message,
             key_sequence_preview=key_preview,
+            desktop_evidence_ref=evidence_ref,
+        )
+    if active_window and not _window_is_on_primary_monitor(active_window):
+        return _primary_monitor_activity_error(
+            "desktop_press_key",
+            active_window,
+            windows=windows,
             desktop_evidence_ref=evidence_ref,
         )
 
@@ -3073,6 +3290,13 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
             key_sequence_preview=key_preview,
             desktop_evidence_ref=evidence_ref,
             target_window=active_window,
+        )
+    if active_window and not _window_is_on_primary_monitor(active_window):
+        return _primary_monitor_activity_error(
+            "desktop_press_key_sequence",
+            active_window,
+            windows=windows,
+            desktop_evidence_ref=evidence_ref,
         )
 
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
@@ -3577,13 +3801,14 @@ DESKTOP_WAIT_FOR_WINDOW_READY_TOOL = {
 DESKTOP_CAPTURE_SCREENSHOT_TOOL = {
     "name": "desktop_capture_screenshot",
     "description": (
-        "Capture a bounded screenshot of the active window or full desktop and return the saved file path plus "
-        "compact desktop state metadata. This is read-only inspection; it does not interpret pixels."
+        "Capture a bounded screenshot of the Windows primary display, the active window, or the full virtual desktop "
+        "and return the saved file path plus compact desktop state metadata. Reliability-first captures prefer the "
+        "primary display and can attach a derived active-window crop."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "scope": {"type": "string", "enum": ["active_window", "desktop"]},
+            "scope": {"type": "string", "enum": ["primary_monitor", "active_window", "desktop"]},
             "name": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20},
         },

@@ -290,6 +290,10 @@ def normalize_window_descriptor(window: Dict[str, Any], *, backend: str, reason:
         "is_minimized": _coerce_bool(window.get("is_minimized", False), False),
         "is_maximized": _coerce_bool(window.get("is_maximized", False), False),
         "is_cloaked": _coerce_bool(window.get("is_cloaked", False), False),
+        "monitor_id": _trim_text(window.get("monitor_id", ""), limit=80),
+        "monitor_index": _coerce_int(window.get("monitor_index", 0), 0, minimum=0, maximum=16),
+        "monitor_device_name": _trim_text(window.get("monitor_device_name", ""), limit=120),
+        "is_on_primary_monitor": _coerce_bool(window.get("is_on_primary_monitor", False), False),
         "backend": _trim_text(backend, limit=60),
         "reason": _normalize_reason(reason, default="inspected"),
     }
@@ -363,17 +367,25 @@ def normalize_screen_observation(
 ) -> Dict[str, Any]:
     rect = virtual_screen if isinstance(virtual_screen, dict) else {}
     normalized_monitors: List[Dict[str, Any]] = []
+    primary_monitor: Dict[str, Any] = {}
     for item in list(monitors or [])[:8]:
         if not isinstance(item, dict):
             continue
-        normalized_monitors.append(
-            {
-                "left": _coerce_int(item.get("left", 0), 0, minimum=-100_000, maximum=100_000),
-                "top": _coerce_int(item.get("top", 0), 0, minimum=-100_000, maximum=100_000),
-                "width": _coerce_int(item.get("width", 0), 0, minimum=0, maximum=100_000),
-                "height": _coerce_int(item.get("height", 0), 0, minimum=0, maximum=100_000),
-            }
-        )
+        normalized_monitor = {
+            "index": _coerce_int(item.get("index", len(normalized_monitors) + 1), len(normalized_monitors) + 1, minimum=1, maximum=16),
+            "monitor_id": _trim_text(item.get("monitor_id", ""), limit=80) or f"monitor-{len(normalized_monitors) + 1}",
+            "device_name": _trim_text(item.get("device_name", ""), limit=120),
+            "left": _coerce_int(item.get("left", 0), 0, minimum=-100_000, maximum=100_000),
+            "top": _coerce_int(item.get("top", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(item.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(item.get("height", 0), 0, minimum=0, maximum=100_000),
+            "is_primary": _coerce_bool(item.get("is_primary", False), False),
+        }
+        normalized_monitors.append(normalized_monitor)
+        if normalized_monitor["is_primary"] and not primary_monitor:
+            primary_monitor = dict(normalized_monitor)
+    if not primary_monitor and normalized_monitors:
+        primary_monitor = dict(normalized_monitors[0])
     return {
         "virtual_screen": {
             "x": _coerce_int(rect.get("x", 0), 0, minimum=-100_000, maximum=100_000),
@@ -383,6 +395,7 @@ def normalize_screen_observation(
         },
         "monitor_count": len(normalized_monitors),
         "monitors": normalized_monitors,
+        "primary_monitor": primary_monitor,
         "backend": _trim_text(backend, limit=60),
         "reason": _normalize_reason(reason, default="inspected"),
         "metadata": _sanitize_metadata(metadata or {}),
@@ -408,6 +421,7 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
     value = value if isinstance(value, dict) else {}
     screen_size = value.get("screen_size", {}) if isinstance(value.get("screen_size", {}), dict) else {}
     active_window_rect = value.get("active_window_rect", {}) if isinstance(value.get("active_window_rect", {}), dict) else {}
+    primary_monitor = value.get("primary_monitor", {}) if isinstance(value.get("primary_monitor", {}), dict) else {}
     return {
         "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
         "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
@@ -434,6 +448,18 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
             "width": _coerce_int(screen_size.get("width", 0), 0, minimum=0, maximum=100_000),
             "height": _coerce_int(screen_size.get("height", 0), 0, minimum=0, maximum=100_000),
         },
+        "primary_monitor": {
+            "index": _coerce_int(primary_monitor.get("index", 0), 0, minimum=0, maximum=16),
+            "monitor_id": _trim_text(primary_monitor.get("monitor_id", ""), limit=80),
+            "device_name": _trim_text(primary_monitor.get("device_name", ""), limit=120),
+            "left": _coerce_int(primary_monitor.get("left", 0), 0, minimum=-100_000, maximum=100_000),
+            "top": _coerce_int(primary_monitor.get("top", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(primary_monitor.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(primary_monitor.get("height", 0), 0, minimum=0, maximum=100_000),
+            "is_primary": _coerce_bool(primary_monitor.get("is_primary", False), False),
+        },
+        "primary_monitor_label": _trim_text(value.get("primary_monitor_label", ""), limit=120),
+        "screen_capture_policy": _trim_text(value.get("screen_capture_policy", ""), limit=60),
         "window_summary": _trim_text(value.get("window_summary", ""), limit=180),
         "screen_summary": _trim_text(value.get("screen_summary", ""), limit=180),
         "has_screenshot": _coerce_bool(value.get("has_screenshot", False), False),

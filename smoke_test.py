@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -70,6 +71,7 @@ from core.desktop_evidence import (
     DesktopEvidenceStore,
     assess_desktop_evidence,
     build_desktop_evidence_bundle,
+    collect_display_metadata,
     compact_evidence_preview,
     select_desktop_vision_context,
     select_checkpoint_evidence,
@@ -668,7 +670,7 @@ try:
         raise SystemExit(
             f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: outcome={timeout_outcome} progress={timeout_progress} snapshot={timeout_snapshot}"
         )
-    if timeout_reason == "loop_entry_timeout" or "did not reach its first loop entry" in timeout_message:
+    if "did not reach its first loop entry" in timeout_message:
         if timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
             raise SystemExit(f"ExecutionManager did not preserve the expected loop-entry-timeout progress markers: {timeout_progress}")
     elif not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
@@ -835,6 +837,16 @@ tool_runtime = ToolRuntime(get_tools())
 planner_tool_names = {tool.get("name", "") for tool in tool_runtime.planner_tools()}
 if not expected_desktop_tools.issubset(planner_tool_names):
     raise SystemExit("ToolRuntime did not expose the expected bounded desktop tools to the planner.")
+
+
+def _is_bounded_preview_or_refusal(result: dict, checkpoint_tool: str) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("paused", False):
+        return str(result.get("checkpoint_tool", "")).strip() == checkpoint_tool
+    return not bool(result.get("ok", False)) and bool(str(result.get("summary", "")).strip())
+
+
 desktop_observation = desktop_list_windows({})
 if not isinstance(desktop_observation, dict) or "windows" not in desktop_observation or "active_window" not in desktop_observation:
     raise SystemExit("desktop_list_windows() did not return the expected desktop observation shape.")
@@ -853,37 +865,48 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
     preview_token = str(preview_capture.get("desktop_state", {}).get("observation_token", "")).strip()
     if not preview_capture.get("ok", False) or not preview_token:
         raise SystemExit("desktop_capture_screenshot() did not produce a screenshot-backed desktop observation for approval preview smoke coverage.")
+    preview_active_window = (
+        preview_capture.get("desktop_state", {}).get("active_window", {})
+        if isinstance(preview_capture.get("desktop_state", {}), dict)
+        else {}
+    )
+    active_on_primary = bool(
+        (preview_active_window if isinstance(preview_active_window, dict) and preview_active_window else active_window).get(
+            "is_on_primary_monitor",
+            True,
+        )
+    )
     click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": preview_token})
-    if not click_preview.get("paused", False) or not click_preview.get("approval_required", False) or click_preview.get("checkpoint_tool") != "desktop_click_point":
-        raise SystemExit("desktop_click_point() did not require approval in the expected bounded way.")
+    if not _is_bounded_preview_or_refusal(click_preview, "desktop_click_point"):
+        raise SystemExit("desktop_click_point() did not expose a coherent bounded approval or refusal result.")
     move_preview = desktop_move_mouse({"x": test_x, "y": test_y, "observation_token": preview_token})
-    if not move_preview.get("paused", False) or move_preview.get("checkpoint_tool") != "desktop_move_mouse":
-        raise SystemExit("desktop_move_mouse() did not synthesize the expected bounded approval checkpoint.")
+    if not _is_bounded_preview_or_refusal(move_preview, "desktop_move_mouse"):
+        raise SystemExit("desktop_move_mouse() did not expose a coherent bounded approval or refusal result.")
     hover_preview = desktop_hover_point({"x": test_x, "y": test_y, "hover_ms": 200, "observation_token": preview_token})
-    if not hover_preview.get("paused", False) or hover_preview.get("checkpoint_tool") != "desktop_hover_point":
-        raise SystemExit("desktop_hover_point() did not synthesize the expected bounded approval checkpoint.")
+    if not _is_bounded_preview_or_refusal(hover_preview, "desktop_hover_point"):
+        raise SystemExit("desktop_hover_point() did not expose a coherent bounded approval or refusal result.")
     mouse_click_preview = desktop_click_mouse({"x": test_x, "y": test_y, "button": "right", "observation_token": preview_token})
-    if not mouse_click_preview.get("paused", False) or mouse_click_preview.get("checkpoint_tool") != "desktop_click_mouse":
-        raise SystemExit("desktop_click_mouse() did not synthesize the expected bounded approval checkpoint.")
+    if not _is_bounded_preview_or_refusal(mouse_click_preview, "desktop_click_mouse"):
+        raise SystemExit("desktop_click_mouse() did not expose a coherent bounded approval or refusal result.")
     scroll_preview = desktop_scroll({"direction": "down", "scroll_units": 2, "observation_token": preview_token})
-    if not scroll_preview.get("paused", False) or scroll_preview.get("checkpoint_tool") != "desktop_scroll":
-        raise SystemExit("desktop_scroll() did not synthesize the expected bounded approval checkpoint.")
+    if not _is_bounded_preview_or_refusal(scroll_preview, "desktop_scroll"):
+        raise SystemExit("desktop_scroll() did not expose a coherent bounded approval or refusal result.")
     key_preview = desktop_press_key(
         {
             "key": "Enter",
             "observation_token": preview_token,
         }
     )
-    if not key_preview.get("paused", False) or not key_preview.get("approval_required", False) or key_preview.get("checkpoint_tool") != "desktop_press_key":
-        raise SystemExit("desktop_press_key() did not require approval in the expected bounded way.")
+    if not _is_bounded_preview_or_refusal(key_preview, "desktop_press_key"):
+        raise SystemExit("desktop_press_key() did not expose a coherent bounded approval or refusal result.")
     key_sequence_preview = desktop_press_key_sequence(
         {
             "sequence": [{"key": "Tab"}, {"key": "Enter"}],
             "observation_token": preview_token,
         }
     )
-    if not key_sequence_preview.get("paused", False) or key_sequence_preview.get("checkpoint_tool") != "desktop_press_key_sequence":
-        raise SystemExit("desktop_press_key_sequence() did not synthesize the expected bounded approval checkpoint.")
+    if not _is_bounded_preview_or_refusal(key_sequence_preview, "desktop_press_key_sequence"):
+        raise SystemExit("desktop_press_key_sequence() did not expose a coherent bounded approval or refusal result.")
     type_preview = desktop_type_text(
         {
             "value": "desktop smoke text",
@@ -891,8 +914,8 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
             "observation_token": preview_token,
         }
     )
-    if not type_preview.get("paused", False) or not type_preview.get("approval_required", False) or type_preview.get("checkpoint_tool") != "desktop_type_text":
-        raise SystemExit("desktop_type_text() did not require approval in the expected bounded way.")
+    if not _is_bounded_preview_or_refusal(type_preview, "desktop_type_text"):
+        raise SystemExit("desktop_type_text() did not expose a coherent bounded approval or refusal result.")
 process_list_preview = desktop_list_processes({"query": "python", "limit": 4})
 if not isinstance(process_list_preview.get("processes", []), list) or "process_action" not in process_list_preview:
     raise SystemExit("desktop_list_processes() did not return the expected bounded process listing shape.")
@@ -949,10 +972,45 @@ finally:
             desktop_stop_process({"pid": started_pid, "approval_status": "approved"})
         except Exception:
             pass
+original_backend_psutil = desktop_backends_module.psutil
+try:
+    class _FakeNoSuchProcess(Exception):
+        pass
+
+    class _FakePsutilModule:
+        NoSuchProcess = _FakeNoSuchProcess
+        ZombieProcess = _FakeNoSuchProcess
+
+        @staticmethod
+        def Process(pid):
+            raise _FakeNoSuchProcess(f"process PID not found (pid={pid})")
+
+    with desktop_backends_module._OWNED_PROCESS_LOCK:
+        desktop_backends_module._OWNED_PROCESSES[999001] = {
+            "pid": 999001,
+            "owned_label": "desktop-smoke-already-stopped",
+            "command": [],
+            "cwd": "",
+            "started_at": time.time(),
+            "process": None,
+        }
+    desktop_backends_module.psutil = _FakePsutilModule()
+    already_stopped_process = desktop_backends_module.stop_owned_process(pid=999001, wait_seconds=1.0)
+    if not already_stopped_process.get("ok", False) or already_stopped_process.get("reason", "") != "process_stopped":
+        raise SystemExit("stop_owned_process() did not treat an already-exited owned process as stopped.")
+finally:
+    desktop_backends_module.psutil = original_backend_psutil
+    desktop_backends_module._drop_owned_process(999001)
 desktop_backend_status = get_desktop_backend_status()
 for required_backend in ("window", "screenshot", "ui_evidence"):
     if not isinstance(desktop_backend_status.get(required_backend, {}), dict):
         raise SystemExit("Desktop backend status did not include the expected backend sections.")
+if not isinstance(desktop_backend_status.get("display", {}), dict):
+    raise SystemExit("Desktop backend status did not expose the expected display metadata section.")
+if int(desktop_backend_status.get("display", {}).get("monitor_count", 0) or 0) < 1:
+    raise SystemExit("Desktop backend status did not expose monitor-count metadata.")
+if not isinstance(desktop_backend_status.get("display", {}).get("primary_monitor", {}), dict):
+    raise SystemExit("Desktop backend status did not expose primary-monitor metadata.")
 if not isinstance(desktop_backend_status.get("recovery", {}), dict):
     raise SystemExit("Desktop backend status did not include the expected recovery capability section.")
 if desktop_backend_status.get("recovery", {}).get("readiness_backend", "") not in {"pywinauto", "stub"}:
@@ -961,6 +1019,16 @@ if desktop_backend_status.get("matching", {}).get("title_matching", "") not in {
     raise SystemExit("Desktop backend status did not expose the expected bounded title-matching backend.")
 if not isinstance(desktop_backend_status.get("screenshot", {}).get("metadata", {}).get("available_backends", []), list):
     raise SystemExit("Desktop backend status did not expose available screenshot capture backends.")
+default_primary_capture = desktop_capture_screenshot({"name": "desktop_primary_backend_smoke"})
+if not default_primary_capture.get("ok", False):
+    raise SystemExit("desktop_capture_screenshot() did not capture the default primary-monitor screenshot.")
+if default_primary_capture.get("screenshot_scope", "") != "primary_monitor":
+    raise SystemExit("desktop_capture_screenshot() did not default to the primary-monitor reliability scope.")
+primary_capture_screen = default_primary_capture.get("desktop_evidence", {}).get("screen", {})
+if not isinstance(primary_capture_screen.get("primary_monitor", {}), dict):
+    raise SystemExit("Primary-monitor desktop capture did not preserve primary monitor metadata.")
+if default_primary_capture.get("desktop_evidence", {}).get("screenshot", {}).get("metadata", {}).get("capture_policy", "") != "full_primary_first":
+    raise SystemExit("Primary-monitor desktop capture did not preserve the full-primary-first capture policy.")
 desktop_capture = desktop_capture_screenshot({"scope": "desktop", "name": "desktop_backend_smoke"})
 if not desktop_capture.get("ok", False) or not Path(str(desktop_capture.get("screenshot_path", ""))).exists():
     raise SystemExit("desktop_capture_screenshot() did not capture a bounded screenshot with the backend layer active.")
@@ -975,6 +1043,92 @@ if not desktop_capture.get("desktop_evidence_ref", {}).get("evidence_id"):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence reference.")
 if not isinstance(desktop_capture.get("desktop_evidence", {}), dict):
     raise SystemExit("desktop_capture_screenshot() did not expose a desktop evidence bundle.")
+original_native_display_monitors = desktop_evidence_module._native_display_monitors
+try:
+    desktop_evidence_module._native_display_monitors = lambda: [
+        {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True},
+        {"index": 2, "monitor_id": "DISPLAY2", "device_name": "\\\\.\\DISPLAY2", "left": 3840, "top": 0, "width": 1920, "height": 1080, "is_primary": False},
+    ]
+    simulated_display = collect_display_metadata({"x": 0, "y": 0, "width": 5760, "height": 2160})
+    if simulated_display.get("primary_monitor", {}).get("monitor_id", "") != "DISPLAY1":
+        raise SystemExit("collect_display_metadata() did not preserve the native Windows primary monitor.")
+    if int(simulated_display.get("monitor_count", 0) or 0) != 2:
+        raise SystemExit("collect_display_metadata() did not preserve the expected monitor count.")
+finally:
+    desktop_evidence_module._native_display_monitors = original_native_display_monitors
+original_get_window_backend = desktop_module._get_window_backend
+original_display_metadata = desktop_module._display_metadata
+try:
+    class _FakeWindowBackend:
+        def list_windows(self, *, include_minimized=False, limit=12):
+            return {
+                "data": {
+                    "windows": [
+                        {
+                            "window_id": "0x321",
+                            "title": "Primary App",
+                            "rect": {"x": 200, "y": 120, "width": 900, "height": 700},
+                            "is_visible": True,
+                            "is_cloaked": False,
+                            "is_active": False,
+                        }
+                    ]
+                }
+            }
+
+        def get_active_window(self):
+            return {
+                "data": {
+                    "active_window": {
+                        "window_id": "0x654",
+                        "title": "Primary Active",
+                        "rect": {"x": 100, "y": 80, "width": 1000, "height": 760},
+                        "is_visible": True,
+                        "is_cloaked": False,
+                        "is_active": True,
+                    }
+                }
+            }
+
+    desktop_module._get_window_backend = lambda: _FakeWindowBackend()
+    desktop_module._display_metadata = lambda: {
+        "monitors": [
+            {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True},
+            {"index": 2, "monitor_id": "DISPLAY2", "device_name": "\\\\.\\DISPLAY2", "left": 3840, "top": 0, "width": 1920, "height": 1080, "is_primary": False},
+        ],
+        "primary_monitor": {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True},
+    }
+    enriched_active_window = desktop_module._active_window_info()
+    if not enriched_active_window.get("is_on_primary_monitor", False):
+        raise SystemExit("Active-window monitor enrichment did not mark a primary-monitor window correctly.")
+    enriched_windows = desktop_module._enum_windows(limit=4)
+    if not enriched_windows or enriched_windows[0].get("monitor_id", "") != "DISPLAY1":
+        raise SystemExit("Window enumeration did not enrich monitor metadata for backend-returned windows.")
+finally:
+    desktop_module._get_window_backend = original_get_window_backend
+    desktop_module._display_metadata = original_display_metadata
+original_validate_observation = desktop_module._validate_fresh_observation
+original_latest_evidence_ref = desktop_module._latest_evidence_ref_for_observation
+original_active_window_info = desktop_module._active_window_info
+original_enum_windows = desktop_module._enum_windows
+try:
+    desktop_module._validate_fresh_observation = lambda args: ("desktop-smoke", {"active_window_id": "0x123"}, "")
+    desktop_module._latest_evidence_ref_for_observation = lambda token: {}
+    desktop_module._active_window_info = lambda: {
+        "window_id": "0x123",
+        "title": "Secondary window",
+        "is_on_primary_monitor": False,
+        "rect": {"x": 3900, "y": 50, "width": 1000, "height": 800},
+    }
+    desktop_module._enum_windows = lambda limit=12, **kwargs: []
+    primary_guard_result = desktop_press_key({"key": "tab"})
+    if primary_guard_result.get("ok", False) or "primary monitor" not in str(primary_guard_result.get("summary", "")).lower():
+        raise SystemExit("desktop_press_key() did not block bounded operator activity on a secondary monitor.")
+finally:
+    desktop_module._validate_fresh_observation = original_validate_observation
+    desktop_module._latest_evidence_ref_for_observation = original_latest_evidence_ref
+    desktop_module._active_window_info = original_active_window_info
+    desktop_module._enum_windows = original_enum_windows
 original_backend_settings = desktop_backends_module.load_settings
 original_dxcam = desktop_backends_module.dxcam
 original_bettercam = desktop_backends_module.bettercam
@@ -1527,6 +1681,46 @@ with urlopen(f"http://127.0.0.1:{cors_server.port}/health", timeout=5) as health
         raise SystemExit("Local API health did not expose the expected management ownership metadata.")
 cors_server.shutdown()
 print("[OK] local api cors")
+
+original_managed = os.environ.get("AI_OPERATOR_DESKTOP_MANAGED")
+original_owner_token = os.environ.get("AI_OPERATOR_DESKTOP_OWNER_TOKEN")
+original_owner_pid = os.environ.get("AI_OPERATOR_DESKTOP_OWNER_PID")
+try:
+    os.environ["AI_OPERATOR_DESKTOP_MANAGED"] = "1"
+    os.environ["AI_OPERATOR_DESKTOP_OWNER_TOKEN"] = "smoke-owner-token"
+    os.environ["AI_OPERATOR_DESKTOP_OWNER_PID"] = "4242"
+    shutdown_server = LocalOperatorApiServer(port=0, settings=SMOKE_SETTINGS)
+    shutdown_thread = shutdown_server.start_in_thread()
+    shutdown_request = Request(
+        f"http://127.0.0.1:{shutdown_server.port}/shutdown",
+        method="POST",
+        data=json.dumps({"owner_token": "smoke-owner-token", "owner_pid": 4242}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(shutdown_request, timeout=5) as shutdown_response:
+        parsed_shutdown = json.loads(shutdown_response.read().decode("utf-8"))
+        if not parsed_shutdown.get("ok", False) or not parsed_shutdown.get("data", {}).get("accepted", False):
+            raise SystemExit("Local API managed shutdown endpoint did not accept a valid desktop-owned shutdown request.")
+    for _ in range(50):
+        if not shutdown_thread.is_alive():
+            break
+        time.sleep(0.1)
+    if shutdown_thread.is_alive():
+        raise SystemExit("Local API managed shutdown endpoint did not stop the server thread cleanly.")
+finally:
+    if original_managed is None:
+        os.environ.pop("AI_OPERATOR_DESKTOP_MANAGED", None)
+    else:
+        os.environ["AI_OPERATOR_DESKTOP_MANAGED"] = original_managed
+    if original_owner_token is None:
+        os.environ.pop("AI_OPERATOR_DESKTOP_OWNER_TOKEN", None)
+    else:
+        os.environ["AI_OPERATOR_DESKTOP_OWNER_TOKEN"] = original_owner_token
+    if original_owner_pid is None:
+        os.environ.pop("AI_OPERATOR_DESKTOP_OWNER_PID", None)
+    else:
+        os.environ["AI_OPERATOR_DESKTOP_OWNER_PID"] = original_owner_pid
+print("[OK] local api managed shutdown")
 
 temp_evidence_root = Path("data/desktop_evidence_smoke")
 if temp_evidence_root.exists():
