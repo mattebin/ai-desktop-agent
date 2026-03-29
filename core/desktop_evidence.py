@@ -38,6 +38,7 @@ except Exception:
 
 
 MONITORINFOF_PRIMARY = 0x00000001
+MDT_EFFECTIVE_DPI = 0
 
 if wintypes is not None and getattr(ctypes, "WinDLL", None) is not None:
     class _RECT(ctypes.Structure):
@@ -67,11 +68,16 @@ if wintypes is not None and getattr(ctypes, "WinDLL", None) is not None:
         wintypes.LPARAM,
     )
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    try:
+        _shcore = ctypes.WinDLL("shcore", use_last_error=True)
+    except Exception:
+        _shcore = None
 else:
     _RECT = None  # type: ignore[assignment]
     _MONITORINFOEXW = None  # type: ignore[assignment]
     _MONITORENUMPROC = None  # type: ignore[assignment]
     _user32 = None
+    _shcore = None
 
 
 DEFAULT_DESKTOP_EVIDENCE_ROOT = "data/desktop_evidence"
@@ -117,6 +123,18 @@ def _coerce_int(value: Any, default: int, *, minimum: int = 0, maximum: int = 10
     return parsed
 
 
+def _coerce_float(value: Any, default: float, *, minimum: float = 0.0, maximum: float = 8.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return round(parsed, 3)
+
+
 def _normalize_capture_mode(value: Any) -> str:
     text = _trim_text(value, limit=40).lower()
     if text in {"auto", "manual", "checkpoint", "recovery"}:
@@ -141,6 +159,33 @@ def _importance_rank(summary: Dict[str, Any]) -> int:
     if importance == "important":
         return 2
     return 1
+
+
+def _monitor_dpi_and_scale(hmonitor: Any) -> Dict[str, Any]:
+    dpi_x = 96
+    dpi_y = 96
+    if _shcore is not None:
+        try:
+            dpi_x_value = ctypes.c_uint(96)
+            dpi_y_value = ctypes.c_uint(96)
+            result = _shcore.GetDpiForMonitor(
+                ctypes.c_void_p(int(hmonitor or 0)),
+                ctypes.c_int(MDT_EFFECTIVE_DPI),
+                ctypes.byref(dpi_x_value),
+                ctypes.byref(dpi_y_value),
+            )
+            if int(result) == 0:
+                dpi_x = max(72, min(960, int(dpi_x_value.value or 96)))
+                dpi_y = max(72, min(960, int(dpi_y_value.value or 96)))
+        except Exception:
+            dpi_x = 96
+            dpi_y = 96
+    return {
+        "dpi_x": dpi_x,
+        "dpi_y": dpi_y,
+        "scale_x": _coerce_float(dpi_x / 96.0, 1.0, minimum=0.75, maximum=8.0),
+        "scale_y": _coerce_float(dpi_y / 96.0, 1.0, minimum=0.75, maximum=8.0),
+    }
 
 
 def _sanitize_controls(value: Any, *, limit: int = 12) -> List[Dict[str, Any]]:
@@ -178,6 +223,7 @@ def _native_display_monitors() -> List[Dict[str, Any]]:
         width = max(0, int(info.rcMonitor.right - info.rcMonitor.left))
         height = max(0, int(info.rcMonitor.bottom - info.rcMonitor.top))
         device_name = _trim_text(str(info.szDevice).rstrip("\x00"), limit=120)
+        dpi_info = _monitor_dpi_and_scale(hmonitor)
         monitors.append(
             {
                 "index": index,
@@ -188,6 +234,10 @@ def _native_display_monitors() -> List[Dict[str, Any]]:
                 "width": width,
                 "height": height,
                 "is_primary": bool(int(info.dwFlags) & MONITORINFOF_PRIMARY),
+                "dpi_x": int(dpi_info.get("dpi_x", 96) or 96),
+                "dpi_y": int(dpi_info.get("dpi_y", 96) or 96),
+                "scale_x": float(dpi_info.get("scale_x", 1.0) or 1.0),
+                "scale_y": float(dpi_info.get("scale_y", 1.0) or 1.0),
             }
         )
         return True
@@ -371,6 +421,8 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
     target_title = _trim_text(target_window.get("title", ""), limit=180)
     screen_virtual = screen.get("virtual_screen", {}) if isinstance(screen.get("virtual_screen", {}), dict) else {}
     primary_monitor = screen.get("primary_monitor", {}) if isinstance(screen.get("primary_monitor", {}), dict) else {}
+    screenshot_bounds = screenshot.get("bounds", {}) if isinstance(screenshot.get("bounds", {}), dict) else {}
+    screenshot_metadata = screenshot.get("metadata", {}) if isinstance(screenshot.get("metadata", {}), dict) else {}
     width = _coerce_int(screen_virtual.get("width", 0), 0, minimum=0, maximum=100_000)
     height = _coerce_int(screen_virtual.get("height", 0), 0, minimum=0, maximum=100_000)
     primary_label = _trim_text(
@@ -465,6 +517,13 @@ def summarize_evidence_bundle(bundle: Dict[str, Any], *, now: datetime | None = 
             "primary_monitor": primary_monitor,
             "primary_monitor_label": primary_label,
             "screen_capture_policy": capture_policy,
+            "capture_bounds": screenshot_bounds,
+            "capture_monitor_id": _trim_text(screenshot_metadata.get("capture_monitor_id", ""), limit=80),
+            "capture_monitor_index": _coerce_int(screenshot_metadata.get("capture_monitor_index", 0), 0, minimum=0, maximum=16),
+            "capture_coordinate_space": _trim_text(
+                screenshot_metadata.get("coordinate_space", screen.get("metadata", {}).get("coordinate_space", "")) if isinstance(screen.get("metadata", {}), dict) else "",
+                limit=40,
+            ),
             "window_summary": window_summary,
             "screen_summary": screen_summary,
             "has_screenshot": has_screenshot,
@@ -1146,6 +1205,10 @@ def collect_display_metadata(virtual_screen: Dict[str, Any]) -> Dict[str, Any]:
                             "width": _coerce_int(monitor.get("width", 0), 0, minimum=0, maximum=100_000),
                             "height": _coerce_int(monitor.get("height", 0), 0, minimum=0, maximum=100_000),
                             "is_primary": index == 1,
+                            "dpi_x": 96,
+                            "dpi_y": 96,
+                            "scale_x": 1.0,
+                            "scale_y": 1.0,
                         }
                     )
         except Exception:
@@ -1163,7 +1226,11 @@ def collect_display_metadata(virtual_screen: Dict[str, Any]) -> Dict[str, Any]:
         monitors=monitors,
         backend=backend,
         reason="inspected",
-        metadata={"capture_policy": "full_primary_first"},
+        metadata={
+            "capture_policy": "full_primary_first",
+            "coordinate_space": "physical_pixels",
+            "mapping_policy": "per_monitor_dpi_safe",
+        },
     )
 
 

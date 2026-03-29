@@ -58,6 +58,34 @@ Current supported preference path:
 
 The capture backend may change; the evidence model should not.
 
+### 2a. Coordinate mapping and DPI normalization
+
+Primary files:
+
+- `core/desktop_mapping.py`
+- `tools/desktop.py`
+- `core/desktop_evidence.py`
+- `core/backend_schemas.py`
+
+Responsibilities:
+
+- define one bounded coordinate-mapping model for:
+  - full-screen capture space
+  - monitor space
+  - window-relative space
+  - final input/action space
+- preserve per-monitor DPI and scale metadata in desktop evidence and window metadata
+- make pointer approvals and resumes use the exact reviewed absolute point instead of re-deriving relative coordinates later
+- expose compact mapping diagnostics through desktop results, state, and local API snapshots
+
+Current guardrails:
+
+- full-primary-screen capture remains the reliability-first source of truth
+- active-window crops are derived artifacts, not the only coordinate reference
+- pointer actions remain bounded to visible desktop points and, when targeted, to the intended active window
+- `capture_relative` coordinates are only trusted when the observation includes usable screenshot bounds
+- the desktop runtime enables per-monitor DPI awareness so capture, window bounds, and `SetCursorPos(...)` share one physical-pixel coordinate space on mixed-resolution setups
+
 ### 3. Readiness and control-state probes
 
 Primary file:

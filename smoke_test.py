@@ -25,6 +25,7 @@ mods = [
     "core.desktop_capture_service",
     "core.desktop_evidence",
     "core.desktop_matching",
+    "core.desktop_mapping",
     "core.desktop_recovery",
     "core.desktop_scene",
     "core.execution_manager",
@@ -80,6 +81,7 @@ from core.desktop_evidence import (
     summarize_evidence_bundle,
 )
 from core.desktop_matching import select_window_candidate, titles_compatible
+from core.desktop_mapping import action_point_from_mapping, build_desktop_coordinate_mapping, capture_space_from_observation, monitor_for_point
 from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
 from core.desktop_scene import interpret_desktop_scene, list_scene_interpreters, register_scene_interpreter
 from core.chat_sessions import ChatSessionManager
@@ -876,6 +878,37 @@ if active_window.get("title") and int(active_rect.get("width", 0) or 0) > 8 and 
             True,
         )
     )
+    if active_on_primary:
+        primary_preview_capture = desktop_capture_screenshot({"scope": "primary_monitor", "name": "desktop_mapping_preview_smoke"})
+        primary_preview_token = str(primary_preview_capture.get("desktop_state", {}).get("observation_token", "")).strip()
+        primary_bounds = (
+            primary_preview_capture.get("desktop_evidence", {}).get("screenshot", {}).get("bounds", {})
+            if isinstance(primary_preview_capture.get("desktop_evidence", {}), dict)
+            else {}
+        )
+        if primary_preview_capture.get("ok", False) and primary_preview_token and isinstance(primary_bounds, dict):
+            capture_relative_x = int(test_x) - int(primary_bounds.get("x", 0) or 0)
+            capture_relative_y = int(test_y) - int(primary_bounds.get("y", 0) or 0)
+            capture_relative_preview = desktop_move_mouse(
+                {
+                    "x": capture_relative_x,
+                    "y": capture_relative_y,
+                    "coordinate_mode": "capture_relative",
+                    "observation_token": primary_preview_token,
+                }
+            )
+            if not _is_bounded_preview_or_refusal(capture_relative_preview, "desktop_move_mouse"):
+                raise SystemExit("desktop_move_mouse() did not expose a coherent capture-relative preview or refusal result.")
+            capture_relative_mapping = (
+                capture_relative_preview.get("mouse_action", {}).get("coordinate_mapping", {})
+                if isinstance(capture_relative_preview.get("mouse_action", {}), dict)
+                else {}
+            )
+            if capture_relative_mapping.get("mode", "") != "capture_relative":
+                raise SystemExit("desktop_move_mouse() did not preserve capture-relative coordinate mapping diagnostics.")
+            mapped_point = capture_relative_mapping.get("input_space", {}) if isinstance(capture_relative_mapping.get("input_space", {}), dict) else {}
+            if int(mapped_point.get("x", 0) or 0) != int(test_x) or int(mapped_point.get("y", 0) or 0) != int(test_y):
+                raise SystemExit("desktop_move_mouse() did not map capture-relative coordinates back to the inspected action point.")
     click_preview = desktop_click_point({"x": test_x, "y": test_y, "observation_token": preview_token})
     if not _is_bounded_preview_or_refusal(click_preview, "desktop_click_point"):
         raise SystemExit("desktop_click_point() did not expose a coherent bounded approval or refusal result.")
@@ -1011,6 +1044,10 @@ if int(desktop_backend_status.get("display", {}).get("monitor_count", 0) or 0) <
     raise SystemExit("Desktop backend status did not expose monitor-count metadata.")
 if not isinstance(desktop_backend_status.get("display", {}).get("primary_monitor", {}), dict):
     raise SystemExit("Desktop backend status did not expose primary-monitor metadata.")
+if desktop_backend_status.get("mapping", {}).get("coordinate_space", "") != "physical_pixels":
+    raise SystemExit("Desktop backend status did not expose the expected coordinate-mapping space.")
+if not isinstance(desktop_backend_status.get("mapping", {}).get("dpi_awareness", {}), dict):
+    raise SystemExit("Desktop backend status did not expose DPI-awareness diagnostics.")
 if not isinstance(desktop_backend_status.get("recovery", {}), dict):
     raise SystemExit("Desktop backend status did not include the expected recovery capability section.")
 if desktop_backend_status.get("recovery", {}).get("readiness_backend", "") not in {"pywinauto", "stub"}:
@@ -1029,6 +1066,8 @@ if not isinstance(primary_capture_screen.get("primary_monitor", {}), dict):
     raise SystemExit("Primary-monitor desktop capture did not preserve primary monitor metadata.")
 if default_primary_capture.get("desktop_evidence", {}).get("screenshot", {}).get("metadata", {}).get("capture_policy", "") != "full_primary_first":
     raise SystemExit("Primary-monitor desktop capture did not preserve the full-primary-first capture policy.")
+if default_primary_capture.get("desktop_evidence", {}).get("screenshot", {}).get("metadata", {}).get("coordinate_space", "") != "physical_pixels":
+    raise SystemExit("Primary-monitor desktop capture did not preserve the physical-pixel coordinate space.")
 desktop_capture = desktop_capture_screenshot({"scope": "desktop", "name": "desktop_backend_smoke"})
 if not desktop_capture.get("ok", False) or not Path(str(desktop_capture.get("screenshot_path", ""))).exists():
     raise SystemExit("desktop_capture_screenshot() did not capture a bounded screenshot with the backend layer active.")
@@ -1054,6 +1093,8 @@ try:
         raise SystemExit("collect_display_metadata() did not preserve the native Windows primary monitor.")
     if int(simulated_display.get("monitor_count", 0) or 0) != 2:
         raise SystemExit("collect_display_metadata() did not preserve the expected monitor count.")
+    if float(simulated_display.get("primary_monitor", {}).get("scale_x", 0.0) or 0.0) < 1.0:
+        raise SystemExit("collect_display_metadata() did not preserve bounded monitor DPI scaling metadata.")
 finally:
     desktop_evidence_module._native_display_monitors = original_native_display_monitors
 original_get_window_backend = desktop_module._get_window_backend
@@ -1093,10 +1134,10 @@ try:
     desktop_module._get_window_backend = lambda: _FakeWindowBackend()
     desktop_module._display_metadata = lambda: {
         "monitors": [
-            {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True},
-            {"index": 2, "monitor_id": "DISPLAY2", "device_name": "\\\\.\\DISPLAY2", "left": 3840, "top": 0, "width": 1920, "height": 1080, "is_primary": False},
+            {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True, "dpi_x": 144, "dpi_y": 144, "scale_x": 1.5, "scale_y": 1.5},
+            {"index": 2, "monitor_id": "DISPLAY2", "device_name": "\\\\.\\DISPLAY2", "left": 3840, "top": 0, "width": 1920, "height": 1080, "is_primary": False, "dpi_x": 96, "dpi_y": 96, "scale_x": 1.0, "scale_y": 1.0},
         ],
-        "primary_monitor": {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True},
+        "primary_monitor": {"index": 1, "monitor_id": "DISPLAY1", "device_name": "\\\\.\\DISPLAY1", "left": 0, "top": 0, "width": 3840, "height": 2160, "is_primary": True, "dpi_x": 144, "dpi_y": 144, "scale_x": 1.5, "scale_y": 1.5},
     }
     enriched_active_window = desktop_module._active_window_info()
     if not enriched_active_window.get("is_on_primary_monitor", False):
@@ -1104,6 +1145,48 @@ try:
     enriched_windows = desktop_module._enum_windows(limit=4)
     if not enriched_windows or enriched_windows[0].get("monitor_id", "") != "DISPLAY1":
         raise SystemExit("Window enumeration did not enrich monitor metadata for backend-returned windows.")
+    if int(enriched_active_window.get("dpi_x", 0) or 0) != 144 or float(enriched_active_window.get("scale_x", 0.0) or 0.0) != 1.5:
+        raise SystemExit("Window monitor enrichment did not preserve DPI/scale metadata.")
+    fake_observation = {
+        "screenshot_scope": "primary_monitor",
+        "screenshot_bounds": {"x": 0, "y": 0, "width": 3840, "height": 2160},
+        "capture_monitor_id": "DISPLAY1",
+        "capture_monitor_index": 1,
+        "primary_monitor_id": "DISPLAY1",
+    }
+    fake_target_window = {
+        "window_id": "0x654",
+        "title": "Primary Active",
+        "rect": {"x": 100, "y": 80, "width": 1000, "height": 760},
+    }
+    capture_space = capture_space_from_observation(fake_observation, display=desktop_module._display_metadata())
+    if capture_space.get("monitor_id", "") != "DISPLAY1" or float(capture_space.get("scale_x", 0.0) or 0.0) != 1.5:
+        raise SystemExit("capture_space_from_observation() did not preserve primary-monitor DPI metadata.")
+    window_mapping = build_desktop_coordinate_mapping(
+        coordinate_mode="window_relative",
+        requested_point={"x": 240, "y": 160},
+        display=desktop_module._display_metadata(),
+        target_window=fake_target_window,
+        observation=fake_observation,
+    )
+    window_point, window_mapping_error = action_point_from_mapping(window_mapping)
+    if window_mapping_error or window_point != {"x": 340, "y": 240}:
+        raise SystemExit("build_desktop_coordinate_mapping() did not map window-relative coordinates correctly.")
+    if window_mapping.get("monitor_space", {}).get("monitor_id", "") != "DISPLAY1":
+        raise SystemExit("build_desktop_coordinate_mapping() did not retain the selected monitor.")
+    capture_mapping = build_desktop_coordinate_mapping(
+        coordinate_mode="capture_relative",
+        requested_point={"x": 340, "y": 240},
+        display=desktop_module._display_metadata(),
+        target_window=fake_target_window,
+        observation=fake_observation,
+    )
+    capture_point, capture_mapping_error = action_point_from_mapping(capture_mapping)
+    if capture_mapping_error or capture_point != {"x": 340, "y": 240}:
+        raise SystemExit("build_desktop_coordinate_mapping() did not map capture-relative coordinates correctly.")
+    secondary_monitor = monitor_for_point(desktop_module._display_metadata(), 4200, 120)
+    if secondary_monitor.get("monitor_id", "") != "DISPLAY2":
+        raise SystemExit("monitor_for_point() did not resolve the expected secondary monitor.")
 finally:
     desktop_module._get_window_backend = original_get_window_backend
     desktop_module._display_metadata = original_display_metadata
@@ -2100,6 +2183,38 @@ desktop_control_mouse_result = {
     "mouse_action": {
         "action": "move",
         "point": {"x": 42, "y": 64},
+        "coordinate_mode": "capture_relative",
+        "coordinate_mapping": {
+            "mode": "capture_relative",
+            "requested_point": {"x": 42, "y": 64},
+            "capture_space": {
+                "scope": "primary_monitor",
+                "bounds": {"x": 0, "y": 0, "width": 3840, "height": 2160},
+                "monitor_id": "DISPLAY1",
+                "monitor_index": 1,
+                "device_name": "\\\\.\\DISPLAY1",
+                "coordinate_unit": "physical_pixel",
+            },
+            "window_space": {
+                "window_id": "0x00124500",
+                "title": "Control Surface Window",
+                "bounds": {"x": 0, "y": 0, "width": 1000, "height": 700},
+            },
+            "monitor_space": {
+                "monitor_id": "DISPLAY1",
+                "monitor_index": 1,
+                "device_name": "\\\\.\\DISPLAY1",
+                "is_primary": True,
+                "bounds": {"x": 0, "y": 0, "width": 3840, "height": 2160},
+                "dpi_x": 144,
+                "dpi_y": 144,
+                "scale_x": 1.5,
+                "scale_y": 1.5,
+            },
+            "input_space": {"x": 42, "y": 64, "coordinate_unit": "physical_pixel"},
+            "reason": "capture_relative_to_observation",
+            "summary": "Mapped capture-relative point (42, 64) to physical input point (42, 64) on \\\\.\\DISPLAY1 at 1.50x scale.",
+        },
         "summary": "Moved the mouse to (42, 64) in 'Control Surface Window'.",
     },
     "point": {"x": 42, "y": 64},
@@ -2123,6 +2238,8 @@ desktop_control_state.update_memory_from_tool("desktop_stop_process", stopped_pr
 desktop_control_snapshot = desktop_control_state.get_control_snapshot()
 if desktop_control_snapshot.get("desktop", {}).get("latest_mouse_action", {}).get("action") != "move":
     raise SystemExit("TaskState did not surface the latest bounded desktop mouse action.")
+if desktop_control_snapshot.get("desktop", {}).get("latest_mouse_action", {}).get("mapping_reason") != "capture_relative_to_observation":
+    raise SystemExit("TaskState did not surface the latest bounded desktop coordinate-mapping reason.")
 if desktop_control_snapshot.get("desktop", {}).get("latest_process_action", {}).get("action") != "stop":
     raise SystemExit("TaskState did not surface the latest bounded desktop process action.")
 if "desktop command smoke" not in desktop_control_snapshot.get("desktop", {}).get("latest_command_result", {}).get("stdout_excerpt", ""):
@@ -2154,6 +2271,8 @@ desktop_control_status = _status_payload(
 )
 if desktop_control_status.get("desktop", {}).get("latest_process_action", {}).get("action") != "stop":
     raise SystemExit("Local API status compaction did not expose the latest bounded desktop process action.")
+if desktop_control_status.get("desktop", {}).get("latest_mouse_action", {}).get("mapping_reason") != "capture_relative_to_observation":
+    raise SystemExit("Local API status compaction did not expose the latest bounded desktop coordinate-mapping reason.")
 if desktop_control_status.get("desktop", {}).get("latest_command_result", {}).get("exit_code") != 0:
     raise SystemExit("Local API status compaction did not expose the bounded desktop command result.")
 desktop_observation_text = desktop_state.get_observation()

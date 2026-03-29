@@ -1118,10 +1118,15 @@ class TaskState:
                 mouse_action = result.get("mouse_action", {}) if isinstance(result.get("mouse_action", {}), dict) else {}
                 if mouse_action and str(mouse_action.get("action", "")).strip():
                     point = result.get("point", {}) if isinstance(result.get("point", {}), dict) else {}
+                    coordinate_mapping = mouse_action.get("coordinate_mapping", {}) if isinstance(mouse_action.get("coordinate_mapping", {}), dict) else {}
+                    monitor_space = coordinate_mapping.get("monitor_space", {}) if isinstance(coordinate_mapping.get("monitor_space", {}), dict) else {}
                     latest_mouse_action = {
                         "action": str(mouse_action.get("action", "")).strip()[:40],
                         "button": str(mouse_action.get("button", "")).strip()[:20],
                         "click_count": int(mouse_action.get("click_count", 0) or 0),
+                        "coordinate_mode": str(mouse_action.get("coordinate_mode", "")).strip()[:40],
+                        "mapping_reason": str(coordinate_mapping.get("reason", "")).strip()[:80],
+                        "monitor": str(monitor_space.get("device_name", "") or monitor_space.get("monitor_id", "")).strip()[:120],
                         "point": (
                             f"({point.get('x', '')}, {point.get('y', '')})"[:80]
                             if point

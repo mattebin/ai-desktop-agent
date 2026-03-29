@@ -327,6 +327,9 @@ def _compact_mouse_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "action": _trim_text(action.get("action", ""), limit=40),
         "button": _trim_text(action.get("button", ""), limit=20),
         "click_count": _coerce_int(action.get("click_count", 0), 0, minimum=0, maximum=4),
+        "coordinate_mode": _trim_text(action.get("coordinate_mode", ""), limit=40),
+        "mapping_reason": _trim_text(action.get("mapping_reason", ""), limit=80),
+        "monitor": _trim_text(action.get("monitor", ""), limit=120),
         "point": _trim_text(action.get("point", ""), limit=80),
         "summary": _trim_text(action.get("summary", ""), limit=220),
     }

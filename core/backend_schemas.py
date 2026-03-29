@@ -91,6 +91,7 @@ BACKEND_REASON_CODES = {
     "image_pair_selected",
     "vision_required",
     "mouse_moved",
+    "clicked",
     "hovered",
     "scrolled",
     "process_inspected",
@@ -148,6 +149,18 @@ def _coerce_int(value: Any, default: int, *, minimum: int = 0, maximum: int = 10
     if parsed > maximum:
         return maximum
     return parsed
+
+
+def _coerce_float(value: Any, default: float, *, minimum: float = 0.0, maximum: float = 8.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return round(parsed, 3)
 
 
 def _normalize_reason(reason: Any, default: str = "ok") -> str:
@@ -294,6 +307,10 @@ def normalize_window_descriptor(window: Dict[str, Any], *, backend: str, reason:
         "monitor_index": _coerce_int(window.get("monitor_index", 0), 0, minimum=0, maximum=16),
         "monitor_device_name": _trim_text(window.get("monitor_device_name", ""), limit=120),
         "is_on_primary_monitor": _coerce_bool(window.get("is_on_primary_monitor", False), False),
+        "dpi_x": _coerce_int(window.get("dpi_x", 96), 96, minimum=72, maximum=960),
+        "dpi_y": _coerce_int(window.get("dpi_y", 96), 96, minimum=72, maximum=960),
+        "scale_x": _coerce_float(window.get("scale_x", 1.0), 1.0, minimum=0.5, maximum=8.0),
+        "scale_y": _coerce_float(window.get("scale_y", 1.0), 1.0, minimum=0.5, maximum=8.0),
         "backend": _trim_text(backend, limit=60),
         "reason": _normalize_reason(reason, default="inspected"),
     }
@@ -380,6 +397,10 @@ def normalize_screen_observation(
             "width": _coerce_int(item.get("width", 0), 0, minimum=0, maximum=100_000),
             "height": _coerce_int(item.get("height", 0), 0, minimum=0, maximum=100_000),
             "is_primary": _coerce_bool(item.get("is_primary", False), False),
+            "dpi_x": _coerce_int(item.get("dpi_x", 96), 96, minimum=72, maximum=960),
+            "dpi_y": _coerce_int(item.get("dpi_y", 96), 96, minimum=72, maximum=960),
+            "scale_x": _coerce_float(item.get("scale_x", 1.0), 1.0, minimum=0.5, maximum=8.0),
+            "scale_y": _coerce_float(item.get("scale_y", 1.0), 1.0, minimum=0.5, maximum=8.0),
         }
         normalized_monitors.append(normalized_monitor)
         if normalized_monitor["is_primary"] and not primary_monitor:
@@ -422,6 +443,7 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
     screen_size = value.get("screen_size", {}) if isinstance(value.get("screen_size", {}), dict) else {}
     active_window_rect = value.get("active_window_rect", {}) if isinstance(value.get("active_window_rect", {}), dict) else {}
     primary_monitor = value.get("primary_monitor", {}) if isinstance(value.get("primary_monitor", {}), dict) else {}
+    capture_bounds = value.get("capture_bounds", {}) if isinstance(value.get("capture_bounds", {}), dict) else {}
     return {
         "evidence_id": _trim_text(value.get("evidence_id", ""), limit=80),
         "timestamp": _trim_text(value.get("timestamp", ""), limit=40),
@@ -457,9 +479,22 @@ def normalize_desktop_evidence_summary(value: Dict[str, Any] | None) -> Dict[str
             "width": _coerce_int(primary_monitor.get("width", 0), 0, minimum=0, maximum=100_000),
             "height": _coerce_int(primary_monitor.get("height", 0), 0, minimum=0, maximum=100_000),
             "is_primary": _coerce_bool(primary_monitor.get("is_primary", False), False),
+            "dpi_x": _coerce_int(primary_monitor.get("dpi_x", 96), 96, minimum=72, maximum=960),
+            "dpi_y": _coerce_int(primary_monitor.get("dpi_y", 96), 96, minimum=72, maximum=960),
+            "scale_x": _coerce_float(primary_monitor.get("scale_x", 1.0), 1.0, minimum=0.5, maximum=8.0),
+            "scale_y": _coerce_float(primary_monitor.get("scale_y", 1.0), 1.0, minimum=0.5, maximum=8.0),
         },
         "primary_monitor_label": _trim_text(value.get("primary_monitor_label", ""), limit=120),
         "screen_capture_policy": _trim_text(value.get("screen_capture_policy", ""), limit=60),
+        "capture_bounds": {
+            "x": _coerce_int(capture_bounds.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(capture_bounds.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(capture_bounds.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(capture_bounds.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "capture_monitor_id": _trim_text(value.get("capture_monitor_id", ""), limit=80),
+        "capture_monitor_index": _coerce_int(value.get("capture_monitor_index", 0), 0, minimum=0, maximum=16),
+        "capture_coordinate_space": _trim_text(value.get("capture_coordinate_space", ""), limit=40),
         "window_summary": _trim_text(value.get("window_summary", ""), limit=180),
         "screen_summary": _trim_text(value.get("screen_summary", ""), limit=180),
         "has_screenshot": _coerce_bool(value.get("has_screenshot", False), False),
@@ -548,6 +583,75 @@ def normalize_desktop_process_context(value: Dict[str, Any] | None) -> Dict[str,
     }
 
 
+def normalize_desktop_coordinate_mapping(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    requested_point = value.get("requested_point", {}) if isinstance(value.get("requested_point", {}), dict) else {}
+    capture_space = value.get("capture_space", {}) if isinstance(value.get("capture_space", {}), dict) else {}
+    capture_bounds = capture_space.get("bounds", {}) if isinstance(capture_space.get("bounds", {}), dict) else {}
+    window_space = value.get("window_space", {}) if isinstance(value.get("window_space", {}), dict) else {}
+    window_bounds = window_space.get("bounds", {}) if isinstance(window_space.get("bounds", {}), dict) else {}
+    monitor_space = value.get("monitor_space", {}) if isinstance(value.get("monitor_space", {}), dict) else {}
+    monitor_bounds = monitor_space.get("bounds", {}) if isinstance(monitor_space.get("bounds", {}), dict) else {}
+    input_space = value.get("input_space", {}) if isinstance(value.get("input_space", {}), dict) else {}
+    mode = _trim_text(value.get("mode", ""), limit=40).lower()
+    if mode not in {"absolute", "window_relative", "capture_relative"}:
+        mode = "absolute"
+    return {
+        "mode": mode,
+        "requested_point": {
+            "x": _coerce_int(requested_point.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(requested_point.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+        },
+        "capture_space": {
+            "scope": _trim_text(capture_space.get("scope", ""), limit=40),
+            "bounds": {
+                "x": _coerce_int(capture_bounds.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+                "y": _coerce_int(capture_bounds.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+                "width": _coerce_int(capture_bounds.get("width", 0), 0, minimum=0, maximum=100_000),
+                "height": _coerce_int(capture_bounds.get("height", 0), 0, minimum=0, maximum=100_000),
+            },
+            "monitor_id": _trim_text(capture_space.get("monitor_id", ""), limit=80),
+            "monitor_index": _coerce_int(capture_space.get("monitor_index", 0), 0, minimum=0, maximum=16),
+            "device_name": _trim_text(capture_space.get("device_name", ""), limit=120),
+            "coordinate_unit": _trim_text(capture_space.get("coordinate_unit", ""), limit=40) or "physical_pixel",
+        },
+        "window_space": {
+            "window_id": _trim_text(window_space.get("window_id", ""), limit=40),
+            "title": _trim_text(window_space.get("title", ""), limit=180),
+            "bounds": {
+                "x": _coerce_int(window_bounds.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+                "y": _coerce_int(window_bounds.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+                "width": _coerce_int(window_bounds.get("width", 0), 0, minimum=0, maximum=100_000),
+                "height": _coerce_int(window_bounds.get("height", 0), 0, minimum=0, maximum=100_000),
+            },
+        },
+        "monitor_space": {
+            "monitor_id": _trim_text(monitor_space.get("monitor_id", ""), limit=80),
+            "monitor_index": _coerce_int(monitor_space.get("monitor_index", 0), 0, minimum=0, maximum=16),
+            "device_name": _trim_text(monitor_space.get("device_name", ""), limit=120),
+            "is_primary": _coerce_bool(monitor_space.get("is_primary", False), False),
+            "bounds": {
+                "x": _coerce_int(monitor_bounds.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+                "y": _coerce_int(monitor_bounds.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+                "width": _coerce_int(monitor_bounds.get("width", 0), 0, minimum=0, maximum=100_000),
+                "height": _coerce_int(monitor_bounds.get("height", 0), 0, minimum=0, maximum=100_000),
+            },
+            "dpi_x": _coerce_int(monitor_space.get("dpi_x", 96), 96, minimum=72, maximum=960),
+            "dpi_y": _coerce_int(monitor_space.get("dpi_y", 96), 96, minimum=72, maximum=960),
+            "scale_x": _coerce_float(monitor_space.get("scale_x", 1.0), 1.0, minimum=0.5, maximum=8.0),
+            "scale_y": _coerce_float(monitor_space.get("scale_y", 1.0), 1.0, minimum=0.5, maximum=8.0),
+        },
+        "input_space": {
+            "x": _coerce_int(input_space.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(input_space.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "coordinate_unit": _trim_text(input_space.get("coordinate_unit", ""), limit=40) or "physical_pixel",
+        },
+        "reason": _trim_text(value.get("reason", ""), limit=80),
+        "fallback_reason": _trim_text(value.get("fallback_reason", ""), limit=80),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+    }
+
+
 def normalize_desktop_pointer_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
     value = value if isinstance(value, dict) else {}
     action = _trim_text(value.get("action", ""), limit=40).lower()
@@ -573,6 +677,7 @@ def normalize_desktop_pointer_action(value: Dict[str, Any] | None) -> Dict[str, 
         "hover_ms": _coerce_int(value.get("hover_ms", 0), 0, minimum=0, maximum=5_000),
         "scroll_direction": scroll_direction,
         "scroll_units": _coerce_int(value.get("scroll_units", 0), 0, minimum=0, maximum=64),
+        "coordinate_mapping": normalize_desktop_coordinate_mapping(value.get("coordinate_mapping", {})),
         "reason": _normalize_reason(value.get("reason", "ok"), default="ok"),
         "summary": _trim_text(value.get("summary", ""), limit=220),
     }

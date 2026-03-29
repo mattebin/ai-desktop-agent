@@ -20,6 +20,7 @@ This project is now a serious local operator framework with:
 - a bounded desktop scene interpretation layer for app/workflow/readiness understanding
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
 - a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
+- a per-monitor-DPI-safe desktop coordinate mapping layer from capture space to action space
 - live eval coverage for core and realistic workflows
 - a tighter live-eval client/harness wait path for desktop-grounding validation
 
@@ -110,9 +111,12 @@ The local runtime can now also record bounded automatic active-window captures i
 
 The desktop stack now also includes bounded recovery/readiness helpers so desktop tasks can diagnose and recover from messy window states without relying on one fragile foreground-only path.
 
+Recent reliability work also added a shared coordinate-mapping layer so screenshot evidence, primary-monitor capture, window-relative targeting, and final input coordinates all use one bounded physical-pixel model. On mixed-monitor Windows setups, the runtime now prefers full-primary-screen capture, carries per-monitor DPI/scale metadata, and maps capture-relative points back into action space explicitly instead of letting each action improvise its own coordinate math.
+
 Recent architecture work also strengthened the plug-in seams around:
 
 - capture backend selection and fallback
+- coordinate mapping and per-monitor DPI normalization
 - bounded title/process/class matching
 - process/background diagnostics
 - readiness and control-state probing

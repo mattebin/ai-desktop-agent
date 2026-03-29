@@ -20,6 +20,12 @@ from core.desktop_evidence import (
     get_desktop_evidence_store,
     summarize_evidence_bundle,
 )
+from core.desktop_mapping import (
+    action_point_from_mapping,
+    build_desktop_coordinate_mapping,
+    monitor_for_rect,
+    rect_contains_point,
+)
 from core.desktop_matching import select_window_candidate
 from core.desktop_recovery import classify_window_recovery_state, select_window_recovery_strategy
 from core.desktop_scene import interpret_desktop_scene
@@ -196,6 +202,12 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_WHEEL = 0x0800
 WHEEL_DELTA = 120
 DWMWA_CLOAKED = 14
+PROCESS_PER_MONITOR_DPI_AWARE = 2
+_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+
+
+_DPI_AWARENESS_LOCK = threading.RLock()
+_DPI_AWARENESS_STATE: Dict[str, Any] = {}
 
 
 user32 = ctypes.windll.user32
@@ -205,6 +217,10 @@ try:
     dwmapi = ctypes.windll.dwmapi
 except Exception:
     dwmapi = None
+try:
+    shcore = ctypes.windll.shcore
+except Exception:
+    shcore = None
 
 
 class RECT(ctypes.Structure):
@@ -367,6 +383,76 @@ gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 gdi32.DeleteObject.restype = ctypes.c_bool
 gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 gdi32.DeleteDC.restype = ctypes.c_bool
+
+
+def _dpi_awareness_pointer(value: int) -> ctypes.c_void_p:
+    bits = ctypes.sizeof(ctypes.c_void_p) * 8
+    return ctypes.c_void_p(((1 << bits) + value) if value < 0 else value)
+
+
+def _ensure_process_dpi_awareness() -> Dict[str, Any]:
+    global _DPI_AWARENESS_STATE
+    with _DPI_AWARENESS_LOCK:
+        if _DPI_AWARENESS_STATE:
+            return dict(_DPI_AWARENESS_STATE)
+        state = {
+            "enabled": False,
+            "method": "unsupported",
+            "reason": "unsupported",
+            "summary": "Per-monitor DPI awareness is unavailable.",
+        }
+        try:
+            set_awareness_context = getattr(user32, "SetProcessDpiAwarenessContext", None)
+        except Exception:
+            set_awareness_context = None
+        if callable(set_awareness_context):
+            try:
+                result = bool(set_awareness_context(_dpi_awareness_pointer(_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)))
+                if result:
+                    state = {
+                        "enabled": True,
+                        "method": "user32.SetProcessDpiAwarenessContext",
+                        "reason": "active",
+                        "summary": "Enabled per-monitor DPI awareness v2 for desktop mapping.",
+                    }
+                    _DPI_AWARENESS_STATE = dict(state)
+                    return dict(_DPI_AWARENESS_STATE)
+            except Exception:
+                pass
+        if shcore is not None:
+            try:
+                result = int(shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE))
+                if result in {0, 0x80070005}:
+                    state = {
+                        "enabled": True,
+                        "method": "shcore.SetProcessDpiAwareness",
+                        "reason": "active",
+                        "summary": "Using process-level per-monitor DPI awareness for desktop mapping.",
+                    }
+                    _DPI_AWARENESS_STATE = dict(state)
+                    return dict(_DPI_AWARENESS_STATE)
+            except Exception:
+                pass
+        try:
+            set_process_dpi_aware = getattr(user32, "SetProcessDPIAware", None)
+        except Exception:
+            set_process_dpi_aware = None
+        if callable(set_process_dpi_aware):
+            try:
+                if bool(set_process_dpi_aware()):
+                    state = {
+                        "enabled": True,
+                        "method": "user32.SetProcessDPIAware",
+                        "reason": "active",
+                        "summary": "Using system DPI awareness for desktop mapping.",
+                    }
+            except Exception:
+                pass
+        _DPI_AWARENESS_STATE = dict(state)
+        return dict(_DPI_AWARENESS_STATE)
+
+
+_ensure_process_dpi_awareness()
 
 
 _DESKTOP_OBSERVATIONS: Dict[str, Dict[str, Any]] = {}
@@ -618,6 +704,11 @@ def get_desktop_backend_status() -> Dict[str, Any]:
         ui_evidence_backend=_get_ui_evidence_backend(),
     )
     status["display"] = _display_metadata()
+    status["mapping"] = {
+        "dpi_awareness": _ensure_process_dpi_awareness(),
+        "coordinate_space": "physical_pixels",
+        "primary_monitor_policy": "full_primary_first",
+    }
     try:
         store = get_desktop_evidence_store()
         status["evidence_store"] = {
@@ -1153,6 +1244,10 @@ def _window_monitor_metadata(rect: Dict[str, int], *, display: Dict[str, Any] | 
         "monitor_index": int(best.get("index", 0) or 0),
         "monitor_device_name": str(best.get("device_name", "")).strip(),
         "is_on_primary_monitor": bool(best.get("is_primary", False)),
+        "dpi_x": int(best.get("dpi_x", 96) or 96),
+        "dpi_y": int(best.get("dpi_y", 96) or 96),
+        "scale_x": float(best.get("scale_x", 1.0) or 1.0),
+        "scale_y": float(best.get("scale_y", 1.0) or 1.0),
     }
 
 
@@ -1181,9 +1276,29 @@ def _point_in_rect(x: int, y: int, rect: Dict[str, int]) -> bool:
     )
 
 
-def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[str, Any]], screenshot_path: str = "", screenshot_scope: str = "") -> Dict[str, Any]:
+def _register_observation(
+    *,
+    active_window: Dict[str, Any],
+    windows: List[Dict[str, Any]],
+    screenshot_path: str = "",
+    screenshot_scope: str = "",
+    screenshot_bounds: Dict[str, Any] | None = None,
+    screen: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     global _OBSERVATION_COUNTER
-    primary_monitor = _primary_monitor_info()
+    display = screen if isinstance(screen, dict) else _display_metadata()
+    primary_monitor = _primary_monitor_info(display)
+    capture_bounds = (
+        {
+            "x": int((screenshot_bounds or {}).get("x", 0) or 0),
+            "y": int((screenshot_bounds or {}).get("y", 0) or 0),
+            "width": max(0, int((screenshot_bounds or {}).get("width", 0) or 0)),
+            "height": max(0, int((screenshot_bounds or {}).get("height", 0) or 0)),
+        }
+        if isinstance(screenshot_bounds, dict)
+        else {}
+    )
+    capture_monitor = monitor_for_rect(display, capture_bounds) if capture_bounds.get("width", 0) > 0 and capture_bounds.get("height", 0) > 0 else {}
 
     with _OBSERVATION_LOCK:
         _OBSERVATION_COUNTER += 1
@@ -1196,6 +1311,10 @@ def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[s
             "screenshot_path": str(screenshot_path).strip(),
             "screenshot_scope": str(screenshot_scope).strip(),
             "primary_monitor_id": str(primary_monitor.get("monitor_id", "")).strip(),
+            "screenshot_bounds": capture_bounds,
+            "capture_monitor_id": str(capture_monitor.get("monitor_id", "")).strip(),
+            "capture_monitor_index": int(capture_monitor.get("index", 0) or 0),
+            "coordinate_space": "physical_pixels",
         }
         if len(_DESKTOP_OBSERVATIONS) > DESKTOP_OBSERVATION_LIMIT:
             ordered = sorted(_DESKTOP_OBSERVATIONS.items(), key=lambda item: item[1].get("created_at", 0.0))
@@ -1210,6 +1329,10 @@ def _register_observation(*, active_window: Dict[str, Any], windows: List[Dict[s
         "windows": windows[:DESKTOP_DEFAULT_WINDOW_LIMIT],
         "screenshot_path": screenshot_path,
         "screenshot_scope": screenshot_scope,
+        "screenshot_bounds": capture_bounds,
+        "capture_monitor_id": str(capture_monitor.get("monitor_id", "")).strip(),
+        "capture_monitor_index": int(capture_monitor.get("index", 0) or 0),
+        "coordinate_space": "physical_pixels",
         "primary_monitor": primary_monitor,
     }
 
@@ -1419,49 +1542,66 @@ def _resolve_pointer_point(
     args: Dict[str, Any],
     *,
     active_window: Dict[str, Any],
+    observation: Dict[str, Any] | None = None,
+    display: Dict[str, Any] | None = None,
     allow_default_center: bool = False,
-) -> Tuple[Dict[str, int], Dict[str, Any], str]:
+) -> Tuple[Dict[str, int], Dict[str, Any], Dict[str, Any], str]:
     coordinate_mode = str(args.get("coordinate_mode", "")).strip().lower()
     if not coordinate_mode:
-        coordinate_mode = "window_relative" if any(key in args for key in ("relative_x", "relative_y")) else "absolute"
+        if any(key in args for key in ("capture_x", "capture_y")):
+            coordinate_mode = "capture_relative"
+        else:
+            coordinate_mode = "window_relative" if any(key in args for key in ("relative_x", "relative_y")) else "absolute"
     target_window, target_error = _resolve_pointer_target_window(args, active_window)
     if target_error and coordinate_mode == "window_relative":
-        return {}, target_window, target_error
+        return {}, target_window, {}, target_error
 
-    point_x_raw = args.get("x", args.get("relative_x", None))
-    point_y_raw = args.get("y", args.get("relative_y", None))
+    if coordinate_mode == "window_relative":
+        point_x_raw = args.get("relative_x", args.get("x", None))
+        point_y_raw = args.get("relative_y", args.get("y", None))
+    elif coordinate_mode == "capture_relative":
+        point_x_raw = args.get("capture_x", args.get("x", None))
+        point_y_raw = args.get("capture_y", args.get("y", None))
+    else:
+        point_x_raw = args.get("x", None)
+        point_y_raw = args.get("y", None)
     if point_x_raw in {None, ""} or point_y_raw in {None, ""}:
         if allow_default_center and target_window.get("window_id"):
             center = _window_center_point(target_window)
-            return center, target_window, ""
-        return {}, target_window, "Provide bounded pointer coordinates before using this desktop pointer tool."
+            mapping = build_desktop_coordinate_mapping(
+                coordinate_mode="absolute",
+                requested_point=center,
+                display=display or _display_metadata(),
+                target_window=target_window,
+                observation=observation,
+            )
+            return center, target_window, mapping, ""
+        return {}, target_window, {}, "Provide bounded pointer coordinates before using this desktop pointer tool."
 
     point_x = _coerce_int(point_x_raw, 0, minimum=-20_000, maximum=20_000)
     point_y = _coerce_int(point_y_raw, 0, minimum=-20_000, maximum=20_000)
-    if coordinate_mode == "window_relative":
-        rect = target_window.get("rect", {}) if isinstance(target_window.get("rect", {}), dict) else {}
-        width = int(rect.get("width", 0) or 0)
-        height = int(rect.get("height", 0) or 0)
-        if width <= 0 or height <= 0:
-            return {}, target_window, "The target window does not expose usable visible bounds for a relative pointer action."
-        absolute_point = {
-            "x": int(rect.get("x", 0) or 0) + point_x,
-            "y": int(rect.get("y", 0) or 0) + point_y,
-        }
-    else:
-        absolute_point = {"x": point_x, "y": point_y}
+    mapping = build_desktop_coordinate_mapping(
+        coordinate_mode=coordinate_mode,
+        requested_point={"x": point_x, "y": point_y},
+        display=display or _display_metadata(),
+        target_window=(target_window if isinstance(target_window, dict) and target_window.get("window_id") else active_window),
+        observation=observation,
+    )
+    absolute_point, mapping_error = action_point_from_mapping(mapping)
+    if mapping_error:
+        return {}, target_window, mapping, mapping_error
 
     screen_rect = _virtual_screen_rect()
-    if not _point_in_rect(int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0)), screen_rect):
-        return {}, target_window, f"The point ({absolute_point.get('x', 0)}, {absolute_point.get('y', 0)}) is outside the visible desktop."
+    if not rect_contains_point(screen_rect, int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0))):
+        return {}, target_window, mapping, f"The point ({absolute_point.get('x', 0)}, {absolute_point.get('y', 0)}) is outside the visible desktop."
     if target_window.get("window_id"):
         target_rect = target_window.get("rect", {}) if isinstance(target_window.get("rect", {}), dict) else {}
-        if not _point_in_rect(int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0)), target_rect):
-            return {}, target_window, (
+        if not rect_contains_point(target_rect, int(absolute_point.get("x", 0)), int(absolute_point.get("y", 0))):
+            return {}, target_window, mapping, (
                 f"The point ({absolute_point.get('x', 0)}, {absolute_point.get('y', 0)}) is outside "
                 f"the target window '{target_window.get('title', 'window')}'."
             )
-    return absolute_point, target_window, target_error
+    return absolute_point, target_window, mapping, target_error
 
 
 def _send_mouse_click(button: str, click_count: int) -> bool:
@@ -2003,9 +2143,19 @@ def capture_desktop_evidence_frame(
     captured_path = str(capture_data.get("path", "") or "").strip() or str(path)
     capture_metadata = dict(capture_data.get("metadata", {})) if isinstance(capture_data.get("metadata", {}), dict) else {}
     capture_metadata["capture_policy"] = "full_primary_first" if capture_scope == "primary_monitor" else "explicit_scope"
+    capture_metadata["coordinate_space"] = "physical_pixels"
     if primary_monitor:
         capture_metadata["primary_monitor_id"] = str(primary_monitor.get("monitor_id", "")).strip()
         capture_metadata["primary_monitor_device_name"] = str(primary_monitor.get("device_name", "")).strip()
+    capture_monitor = monitor_for_rect(display, bounds)
+    if capture_monitor:
+        capture_metadata["capture_monitor_id"] = str(capture_monitor.get("monitor_id", "")).strip()
+        capture_metadata["capture_monitor_index"] = int(capture_monitor.get("index", 0) or 0)
+        capture_metadata["capture_monitor_device_name"] = str(capture_monitor.get("device_name", "")).strip()
+        capture_metadata["capture_dpi_x"] = int(capture_monitor.get("dpi_x", 96) or 96)
+        capture_metadata["capture_dpi_y"] = int(capture_monitor.get("dpi_y", 96) or 96)
+        capture_metadata["capture_scale_x"] = float(capture_monitor.get("scale_x", 1.0) or 1.0)
+        capture_metadata["capture_scale_y"] = float(capture_monitor.get("scale_y", 1.0) or 1.0)
     if (
         ok
         and capture_scope == "primary_monitor"
@@ -2027,6 +2177,8 @@ def capture_desktop_evidence_frame(
         windows=windows,
         screenshot_path=captured_path if ok else "",
         screenshot_scope=capture_scope,
+        screenshot_bounds={"x": capture_x, "y": capture_y, "width": width, "height": height},
+        screen=display,
     )
     evidence_bundle: Dict[str, Any] = {}
     evidence_ref: Dict[str, Any] = {}
@@ -2324,6 +2476,7 @@ def _pause_desktop_action(
     checkpoint_target: str,
     checkpoint_resume_args: Dict[str, Any],
     point: Dict[str, int] | None = None,
+    mouse_action: Dict[str, Any] | None = None,
     desktop_evidence_ref: Dict[str, Any] | None = None,
     key_sequence_preview: str = "",
 ) -> Dict[str, Any]:
@@ -2345,6 +2498,7 @@ def _pause_desktop_action(
         checkpoint_target=checkpoint_target,
         checkpoint_resume_args=resume_args,
         point=point,
+        mouse_action=mouse_action,
         key_sequence_preview=key_sequence_preview,
         desktop_evidence_ref=desktop_evidence_ref,
     )
@@ -2358,6 +2512,7 @@ def _prepare_pointer_action_context(
 ) -> Dict[str, Any]:
     token, observation, observation_error = _validate_fresh_observation(args)
     evidence_ref = _latest_evidence_ref_for_observation(token)
+    display = _display_metadata()
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
     if observation_error:
@@ -2397,9 +2552,11 @@ def _prepare_pointer_action_context(
                 desktop_evidence_ref=evidence_ref,
             ),
         }
-    point, target_window, point_error = _resolve_pointer_point(
+    point, target_window, coordinate_mapping, point_error = _resolve_pointer_point(
         args,
         active_window=active_window,
+        observation=observation,
+        display=display,
         allow_default_center=allow_default_center,
     )
     if point_error:
@@ -2414,6 +2571,22 @@ def _prepare_pointer_action_context(
                 error=point_error,
                 point=point if isinstance(point, dict) else {},
                 target_window=target_window,
+                mouse_action={
+                    "action": (
+                        "scroll"
+                        if action == "desktop_scroll"
+                        else "click"
+                        if action in {"desktop_click_mouse", "desktop_click_point"}
+                        else "hover"
+                        if action == "desktop_hover_point"
+                        else "move"
+                    ),
+                    "point": point if isinstance(point, dict) else {},
+                    "coordinate_mode": str(coordinate_mapping.get("mode", "") or args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                    "coordinate_mapping": coordinate_mapping,
+                    "reason": "error",
+                    "summary": point_error,
+                },
                 desktop_evidence_ref=evidence_ref,
             ),
         }
@@ -2425,8 +2598,31 @@ def _prepare_pointer_action_context(
         "active_window": active_window,
         "windows": windows,
         "point": point,
+        "coordinate_mapping": coordinate_mapping,
         "target_window": target_window if isinstance(target_window, dict) and target_window.get("window_id") else active_window,
     }
+
+
+def _pointer_checkpoint_resume_args(
+    *,
+    point: Dict[str, Any],
+    token: str,
+    active_window: Dict[str, Any],
+    evidence_ref: Dict[str, Any],
+    extra: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    resume_args = {
+        "x": int(point.get("x", 0) or 0),
+        "y": int(point.get("y", 0) or 0),
+        "coordinate_mode": "absolute",
+        "observation_token": token,
+        "expected_window_id": active_window.get("window_id", ""),
+        "expected_window_title": active_window.get("title", ""),
+        "evidence_id": evidence_ref.get("evidence_id", ""),
+    }
+    if isinstance(extra, dict):
+        resume_args.update(extra)
+    return resume_args
 
 
 def desktop_move_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2439,6 +2635,7 @@ def desktop_move_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = context["windows"]
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
+    coordinate_mapping = context["coordinate_mapping"]
     checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: move mouse"
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
         f"Moving the desktop cursor to ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
@@ -2464,16 +2661,22 @@ def desktop_move_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
             windows=windows,
             checkpoint_reason=checkpoint_reason,
             checkpoint_target=checkpoint_target,
-            checkpoint_resume_args={
-                "x": int(point.get("x", 0) or 0),
-                "y": int(point.get("y", 0) or 0),
-                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
-                "observation_token": context["token"],
-                "expected_window_id": active_window.get("window_id", ""),
-                "expected_window_title": active_window.get("title", ""),
-                "evidence_id": evidence_ref.get("evidence_id", ""),
-            },
+            checkpoint_resume_args=_pointer_checkpoint_resume_args(
+                point=point,
+                token=context["token"],
+                active_window=active_window,
+                evidence_ref=evidence_ref,
+            ),
             point=point,
+            mouse_action={
+                "action": "move",
+                "point": point,
+                "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "coordinate_mapping": coordinate_mapping,
+                "reason": "mouse_moved",
+                "summary": f"Prepared a bounded mouse move to ({point.get('x')}, {point.get('y')}).",
+            },
             desktop_evidence_ref=evidence_ref,
         )
 
@@ -2485,6 +2688,7 @@ def desktop_move_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
         "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mapping": coordinate_mapping,
         "reason": "mouse_moved" if moved else "error",
         "summary": (
             f"Moved the mouse to ({point.get('x')}, {point.get('y')}) in '{active_after.get('title', target_window.get('title', 'the active window'))}'."
@@ -2517,6 +2721,7 @@ def desktop_hover_point(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = context["windows"]
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
+    coordinate_mapping = context["coordinate_mapping"]
     hover_ms = _coerce_int(args.get("hover_ms", DESKTOP_DEFAULT_HOVER_MS), DESKTOP_DEFAULT_HOVER_MS, minimum=120, maximum=DESKTOP_MAX_HOVER_MS)
     checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: hover"
     checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
@@ -2543,17 +2748,24 @@ def desktop_hover_point(args: Dict[str, Any]) -> Dict[str, Any]:
             windows=windows,
             checkpoint_reason=checkpoint_reason,
             checkpoint_target=checkpoint_target,
-            checkpoint_resume_args={
-                "x": int(point.get("x", 0) or 0),
-                "y": int(point.get("y", 0) or 0),
-                "hover_ms": hover_ms,
-                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
-                "observation_token": context["token"],
-                "expected_window_id": active_window.get("window_id", ""),
-                "expected_window_title": active_window.get("title", ""),
-                "evidence_id": evidence_ref.get("evidence_id", ""),
-            },
+            checkpoint_resume_args=_pointer_checkpoint_resume_args(
+                point=point,
+                token=context["token"],
+                active_window=active_window,
+                evidence_ref=evidence_ref,
+                extra={"hover_ms": hover_ms},
+            ),
             point=point,
+            mouse_action={
+                "action": "hover",
+                "point": point,
+                "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "coordinate_mapping": coordinate_mapping,
+                "hover_ms": hover_ms,
+                "reason": "hovered",
+                "summary": f"Prepared a bounded hover at ({point.get('x')}, {point.get('y')}).",
+            },
             desktop_evidence_ref=evidence_ref,
         )
 
@@ -2567,6 +2779,7 @@ def desktop_hover_point(args: Dict[str, Any]) -> Dict[str, Any]:
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
         "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mapping": coordinate_mapping,
         "hover_ms": hover_ms,
         "reason": "hovered" if moved else "error",
         "summary": (
@@ -2600,6 +2813,7 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = context["windows"]
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
+    coordinate_mapping = context["coordinate_mapping"]
     button = _normalize_mouse_button(args.get("button", "left"))
     click_count = 2 if _coerce_bool(args.get("double_click", False), False) else _coerce_int(args.get("click_count", 1), 1, minimum=1, maximum=2)
     click_label = f"{button} {'double-click' if click_count == 2 else 'click'}"
@@ -2628,18 +2842,25 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
             windows=windows,
             checkpoint_reason=checkpoint_reason,
             checkpoint_target=checkpoint_target,
-            checkpoint_resume_args={
-                "x": int(point.get("x", 0) or 0),
-                "y": int(point.get("y", 0) or 0),
+            checkpoint_resume_args=_pointer_checkpoint_resume_args(
+                point=point,
+                token=context["token"],
+                active_window=active_window,
+                evidence_ref=evidence_ref,
+                extra={"button": button, "click_count": click_count},
+            ),
+            point=point,
+            mouse_action={
+                "action": "click",
                 "button": button,
                 "click_count": click_count,
+                "point": point,
+                "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
                 "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
-                "observation_token": context["token"],
-                "expected_window_id": active_window.get("window_id", ""),
-                "expected_window_title": active_window.get("title", ""),
-                "evidence_id": evidence_ref.get("evidence_id", ""),
+                "coordinate_mapping": coordinate_mapping,
+                "reason": "clicked",
+                "summary": f"Prepared a bounded {click_label} at ({point.get('x')}, {point.get('y')}).",
             },
-            point=point,
             desktop_evidence_ref=evidence_ref,
         )
 
@@ -2659,6 +2880,7 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
         "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mapping": coordinate_mapping,
         "reason": "clicked" if clicked else "error",
         "summary": (
             f"Performed a {click_label} at ({point.get('x')}, {point.get('y')}) in '{active_after.get('title', target_window.get('title', 'the active window'))}'."
@@ -2709,6 +2931,7 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
     windows = context["windows"]
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
+    coordinate_mapping = context["coordinate_mapping"]
     direction = str(args.get("direction", "down")).strip().lower()
     if direction not in {"up", "down"}:
         state = _register_observation(active_window=active_window, windows=windows)
@@ -2749,18 +2972,25 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
             windows=windows,
             checkpoint_reason=checkpoint_reason,
             checkpoint_target=checkpoint_target,
-            checkpoint_resume_args={
-                "x": int(point.get("x", 0) or 0),
-                "y": int(point.get("y", 0) or 0),
-                "direction": direction,
-                "scroll_units": scroll_units,
-                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
-                "observation_token": context["token"],
-                "expected_window_id": active_window.get("window_id", ""),
-                "expected_window_title": active_window.get("title", ""),
-                "evidence_id": evidence_ref.get("evidence_id", ""),
-            },
+            checkpoint_resume_args=_pointer_checkpoint_resume_args(
+                point=point,
+                token=context["token"],
+                active_window=active_window,
+                evidence_ref=evidence_ref,
+                extra={"direction": direction, "scroll_units": scroll_units},
+            ),
             point=point,
+            mouse_action={
+                "action": "scroll",
+                "point": point,
+                "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
+                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "coordinate_mapping": coordinate_mapping,
+                "scroll_direction": direction,
+                "scroll_units": scroll_units,
+                "reason": "scrolled",
+                "summary": f"Prepared a bounded scroll {direction} by {scroll_units} unit(s).",
+            },
             desktop_evidence_ref=evidence_ref,
         )
 
@@ -2778,6 +3008,7 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
         "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mapping": coordinate_mapping,
         "scroll_direction": direction,
         "scroll_units": scroll_units,
         "reason": "scrolled" if scrolled else "error",
@@ -3821,8 +4052,9 @@ DESKTOP_CAPTURE_SCREENSHOT_TOOL = {
 DESKTOP_MOVE_MOUSE_TOOL = {
     "name": "desktop_move_mouse",
     "description": (
-        "Move the mouse cursor to one bounded absolute point or one bounded point relative to the active target window. "
-        "Requires explicit approval_status=approved, a fresh observation_token, and exact visible coordinates."
+        "Move the mouse cursor to one bounded absolute point, one point relative to the active target window, "
+        "or one point relative to the latest screenshot-backed capture. Requires explicit approval_status=approved, "
+        "a fresh observation_token, and exact visible coordinates."
     ),
     "input_schema": {
         "type": "object",
@@ -3831,7 +4063,9 @@ DESKTOP_MOVE_MOUSE_TOOL = {
             "y": {"type": "integer"},
             "relative_x": {"type": "integer"},
             "relative_y": {"type": "integer"},
-            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "capture_x": {"type": "integer"},
+            "capture_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative", "capture_relative"]},
             "title": {"type": "string"},
             "match": {"type": "string"},
             "window_id": {"type": "string"},
@@ -3859,7 +4093,9 @@ DESKTOP_HOVER_POINT_TOOL = {
             "y": {"type": "integer"},
             "relative_x": {"type": "integer"},
             "relative_y": {"type": "integer"},
-            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "capture_x": {"type": "integer"},
+            "capture_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative", "capture_relative"]},
             "title": {"type": "string"},
             "match": {"type": "string"},
             "window_id": {"type": "string"},
@@ -3888,7 +4124,9 @@ DESKTOP_CLICK_MOUSE_TOOL = {
             "y": {"type": "integer"},
             "relative_x": {"type": "integer"},
             "relative_y": {"type": "integer"},
-            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "capture_x": {"type": "integer"},
+            "capture_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative", "capture_relative"]},
             "title": {"type": "string"},
             "match": {"type": "string"},
             "window_id": {"type": "string"},
@@ -3919,12 +4157,19 @@ DESKTOP_CLICK_POINT_TOOL = {
         "properties": {
             "x": {"type": "integer"},
             "y": {"type": "integer"},
+            "relative_x": {"type": "integer"},
+            "relative_y": {"type": "integer"},
+            "capture_x": {"type": "integer"},
+            "capture_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative", "capture_relative"]},
+            "title": {"type": "string"},
+            "match": {"type": "string"},
+            "window_id": {"type": "string"},
             "observation_token": {"type": "string"},
             "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
             "checkpoint_reason": {"type": "string"},
             "max_observation_age_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
         },
-        "required": ["x", "y"],
         "additionalProperties": False,
     },
     "func": desktop_click_point,
@@ -3947,7 +4192,9 @@ DESKTOP_SCROLL_TOOL = {
             "y": {"type": "integer"},
             "relative_x": {"type": "integer"},
             "relative_y": {"type": "integer"},
-            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative"]},
+            "capture_x": {"type": "integer"},
+            "capture_y": {"type": "integer"},
+            "coordinate_mode": {"type": "string", "enum": ["absolute", "window_relative", "capture_relative"]},
             "title": {"type": "string"},
             "match": {"type": "string"},
             "window_id": {"type": "string"},
