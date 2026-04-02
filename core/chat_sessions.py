@@ -636,12 +636,20 @@ class ChatSessionManager:
         desktop = snapshot.get("desktop", {}) if isinstance(snapshot.get("desktop", {}), dict) else {}
         selected_scene = desktop.get("selected_scene", {}) if isinstance(desktop.get("selected_scene", {}), dict) else {}
         checkpoint_scene = desktop.get("checkpoint_scene", {}) if isinstance(desktop.get("checkpoint_scene", {}), dict) else {}
+        selected_targets = desktop.get("selected_target_proposals", {}) if isinstance(desktop.get("selected_target_proposals", {}), dict) else {}
+        checkpoint_targets = desktop.get("checkpoint_target_proposals", {}) if isinstance(desktop.get("checkpoint_target_proposals", {}), dict) else {}
         selected_scene_summary = _trim_text(selected_scene.get("summary", ""), limit=220)
         checkpoint_scene_summary = _trim_text(checkpoint_scene.get("summary", ""), limit=220)
+        selected_targets_summary = _trim_text(selected_targets.get("summary", ""), limit=220)
+        checkpoint_targets_summary = _trim_text(checkpoint_targets.get("summary", ""), limit=220)
         if selected_scene_summary:
             lines.append(f"Selected desktop scene: {selected_scene_summary}")
         if checkpoint_scene_summary:
             lines.append(f"Checkpoint desktop scene: {checkpoint_scene_summary}")
+        if selected_targets_summary:
+            lines.append(f"Selected desktop target proposals: {selected_targets_summary}")
+        if checkpoint_targets_summary:
+            lines.append(f"Checkpoint desktop target proposals: {checkpoint_targets_summary}")
 
         recent_items = self._recent_conversation_items_locked(session, limit=4, include_transient=False)
         if recent_items:

@@ -178,10 +178,12 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
             "selected_scene": _compact_scene_payload(desktop.get("selected_scene", {})),
             "selected_vision": _compact_vision_payload(desktop.get("selected_vision", {})),
+            "selected_target_proposals": _compact_target_proposal_context(desktop.get("selected_target_proposals", {})),
             "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
             "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
             "checkpoint_scene": _compact_scene_payload(desktop.get("checkpoint_scene", {})),
             "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
+            "checkpoint_target_proposals": _compact_target_proposal_context(desktop.get("checkpoint_target_proposals", {})),
             "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
             "latest_mouse_action": _compact_mouse_action(desktop.get("latest_mouse_action", {})),
             "latest_process_action": _compact_process_action(desktop.get("latest_process_action", {})),
@@ -332,6 +334,64 @@ def _compact_mouse_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
         "monitor": _trim_text(action.get("monitor", ""), limit=120),
         "point": _trim_text(action.get("point", ""), limit=80),
         "summary": _trim_text(action.get("summary", ""), limit=220),
+    }
+
+
+def _compact_target_proposal(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    proposal = value if isinstance(value, dict) else {}
+    actions = [
+        _trim_text(item, limit=80)
+        for item in list(proposal.get("suggested_next_actions", []))[:3]
+        if _trim_text(item, limit=80)
+    ]
+    point = proposal.get("point", {}) if isinstance(proposal.get("point", {}), dict) else {}
+    region = proposal.get("region", {}) if isinstance(proposal.get("region", {}), dict) else {}
+    return {
+        "target_id": _trim_text(proposal.get("target_id", ""), limit=120),
+        "target_kind": _trim_text(proposal.get("target_kind", ""), limit=40),
+        "window_title": _trim_text(proposal.get("window_title", ""), limit=180),
+        "window_process": _trim_text(proposal.get("window_process", ""), limit=120),
+        "source_evidence_id": _trim_text(proposal.get("source_evidence_id", ""), limit=80),
+        "confidence": _trim_text(proposal.get("confidence", ""), limit=20),
+        "confidence_score": _coerce_int(proposal.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "reason": _trim_text(proposal.get("reason", ""), limit=60),
+        "summary": _trim_text(proposal.get("summary", ""), limit=220),
+        "approval_required": bool(proposal.get("approval_required", False)),
+        "suggested_next_actions": actions,
+        "point": {
+            "x": _coerce_int(point.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(point.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+        },
+        "region": {
+            "x": _coerce_int(region.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(region.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(region.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(region.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "coordinate_mode": _trim_text(proposal.get("coordinate_mapping", {}).get("mode", "") if isinstance(proposal.get("coordinate_mapping", {}), dict) else "", limit=40),
+        "mapping_reason": _trim_text(proposal.get("coordinate_mapping", {}).get("reason", "") if isinstance(proposal.get("coordinate_mapping", {}), dict) else "", limit=80),
+    }
+
+
+def _compact_target_proposal_context(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    context = value if isinstance(value, dict) else {}
+    return {
+        "purpose": _trim_text(context.get("purpose", ""), limit=60),
+        "state": _trim_text(context.get("state", ""), limit=40),
+        "reason": _trim_text(context.get("reason", ""), limit=60),
+        "summary": _trim_text(context.get("summary", ""), limit=220),
+        "confidence": _trim_text(context.get("confidence", ""), limit=20),
+        "confidence_score": _coerce_int(context.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "proposal_count": _coerce_int(context.get("proposal_count", 0), 0, minimum=0, maximum=4),
+        "scene_class": _trim_text(context.get("scene_class", ""), limit=40),
+        "workflow_state": _trim_text(context.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(context.get("readiness_state", ""), limit=40),
+        "target_window_title": _trim_text(context.get("target_window_title", ""), limit=180),
+        "pending_tool": _trim_text(context.get("pending_tool", ""), limit=80),
+        "checkpoint_pending": bool(context.get("checkpoint_pending", False)),
+        "target_match_score": _coerce_int(context.get("target_match_score", 0), 0, minimum=0, maximum=100),
+        "proposer_names": [_trim_text(item, limit=60) for item in list(context.get("proposer_names", []))[:6] if _trim_text(item, limit=60)],
+        "proposals": [_compact_target_proposal(item) for item in list(context.get("proposals", []))[:3] if isinstance(item, dict)],
     }
 
 

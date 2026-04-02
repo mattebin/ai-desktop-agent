@@ -63,6 +63,7 @@ This project is now a serious local operator framework with:
 - bounded automatic active-window capture into the same desktop evidence layer
 - a bounded desktop scene interpretation layer for app/workflow/readiness understanding
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
+- workflow-aware target proposals that bridge evidence and scene state into bounded next-step candidates
 - a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
 - a per-monitor-DPI-safe desktop coordinate mapping layer from capture space to action space
 - live eval coverage for core and realistic workflows
@@ -189,6 +190,7 @@ This layer plugs into:
 
 - bounded vision selection
 - desktop recovery/readiness reasoning
+- workflow-aware target proposal
 - approval grounding
 - desktop-state answers
 - final desktop context packaging

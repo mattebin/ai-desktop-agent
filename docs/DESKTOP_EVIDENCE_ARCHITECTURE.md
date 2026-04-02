@@ -152,6 +152,50 @@ Responsibilities:
 
 This layer is plugin-friendly by design. Future app/workflow interpreters should register into the scene registry instead of patching loop logic directly.
 
+### 6a. Workflow-aware target proposal
+
+Primary files:
+
+- `core/desktop_targets.py`
+- `core/state.py`
+- `core/local_api.py`
+- `core/local_api_events.py`
+
+Responsibilities:
+
+- bridge evidence + interpreted scene + recovery/readiness into a bounded ranked set of candidate next targets
+- keep target proposals serialization-friendly and compact enough for state, API, UI, and model-facing context
+- surface explicit proposal states such as:
+  - `ready`
+  - `recovery_first`
+  - `blocked`
+  - `approval_context`
+  - `no_safe_target`
+- rank conservative target kinds such as:
+  - `focus_candidate`
+  - `recovery_candidate`
+  - bounded window/region/point/UI-area candidates
+- preserve coordinate mapping only where it is actually justified by current evidence
+
+Current guardrails:
+
+- weak or unstable evidence should degrade to low-confidence proposals or no safe target
+- target proposals do not bypass approval; they only nominate the next bounded action surface
+- target proposals are advisory and inspectable, not autonomous loops
+- app-specific proposal behavior should register into the proposal registry instead of patching loop logic directly
+
+Connection to the rest of the stack:
+
+- evidence -> scene/recovery/readiness -> target proposal -> approval/action selection
+- selected/checkpoint target proposals are surfaced through task state and local API snapshots
+- the model consumes compact proposal summaries as part of the same authoritative desktop state it already uses for evidence and scene reasoning
+
+Non-goals:
+
+- no OCR-heavy UI targeting
+- no unrestricted cursor autonomy
+- no replacing the evidence or scene layers with a separate planner framework
+
 ### 7. Desktop run lifecycle and terminal outcomes
 
 Primary files:

@@ -90,6 +90,12 @@ BACKEND_REASON_CODES = {
     "image_selected",
     "image_pair_selected",
     "vision_required",
+    "target_proposed",
+    "proposal_ready",
+    "proposal_recovery_first",
+    "proposal_blocked",
+    "proposal_no_safe_target",
+    "proposal_approval_context",
     "mouse_moved",
     "clicked",
     "hovered",
@@ -759,6 +765,88 @@ def normalize_desktop_vision_context(value: Dict[str, Any] | None) -> Dict[str, 
         "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
         "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
         "images": images,
+    }
+
+
+def normalize_desktop_target_proposal(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    target_kind = _trim_text(value.get("target_kind", ""), limit=40).lower()
+    if target_kind not in {"window", "region", "point", "ui_area", "focus_candidate", "recovery_candidate"}:
+        target_kind = "window"
+    confidence = _trim_text(value.get("confidence", ""), limit=20).lower() or "low"
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    point = value.get("point", {}) if isinstance(value.get("point", {}), dict) else {}
+    region = value.get("region", {}) if isinstance(value.get("region", {}), dict) else {}
+    actions = [
+        _trim_text(item, limit=80)
+        for item in list(value.get("suggested_next_actions", []) or [])[:4]
+        if _trim_text(item, limit=80)
+    ]
+    return {
+        "target_id": _trim_text(value.get("target_id", ""), limit=120),
+        "target_kind": target_kind,
+        "source_evidence_id": _trim_text(value.get("source_evidence_id", ""), limit=80),
+        "source_evidence_summary": _trim_text(value.get("source_evidence_summary", ""), limit=220),
+        "source_selection_reason": _normalize_reason(value.get("source_selection_reason", "selected"), default="selected"),
+        "window_title": _trim_text(value.get("window_title", ""), limit=180),
+        "window_process": _trim_text(value.get("window_process", ""), limit=120),
+        "point": {
+            "x": _coerce_int(point.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(point.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+        },
+        "region": {
+            "x": _coerce_int(region.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+            "y": _coerce_int(region.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+            "width": _coerce_int(region.get("width", 0), 0, minimum=0, maximum=100_000),
+            "height": _coerce_int(region.get("height", 0), 0, minimum=0, maximum=100_000),
+        },
+        "coordinate_mapping": normalize_desktop_coordinate_mapping(value.get("coordinate_mapping", {})),
+        "confidence": confidence,
+        "confidence_score": _coerce_int(value.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "reason": _normalize_reason(value.get("reason", "target_proposed"), default="target_proposed"),
+        "summary": _trim_text(value.get("summary", ""), limit=220),
+        "suggested_next_actions": actions,
+        "approval_required": _coerce_bool(value.get("approval_required", False), False),
+    }
+
+
+def normalize_desktop_target_proposal_context(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    state = _trim_text(value.get("state", ""), limit=40).lower() or "no_safe_target"
+    if state not in {"ready", "recovery_first", "blocked", "approval_context", "no_safe_target"}:
+        state = "no_safe_target"
+    confidence = _trim_text(value.get("confidence", ""), limit=20).lower() or "low"
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    return {
+        "purpose": _trim_text(value.get("purpose", ""), limit=60),
+        "state": state,
+        "reason": _normalize_reason(value.get("reason", "proposal_no_safe_target"), default="proposal_no_safe_target"),
+        "summary": _trim_text(value.get("summary", ""), limit=240),
+        "confidence": confidence,
+        "confidence_score": _coerce_int(value.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "scene_class": _trim_text(value.get("scene_class", ""), limit=40).lower() or "unknown",
+        "workflow_state": _trim_text(value.get("workflow_state", ""), limit=40).lower() or "unknown",
+        "readiness_state": _trim_text(value.get("readiness_state", ""), limit=40).lower() or "unknown",
+        "active_window_title": _trim_text(value.get("active_window_title", ""), limit=180),
+        "target_window_title": _trim_text(value.get("target_window_title", ""), limit=180),
+        "primary_evidence_id": _trim_text(value.get("primary_evidence_id", ""), limit=80),
+        "comparison_evidence_id": _trim_text(value.get("comparison_evidence_id", ""), limit=80),
+        "pending_tool": _trim_text(value.get("pending_tool", ""), limit=80),
+        "checkpoint_pending": _coerce_bool(value.get("checkpoint_pending", False), False),
+        "target_match_score": _coerce_int(value.get("target_match_score", 0), 0, minimum=0, maximum=100),
+        "proposal_count": _coerce_int(value.get("proposal_count", 0), 0, minimum=0, maximum=4),
+        "proposer_names": [
+            _trim_text(item, limit=60)
+            for item in list(value.get("proposer_names", []) or [])[:8]
+            if _trim_text(item, limit=60)
+        ],
+        "proposals": [
+            normalize_desktop_target_proposal(item)
+            for item in list(value.get("proposals", []) or [])[:4]
+            if isinstance(item, dict)
+        ],
     }
 
 

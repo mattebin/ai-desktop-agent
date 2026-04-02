@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 
-from core.backend_schemas import normalize_desktop_run_outcome
+from core.backend_schemas import normalize_desktop_run_outcome, normalize_desktop_target_proposal_context
 from core.browser_tasks import (
     browser_task_label,
     infer_browser_task_name,
@@ -143,6 +143,51 @@ def _desktop_scene_context_lines(label: str, scene: Dict[str, Any]) -> List[str]
         parts.append("direct_image=helpful")
     if parts:
         lines.append(f"- {label} scene status: {'; '.join(parts)}")
+    return lines
+
+
+def _desktop_target_proposal_context_lines(label: str, proposal_context: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(proposal_context, dict):
+        return lines
+    summary = str(proposal_context.get("summary", "")).strip()
+    if summary:
+        lines.append(f"- {label} target proposals: {summary}")
+    state = str(proposal_context.get("state", "")).strip()
+    confidence = str(proposal_context.get("confidence", "")).strip()
+    reason = str(proposal_context.get("reason", "")).strip()
+    proposal_count = int(proposal_context.get("proposal_count", 0) or 0)
+    parts: List[str] = []
+    if state:
+        parts.append(f"state={state}")
+    if confidence:
+        parts.append(f"confidence={confidence}")
+    if reason:
+        parts.append(f"reason={reason}")
+    if proposal_count:
+        parts.append(f"count={proposal_count}")
+    if parts:
+        lines.append(f"- {label} proposal status: {'; '.join(parts)}")
+    for index, proposal in enumerate(list(proposal_context.get("proposals", []))[:2], start=1):
+        if not isinstance(proposal, dict):
+            continue
+        target_kind = str(proposal.get("target_kind", "")).strip() or "target"
+        proposal_summary = str(proposal.get("summary", "")).strip()
+        actions = [str(item).strip() for item in list(proposal.get("suggested_next_actions", []))[:2] if str(item).strip()]
+        detail_parts: List[str] = []
+        if actions:
+            detail_parts.append(f"next={', '.join(actions)}")
+        if proposal.get("approval_required", False):
+            detail_parts.append("approval=yes")
+        confidence_text = str(proposal.get("confidence", "")).strip()
+        if confidence_text:
+            detail_parts.append(f"confidence={confidence_text}")
+        line = f"- {label} proposal {index}: {target_kind}"
+        if proposal_summary:
+            line += f" -> {proposal_summary}"
+        if detail_parts:
+            line += f" ({'; '.join(detail_parts)})"
+        lines.append(line)
     return lines
 
 
@@ -1191,9 +1236,12 @@ class TaskState:
         checkpoint_scene: Dict[str, Any] = {}
         selected_vision: Dict[str, Any] = {}
         checkpoint_vision: Dict[str, Any] = {}
+        selected_target_proposals: Dict[str, Any] = {}
+        checkpoint_target_proposals: Dict[str, Any] = {}
         try:
             from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
             from core.desktop_scene import interpret_desktop_scene
+            from core.desktop_targets import propose_desktop_targets
 
             store = get_desktop_evidence_store()
             preferred_active_window_title = ""
@@ -1287,6 +1335,46 @@ class TaskState:
                 checkpoint_scene=checkpoint_scene,
                 prefer_before_after=bool(checkpoint_scene.get("prefer_before_after", False)),
             )
+            selected_target_proposals = propose_desktop_targets(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_investigation",
+                prompt_text=self.goal,
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                selected_scene=selected_scene,
+                checkpoint_scene=checkpoint_scene,
+                recovery=latest_recovery,
+                readiness=latest_window_readiness,
+                visual_stability=latest_visual_stability,
+                process_context=latest_process_context,
+                latest_mouse_action=latest_mouse_action,
+                pending_tool=str(self.desktop_checkpoint_tool).strip(),
+                checkpoint_pending=self.desktop_checkpoint_pending,
+                checkpoint_target=self.desktop_checkpoint_target,
+                remembered_target_title=self.desktop_last_target_window,
+            )
+            checkpoint_target_proposals = propose_desktop_targets(
+                selected_summary=selected_result.get("selected", {}),
+                checkpoint_summary=checkpoint_result.get("selected", {}),
+                recent_summaries=recent_context_evidence,
+                purpose="desktop_approval",
+                prompt_text=self.goal,
+                assessment=selected_evidence_assessment,
+                checkpoint_assessment=checkpoint_evidence_assessment,
+                selected_scene=selected_scene,
+                checkpoint_scene=checkpoint_scene,
+                recovery=latest_recovery,
+                readiness=latest_window_readiness,
+                visual_stability=latest_visual_stability,
+                process_context=latest_process_context,
+                latest_mouse_action=latest_mouse_action,
+                pending_tool=str(self.desktop_checkpoint_tool).strip(),
+                checkpoint_pending=self.desktop_checkpoint_pending,
+                checkpoint_target=self.desktop_checkpoint_target,
+                remembered_target_title=self.desktop_last_target_window,
+            )
         except Exception:
             selected_evidence = {}
             checkpoint_evidence = {}
@@ -1297,6 +1385,8 @@ class TaskState:
             checkpoint_scene = {}
             selected_vision = {}
             checkpoint_vision = {}
+            selected_target_proposals = {}
+            checkpoint_target_proposals = {}
 
         return {
             "windows": self._normalize_values(self.desktop_windows[-limit:], limit=limit, text_limit=180),
@@ -1322,6 +1412,7 @@ class TaskState:
             "selected_evidence_assessment": selected_evidence_assessment,
             "selected_scene": selected_scene,
             "selected_vision": selected_vision,
+            "selected_target_proposals": normalize_desktop_target_proposal_context(selected_target_proposals),
             "recent_context_evidence": recent_context_evidence,
             "checkpoint_pending": self.desktop_checkpoint_pending,
             "checkpoint_reason": self.desktop_checkpoint_reason[:180],
@@ -1332,6 +1423,7 @@ class TaskState:
             "checkpoint_evidence_assessment": checkpoint_evidence_assessment,
             "checkpoint_scene": checkpoint_scene,
             "checkpoint_vision": checkpoint_vision,
+            "checkpoint_target_proposals": normalize_desktop_target_proposal_context(checkpoint_target_proposals),
             "checkpoint_approval_status": self.desktop_checkpoint_approval_status[:40],
             "checkpoint_resume_ready": bool(self.desktop_checkpoint_resume_args),
             "run_outcome": normalize_desktop_run_outcome(self.desktop_run_outcome),
@@ -1938,6 +2030,14 @@ class TaskState:
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_scene", {}),
             )
+            selected_target_lines = _desktop_target_proposal_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_target_proposals", {}),
+            )
+            checkpoint_target_lines = _desktop_target_proposal_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_target_proposals", {}),
+            )
             selected_vision_lines = _desktop_vision_context_lines(
                 "Selected desktop",
                 desktop_activity.get("selected_vision", {}),
@@ -1955,6 +2055,8 @@ class TaskState:
                 + checkpoint_grounding_lines
                 + selected_scene_lines
                 + checkpoint_scene_lines
+                + selected_target_lines
+                + checkpoint_target_lines
                 + selected_vision_lines
                 + checkpoint_vision_lines
                 + outcome_lines
@@ -2807,6 +2909,16 @@ class TaskState:
             for line in _desktop_scene_context_lines(
                 "Checkpoint desktop",
                 desktop_activity.get("checkpoint_scene", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_target_proposal_context_lines(
+                "Selected desktop",
+                desktop_activity.get("selected_target_proposals", {}),
+            ):
+                lines.append(line)
+            for line in _desktop_target_proposal_context_lines(
+                "Checkpoint desktop",
+                desktop_activity.get("checkpoint_target_proposals", {}),
             ):
                 lines.append(line)
             for line in _desktop_vision_context_lines(

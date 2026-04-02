@@ -147,6 +147,45 @@ export type DesktopState = {
   checkpoint_evidence_id?: string;
   selected_evidence?: EvidenceSummary;
   checkpoint_evidence?: EvidenceSummary;
+  selected_target_proposals?: DesktopTargetProposalContext;
+  checkpoint_target_proposals?: DesktopTargetProposalContext;
+};
+
+export type DesktopTargetProposal = {
+  target_id?: string;
+  target_kind?: string;
+  window_title?: string;
+  window_process?: string;
+  source_evidence_id?: string;
+  confidence?: string;
+  confidence_score?: number;
+  reason?: string;
+  summary?: string;
+  approval_required?: boolean;
+  suggested_next_actions?: string[];
+  point?: { x?: number; y?: number };
+  region?: { x?: number; y?: number; width?: number; height?: number };
+  coordinate_mode?: string;
+  mapping_reason?: string;
+};
+
+export type DesktopTargetProposalContext = {
+  purpose?: string;
+  state?: string;
+  reason?: string;
+  summary?: string;
+  confidence?: string;
+  confidence_score?: number;
+  proposal_count?: number;
+  scene_class?: string;
+  workflow_state?: string;
+  readiness_state?: string;
+  target_window_title?: string;
+  pending_tool?: string;
+  checkpoint_pending?: boolean;
+  target_match_score?: number;
+  proposer_names?: string[];
+  proposals?: DesktopTargetProposal[];
 };
 
 export type RuntimeConfig = {

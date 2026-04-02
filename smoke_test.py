@@ -28,6 +28,7 @@ mods = [
     "core.desktop_mapping",
     "core.desktop_recovery",
     "core.desktop_scene",
+    "core.desktop_targets",
     "core.execution_manager",
     "core.file_watch_backend",
     "core.local_api",
@@ -84,6 +85,7 @@ from core.desktop_matching import select_window_candidate, titles_compatible
 from core.desktop_mapping import action_point_from_mapping, build_desktop_coordinate_mapping, capture_space_from_observation, monitor_for_point
 from core.desktop_recovery import assess_visual_sample_signatures, classify_window_recovery_state, select_window_recovery_strategy
 from core.desktop_scene import interpret_desktop_scene, list_scene_interpreters, register_scene_interpreter
+from core.desktop_targets import list_target_proposers, propose_desktop_targets, register_target_proposer
 from core.chat_sessions import ChatSessionManager
 from core.config import load_settings
 from core.desktop_capture_service import DesktopCaptureService
@@ -672,8 +674,8 @@ try:
         raise SystemExit(
             f"ExecutionManager did not expose the expected desktop timeout reason for the stalled run: outcome={timeout_outcome} progress={timeout_progress} snapshot={timeout_snapshot}"
         )
-    if "did not reach its first loop entry" in timeout_message:
-        if timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
+    if "did not reach its first loop entry" in timeout_message and not timeout_progress.get("first_loop_at", ""):
+        if timeout_progress.get("first_step_at", ""):
             raise SystemExit(f"ExecutionManager did not preserve the expected loop-entry-timeout progress markers: {timeout_progress}")
     elif not timeout_progress.get("first_loop_at", "") or timeout_progress.get("first_step_at", ""):
         raise SystemExit(f"ExecutionManager did not preserve the expected startup-timeout progress markers: {timeout_progress}")
@@ -2176,6 +2178,8 @@ if desktop_evidence_snapshot.get("desktop", {}).get("selected_vision", {}).get("
     raise SystemExit("TaskState did not surface the expected compact selected desktop vision summary.")
 if desktop_evidence_snapshot.get("desktop", {}).get("latest_process_context", {}).get("process_name") != "notepad.exe":
     raise SystemExit("TaskState did not surface the latest bounded desktop process context.")
+if desktop_evidence_snapshot.get("desktop", {}).get("selected_target_proposals", {}).get("proposal_count", 0) <= 0:
+    raise SystemExit("TaskState did not surface bounded selected desktop target proposals for the current evidence.")
 desktop_control_state = TaskState("desktop control surface smoke")
 desktop_control_mouse_result = {
     "ok": True,
@@ -2275,11 +2279,15 @@ if desktop_control_status.get("desktop", {}).get("latest_mouse_action", {}).get(
     raise SystemExit("Local API status compaction did not expose the latest bounded desktop coordinate-mapping reason.")
 if desktop_control_status.get("desktop", {}).get("latest_command_result", {}).get("exit_code") != 0:
     raise SystemExit("Local API status compaction did not expose the bounded desktop command result.")
+if not isinstance(desktop_control_status.get("desktop", {}).get("selected_target_proposals", {}), dict):
+    raise SystemExit("Local API status compaction did not expose a compact desktop target proposal context.")
 desktop_observation_text = desktop_state.get_observation()
 if "Selected desktop evidence assessment:" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact selected desktop evidence grounding lines.")
 if "Desktop process context: notepad.exe" not in desktop_observation_text:
     raise SystemExit("TaskState.get_observation() did not include compact desktop process grounding lines.")
+if "Selected desktop target proposals:" not in desktop_observation_text:
+    raise SystemExit("TaskState.get_observation() did not include compact desktop target proposal grounding lines.")
 desktop_target_state = TaskState("Inspect the window titled 'Approval Target Window'")
 desktop_target_state.desktop_last_evidence_id = "desk-smoke-2"
 desktop_target_state.desktop_observation_token = "desktop-evidence-smoke-2"
@@ -3040,6 +3048,125 @@ if scene_status.get("desktop", {}).get("selected_scene", {}).get("scene_class", 
     raise SystemExit("Local API status payload did not expose selected desktop scene summaries.")
 if scene_status.get("pending_approval", {}).get("scene_preview", {}).get("reason", "") not in {"prompt_like", "dialog_like"}:
     raise SystemExit("Local API status payload did not expose compact checkpoint scene previews.")
+
+ready_target_summary = {
+    "evidence_id": "target-ready",
+    "summary": "Approval Target Window is visibly ready on the primary monitor.",
+    "active_window_title": "Approval Target Window",
+    "target_window_title": "Approval Target Window",
+    "active_window_process": "notepad.exe",
+    "active_window_rect": {"x": 200, "y": 140, "width": 1200, "height": 820},
+    "active_window_visible": True,
+    "screen_size": {"width": 3840, "height": 2160},
+    "primary_monitor": {
+        "index": 1,
+        "monitor_id": "DISPLAY1",
+        "device_name": "\\\\.\\DISPLAY1",
+        "left": 0,
+        "top": 0,
+        "width": 3840,
+        "height": 2160,
+        "is_primary": True,
+        "dpi_x": 168,
+        "dpi_y": 168,
+        "scale_x": 1.75,
+        "scale_y": 1.75,
+    },
+    "capture_bounds": {"x": 0, "y": 0, "width": 3840, "height": 2160},
+    "capture_monitor_id": "DISPLAY1",
+    "capture_monitor_index": 1,
+    "capture_coordinate_space": "physical_pixels",
+    "screenshot_scope": "primary_monitor",
+    "has_screenshot": True,
+    "selection_reason": "matched",
+}
+ready_target_scene = interpret_desktop_scene(
+    selected_summary=ready_target_summary,
+    purpose="desktop_investigation",
+    prompt_text="Type a short bounded note into the ready approval target window.",
+    assessment={"state": "sufficient", "sufficient": True, "summary": "The selected screenshot-backed evidence is current and sufficient."},
+    recovery={"state": "ready", "reason": "recovery_succeeded", "summary": "The target window is foreground and ready."},
+    readiness={"state": "ready", "ready": True, "summary": "The target window looks ready."},
+    visual_stability={"state": "stable", "stable": True, "summary": "The visible scene looks stable."},
+    process_context={"process_name": "notepad.exe", "running": True, "present": True},
+)
+ready_target_proposals = propose_desktop_targets(
+    selected_summary=ready_target_summary,
+    purpose="desktop_investigation",
+    prompt_text="Type a short bounded note into the ready approval target window.",
+    assessment={"state": "sufficient", "sufficient": True, "summary": "The selected screenshot-backed evidence is current and sufficient."},
+    selected_scene=ready_target_scene,
+    recovery={"state": "ready", "reason": "recovery_succeeded"},
+    readiness={"state": "ready", "ready": True},
+    visual_stability={"state": "stable", "stable": True},
+    process_context={"process_name": "notepad.exe", "running": True, "present": True},
+)
+if ready_target_proposals.get("state") != "ready" or int(ready_target_proposals.get("proposal_count", 0) or 0) < 2:
+    raise SystemExit(f"Desktop target proposal did not expose a stable visible ready target set: {ready_target_proposals}")
+if ready_target_proposals.get("proposals", [])[0].get("target_kind") != "focus_candidate":
+    raise SystemExit(f"Desktop target proposal did not rank a focus candidate first for a stable ready window: {ready_target_proposals}")
+ready_surface_proposals = list(ready_target_proposals.get("proposals", []))
+if len(ready_surface_proposals) < 2 or ready_surface_proposals[1].get("coordinate_mapping", {}).get("input_space", {}).get("x", 0) <= 0:
+    raise SystemExit(f"Desktop target proposal did not preserve coordinate mapping for the stable interaction surface: {ready_target_proposals}")
+
+wrong_foreground_scene = interpret_desktop_scene(
+    selected_summary={
+        **ready_target_summary,
+        "active_window_title": "Desktop Eval Sidecar",
+        "summary": "Desktop Eval Sidecar is foreground while the intended approval target is elsewhere.",
+    },
+    purpose="desktop_investigation",
+    prompt_text="Focus the approval target window.",
+    assessment={"state": "sufficient", "sufficient": True},
+    recovery={"state": "needs_recovery", "reason": "foreground_not_confirmed", "summary": "The intended target window is not foreground yet."},
+    readiness={"state": "missing", "ready": False},
+    visual_stability={"state": "stable", "stable": True},
+    process_context={"process_name": "notepad.exe", "running": True, "present": True},
+)
+wrong_foreground_proposals = propose_desktop_targets(
+    selected_summary={
+        **ready_target_summary,
+        "active_window_title": "Desktop Eval Sidecar",
+        "summary": "Desktop Eval Sidecar is foreground while the intended approval target is elsewhere.",
+    },
+    purpose="desktop_investigation",
+    prompt_text="Focus the approval target window.",
+    assessment={"state": "sufficient", "sufficient": True},
+    selected_scene=wrong_foreground_scene,
+    recovery={"state": "needs_recovery", "reason": "foreground_not_confirmed", "summary": "The intended target window is not foreground yet."},
+    readiness={"state": "missing", "ready": False},
+    visual_stability={"state": "stable", "stable": True},
+    process_context={"process_name": "notepad.exe", "running": True, "present": True},
+    remembered_target_title="Approval Target Window",
+)
+if wrong_foreground_proposals.get("state") != "recovery_first" or wrong_foreground_proposals.get("proposals", [])[0].get("target_kind") != "recovery_candidate":
+    raise SystemExit(f"Desktop target proposal did not prioritize recovery-first behavior for wrong-foreground scenes: {wrong_foreground_proposals}")
+if "desktop_recover_window" not in wrong_foreground_proposals.get("proposals", [])[0].get("suggested_next_actions", []):
+    raise SystemExit("Desktop target proposal did not preserve bounded recovery actions for wrong-foreground scenes.")
+
+no_safe_target_proposals = propose_desktop_targets(
+    selected_summary={
+        **ready_target_summary,
+        "summary": "The target process may still be background-only and not visibly surfaced.",
+    },
+    purpose="desktop_investigation",
+    prompt_text="Click the missing tray-like target if possible.",
+    assessment={"state": "partial", "sufficient": False, "summary": "Desktop evidence is partial and does not confirm a safe visible target."},
+    selected_scene=background_scene,
+    recovery={"state": "missing", "reason": "tray_or_background_state", "summary": "The target appears tray-like and not visibly surfaced."},
+    readiness={"state": "missing", "ready": False},
+    visual_stability={"state": "stable", "stable": True},
+    process_context={"process_name": "python.exe", "running": True, "present": True, "background_candidate": True},
+)
+if no_safe_target_proposals.get("state") != "no_safe_target" or int(no_safe_target_proposals.get("proposal_count", 0) or 0) != 0:
+    raise SystemExit(f"Desktop target proposal did not stay conservative for no-safe-target scenes: {no_safe_target_proposals}")
+
+def _smoke_target_plugin(result, context):
+    return {}
+
+register_target_proposer("workflow", "smoke_target_plugin", _smoke_target_plugin)
+if "smoke_target_plugin" not in list_target_proposers().get("workflow", []):
+    raise SystemExit("Desktop target proposer registry did not retain a workflow plugin registration.")
 
 scene_image_path.unlink(missing_ok=True)
 print("[OK] desktop scene interpretation")

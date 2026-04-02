@@ -8,6 +8,8 @@ import {
   approvePending,
   BrowserState,
   createSession,
+  DesktopTargetProposal,
+  DesktopTargetProposalContext,
   DesktopRuntimeStatus,
   EvidenceArtifact,
   EvidenceSummary,
@@ -396,6 +398,32 @@ function approvalSummary(pending?: PendingApproval | null): string {
     return "";
   }
   return pending.reason || pending.summary || pending.step || pending.kind;
+}
+
+function proposalTone(state?: string): ActivityTone {
+  const normalized = String(state || "").toLowerCase();
+  if (normalized === "ready") {
+    return "success";
+  }
+  if (normalized === "recovery_first" || normalized === "approval_context") {
+    return "warning";
+  }
+  if (normalized === "blocked" || normalized === "no_safe_target") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function proposalLabel(proposal?: DesktopTargetProposal | null): string {
+  if (!proposal) {
+    return "Target";
+  }
+  return (
+    proposal.window_title ||
+    proposal.target_kind ||
+    proposal.summary ||
+    "Target"
+  );
 }
 
 function UiIcon({
@@ -1418,11 +1446,19 @@ export default function App() {
   const activeTask = sessionDetail?.operator?.active_task || status?.active_task || null;
   const selectedDesktopEvidence = status?.desktop?.selected_evidence || null;
   const checkpointDesktopEvidence = status?.desktop?.checkpoint_evidence || null;
+  const selectedTargetProposalContext = status?.desktop?.selected_target_proposals || null;
+  const checkpointTargetProposalContext = status?.desktop?.checkpoint_target_proposals || null;
   const pendingApprovalEvidence = pendingApproval?.evidence_preview || checkpointDesktopEvidence || null;
   const distinctCheckpointEvidence =
     checkpointDesktopEvidence?.evidence_id && checkpointDesktopEvidence.evidence_id === selectedDesktopEvidence?.evidence_id
       ? null
       : checkpointDesktopEvidence;
+  const activeTargetProposalContext: DesktopTargetProposalContext | null =
+    pendingApproval?.kind && checkpointTargetProposalContext?.proposal_count
+      ? checkpointTargetProposalContext
+      : checkpointTargetProposalContext?.state === "approval_context" && checkpointTargetProposalContext?.proposal_count
+        ? checkpointTargetProposalContext
+        : selectedTargetProposalContext;
   const title = sessionDetail?.title || "New conversation";
   const emptyState = !messages.length && !loadingConversation;
   const composerHint =
@@ -1864,6 +1900,39 @@ export default function App() {
                 artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
               />
             ) : null}
+          </div>
+          <div className="mini-list">
+            <article className={clsx("mini-list-item", `tone-${proposalTone(activeTargetProposalContext?.state)}`)}>
+              <div className="mini-list-title">
+                Target proposals
+                <span className="mini-list-time">{activeTargetProposalContext?.proposal_count || 0}</span>
+              </div>
+              <div className="mini-list-detail">
+                {plainTextPreview(
+                  activeTargetProposalContext?.summary ||
+                    "No compact desktop target proposals are available for the current task yet.",
+                  180,
+                )}
+              </div>
+            </article>
+            {(activeTargetProposalContext?.proposals || []).slice(0, 2).map((proposal) => (
+              <article key={proposal.target_id || proposal.summary || proposal.target_kind} className="mini-list-item tone-neutral">
+                <div className="mini-list-title">
+                  {plainTextPreview(proposalLabel(proposal), 52)}
+                  <span className="mini-list-time">{plainTextPreview(proposal.confidence || "low", 16)}</span>
+                </div>
+                <div className="mini-list-detail">{plainTextPreview(proposal.summary || "Bounded desktop target proposal.", 160)}</div>
+                <div className="evidence-preview-meta">
+                  {proposal.target_kind ? <span className="evidence-chip">{plainTextPreview(proposal.target_kind, 24)}</span> : null}
+                  {(proposal.suggested_next_actions || []).slice(0, 2).map((action) => (
+                    <span key={`${proposal.target_id || proposal.summary}:${action}`} className="evidence-chip evidence-chip-soft">
+                      {plainTextPreview(action, 28)}
+                    </span>
+                  ))}
+                  {proposal.approval_required ? <span className="evidence-chip">Approval</span> : null}
+                </div>
+              </article>
+            ))}
           </div>
         </section>
 

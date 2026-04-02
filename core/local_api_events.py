@@ -177,6 +177,23 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "summary": _trim_text(desktop.get("selected_vision", {}).get("summary", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=220),
             "needs_direct_image": bool(desktop.get("selected_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("selected_vision", {}), dict) else False,
         },
+        "selected_target_proposals": {
+            "state": _trim_text(desktop.get("selected_target_proposals", {}).get("state", "") if isinstance(desktop.get("selected_target_proposals", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_target_proposals", {}).get("reason", "") if isinstance(desktop.get("selected_target_proposals", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("selected_target_proposals", {}).get("summary", "") if isinstance(desktop.get("selected_target_proposals", {}), dict) else "", limit=220),
+            "proposal_count": int(desktop.get("selected_target_proposals", {}).get("proposal_count", 0) or 0) if isinstance(desktop.get("selected_target_proposals", {}), dict) else 0,
+            "top_proposals": [
+                {
+                    "target_kind": _trim_text(item.get("target_kind", ""), limit=40),
+                    "summary": _trim_text(item.get("summary", ""), limit=180),
+                    "confidence": _trim_text(item.get("confidence", ""), limit=20),
+                    "approval_required": bool(item.get("approval_required", False)),
+                    "suggested_next_actions": [_trim_text(action, limit=60) for action in list(item.get("suggested_next_actions", []))[:2] if _trim_text(action, limit=60)],
+                }
+                for item in list(desktop.get("selected_target_proposals", {}).get("proposals", []))[:2]
+                if isinstance(item, dict)
+            ],
+        },
         "checkpoint_evidence": {
             "evidence_id": _trim_text(desktop.get("checkpoint_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=80),
             "summary": _trim_text(desktop.get("checkpoint_evidence", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=220),
@@ -203,6 +220,23 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
             "reason": _trim_text(desktop.get("checkpoint_vision", {}).get("reason", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
             "summary": _trim_text(desktop.get("checkpoint_vision", {}).get("summary", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=220),
             "needs_direct_image": bool(desktop.get("checkpoint_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("checkpoint_vision", {}), dict) else False,
+        },
+        "checkpoint_target_proposals": {
+            "state": _trim_text(desktop.get("checkpoint_target_proposals", {}).get("state", "") if isinstance(desktop.get("checkpoint_target_proposals", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_target_proposals", {}).get("reason", "") if isinstance(desktop.get("checkpoint_target_proposals", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("checkpoint_target_proposals", {}).get("summary", "") if isinstance(desktop.get("checkpoint_target_proposals", {}), dict) else "", limit=220),
+            "proposal_count": int(desktop.get("checkpoint_target_proposals", {}).get("proposal_count", 0) or 0) if isinstance(desktop.get("checkpoint_target_proposals", {}), dict) else 0,
+            "top_proposals": [
+                {
+                    "target_kind": _trim_text(item.get("target_kind", ""), limit=40),
+                    "summary": _trim_text(item.get("summary", ""), limit=180),
+                    "confidence": _trim_text(item.get("confidence", ""), limit=20),
+                    "approval_required": bool(item.get("approval_required", False)),
+                    "suggested_next_actions": [_trim_text(action, limit=60) for action in list(item.get("suggested_next_actions", []))[:2] if _trim_text(action, limit=60)],
+                }
+                for item in list(desktop.get("checkpoint_target_proposals", {}).get("proposals", []))[:2]
+                if isinstance(item, dict)
+            ],
         },
         "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
         "latest_recovery": {
