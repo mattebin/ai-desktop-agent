@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script async src="https://plausible.io/js/pa-B8jxHxV2vUES1dHyIPE_L.js"></script>
+  <script>
+    window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+    plausible.init()
+  </script>
+
+  <title>AI Desktop Operator</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Desktop Operator</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(20, 27, 45, 0.82);
+      --panel-strong: #121a2f;
+      --text: #f3f6ff;
+      --muted: #b6c0d9;
+      --line: rgba(255, 255, 255, 0.09);
+      --accent: #7aa2ff;
+      --accent-2: #9cf0cf;
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+      --max: 1140px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(122, 162, 255, 0.18), transparent 32%),
+        radial-gradient(circle at top right, rgba(156, 240, 207, 0.10), transparent 28%),
+        linear-gradient(180deg, #0a0f1d 0%, #0b1020 42%, #09111a 100%);
+      line-height: 1.6;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .container {
+      width: min(var(--max), calc(100% - 2rem));
+      margin: 0 auto;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(18px);
+      background: rgba(8, 12, 24, 0.65);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.9rem 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .brand-mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(122, 162, 255, 0.28), rgba(156, 240, 207, 0.2));
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: var(--shadow);
+      font-size: 0.95rem;
+    }
+
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      font-size: 0.95rem;
+      padding: 0.45rem 0.75rem;
+      border-radius: 999px;
+      transition: 0.2s ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+      background: rgba(255,255,255,0.06);
+    }
+
+    .hero {
+      padding: 5.5rem 0 3rem;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 1.5rem;
+      align-items: stretch;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-copy {
+      padding: 2rem;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.45rem 0.8rem;
+      border-radius: 999px;
+      background: rgba(122, 162, 255, 0.10);
+      border: 1px solid rgba(122, 162, 255, 0.18);
+      color: #d7e3ff;
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      line-height: 1.15;
+    }
+
+    h1 {
+      font-size: clamp(2.2rem, 5vw, 4.6rem);
+      letter-spacing: -0.04em;
+      max-width: 12ch;
+    }
+
+    .lead {
+      color: var(--muted);
+      font-size: 1.07rem;
+      max-width: 62ch;
+      margin: 1rem 0 0;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8rem;
+      margin-top: 1.5rem;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.55rem;
+      min-height: 48px;
+      padding: 0.85rem 1.15rem;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      transition: 0.2s ease;
+      font-weight: 600;
+    }
+
+    .button.primary {
+      background: linear-gradient(135deg, rgba(122, 162, 255, 0.22), rgba(156, 240, 207, 0.16));
+      border-color: rgba(122, 162, 255, 0.25);
+    }
+
+    .button.secondary {
+      background: rgba(255,255,255,0.03);
+      color: var(--muted);
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(255,255,255,0.2);
+      color: var(--text);
+    }
+
+    .hero-panel {
+      padding: 1.3rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .mini-label {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+
+    .stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+
+    .pill {
+      padding: 0.5rem 0.72rem;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .stat-grid,
+    .feature-grid,
+    .proof-grid,
+    .gallery-grid,
+    .footer-grid {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .stat-grid {
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: 1.2rem;
+    }
+
+    .stat {
+      padding: 1rem;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 1.4rem;
+      margin-bottom: 0.2rem;
+    }
+
+    section {
+      padding: 1.1rem 0 0.5rem;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      margin: 0.4rem 0 0;
+      max-width: 60ch;
+    }
+
+    .feature-grid {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .feature-card,
+    .proof-card,
+    .gallery-card,
+    .footer-card {
+      padding: 1.2rem;
+    }
+
+    .feature-card h3,
+    .proof-card h3,
+    .gallery-card h3 {
+      margin-bottom: 0.55rem;
+      font-size: 1.1rem;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .architecture {
+      margin-top: 1rem;
+      padding: 1.25rem;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .flow-step {
+      padding: 1rem;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line);
+      min-height: 120px;
+    }
+
+    .flow-step span {
+      display: inline-flex;
+      width: 32px;
+      height: 32px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: rgba(122, 162, 255, 0.16);
+      margin-bottom: 0.8rem;
+      font-weight: 700;
+    }
+
+    .proof-grid {
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: 1rem;
+    }
+
+    .gallery-grid {
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: 1rem;
+    }
+
+    .gallery-shot {
+      aspect-ratio: 16 / 10;
+      border-radius: 16px;
+      border: 1px dashed rgba(255,255,255,0.16);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      padding: 1rem;
+      font-size: 0.96rem;
+    }
+
+    .gallery-card img {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 16px;
+      margin-bottom: 0.75rem;
+    }
+
+    .gallery-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .callout {
+      margin-top: 1rem;
+      padding: 1rem 1.1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(156, 240, 207, 0.16);
+      background: rgba(156, 240, 207, 0.06);
+      color: #dcfff0;
+    }
+
+    .footer {
+      padding: 2rem 0 4rem;
+    }
+
+    .footer-grid {
+      grid-template-columns: 1.2fr 0.8fr;
+    }
+
+    ul.clean {
+      margin: 0.75rem 0 0;
+      padding-left: 1.15rem;
+      color: var(--muted);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: rgba(255,255,255,0.06);
+      padding: 0.12rem 0.35rem;
+      border-radius: 8px;
+    }
+
+    @media (max-width: 1024px) {
+      .hero-grid,
+      .footer-grid,
+      .feature-grid,
+      .proof-grid,
+      .gallery-grid,
+      .flow,
+      .stat-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .hero-grid > :first-child,
+      .footer-grid > :first-child,
+      .feature-grid > :first-child,
+      .proof-grid > :first-child,
+      .gallery-grid > :first-child,
+      .stat-grid > :first-child {
+        grid-column: auto;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .nav-inner,
+      .section-head {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .hero {
+        padding-top: 3.2rem;
+      }
+
+      .hero-grid,
+      .footer-grid,
+      .feature-grid,
+      .proof-grid,
+      .gallery-grid,
+      .flow,
+      .stat-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-copy,
+      .hero-panel,
+      .feature-card,
+      .proof-card,
+      .gallery-card,
+      .footer-card,
+      .architecture {
+        padding: 1.05rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <div class="container nav-inner">
+      <div class="brand">
+        <div class="brand-mark">AO</div>
+        <div>AI Desktop Operator</div>
+      </div>
+      <nav class="nav-links">
+        <a href="#overview">Overview</a>
+        <a href="#features">Features</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#proof">Proof</a>
+        <a href="#gallery">Screenshots</a>
+        <a href="#links">Links</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" id="overview">
+      <div class="container hero-grid">
+        <article class="card hero-copy">
+          <div class="eyebrow">Local Windows operator • Chat-first • Controlled actions</div>
+          <h1>AI Desktop Operator</h1>
+          <p class="lead">
+            A local, chat-first AI desktop operator for Windows that can analyze the screen, reason about state, plan multi-step work, and execute tasks with approval-gated control.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/mattebin/ai-desktop-agent" target="_blank" rel="noreferrer">View GitHub Repo</a>
+            <a class="button secondary" href="#gallery">See Screenshots</a>
+          </div>
+
+          <div class="stat-grid">
+            <div class="stat">
+              <strong>Local-first</strong>
+              <span class="muted">Built around a local API and a thin desktop UI.</span>
+            </div>
+            <div class="stat">
+              <strong>Evidence-based</strong>
+              <span class="muted">Uses bounded desktop evidence instead of blind automation.</span>
+            </div>
+            <div class="stat">
+              <strong>Approval-gated</strong>
+              <span class="muted">Sensitive actions stay controlled and reviewable.</span>
+            </div>
+          </div>
+        </article>
+
+        <aside class="card hero-panel">
+          <div>
+            <div class="mini-label">What makes it different</div>
+            <p class="muted">This is not a chatbot wrapper and not a pile of fragile scripts. It is a structured operator system with explicit evidence, task state, recovery logic, and bounded action scope.</p>
+          </div>
+          <div>
+            <div class="mini-label">Tech stack</div>
+            <div class="stack">
+              <div class="pill">Python</div>
+              <div class="pill">Playwright</div>
+              <div class="pill">Tauri</div>
+              <div class="pill">React</div>
+              <div class="pill">Local API</div>
+              <div class="pill">Desktop evidence</div>
+            </div>
+          </div>
+          <div class="callout">
+            Current direction: strengthen the bounded control layer, improve workflow-aware targeting, and keep the evidence/state/approval core as the foundation.
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="features">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>What it does</h2>
+            <p>Built to behave like a real operator instead of an uncontrolled automation loop.</p>
+          </div>
+        </div>
+
+        <div class="feature-grid">
+          <article class="card feature-card">
+            <h3>Chat-first control</h3>
+            <p class="muted">Tasks start from conversation, not from brittle scripts. The desktop UI stays lightweight while the local API remains the main control surface.</p>
+          </article>
+
+          <article class="card feature-card">
+            <h3>Desktop evidence</h3>
+            <p class="muted">The system captures and selects bounded screenshot and window evidence so actions can be grounded in what is actually visible.</p>
+          </article>
+
+          <article class="card feature-card">
+            <h3>Scene interpretation</h3>
+            <p class="muted">Recent evidence is interpreted into scene, workflow, readiness, and blocked/loading states to support better decisions.</p>
+          </article>
+
+          <article class="card feature-card">
+            <h3>Controlled actions</h3>
+            <p class="muted">Mouse, keyboard, process, browser, and command actions are intentionally bounded rather than fully unrestricted.</p>
+          </article>
+
+          <article class="card feature-card">
+            <h3>Approval-gated safety</h3>
+            <p class="muted">Higher-risk actions pause for approval instead of silently pushing ahead like every overconfident automation demo on the internet.</p>
+          </article>
+
+          <article class="card feature-card">
+            <h3>Recovery and readiness</h3>
+            <p class="muted">The runtime can reason about minimized, hidden, unstable, or wrong-foreground states instead of assuming the desktop is always perfect.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>How it works</h2>
+            <p>A simple view of the current architecture without forcing visitors to read an internal handoff document just to stay alive.</p>
+          </div>
+        </div>
+
+        <article class="card architecture">
+          <div class="flow">
+            <div class="flow-step">
+              <span>1</span>
+              <h3>Observe</h3>
+              <p class="muted">Collect bounded desktop evidence, visible window state, and browser context.</p>
+            </div>
+            <div class="flow-step">
+              <span>2</span>
+              <h3>Interpret</h3>
+              <p class="muted">Classify the scene, workflow state, readiness, and meaningful changes.</p>
+            </div>
+            <div class="flow-step">
+              <span>3</span>
+              <h3>Plan</h3>
+              <p class="muted">Use operator state and task lifecycle controls to decide the next bounded step.</p>
+            </div>
+            <div class="flow-step">
+              <span>4</span>
+              <h3>Approve</h3>
+              <p class="muted">Gate sensitive actions behind explicit user approval when required.</p>
+            </div>
+            <div class="flow-step">
+              <span>5</span>
+              <h3>Act</h3>
+              <p class="muted">Execute browser or desktop actions through bounded, observable control primitives.</p>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="proof">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>Why this project is technically interesting</h2>
+            <p>These are the parts that make it more than a UI skin over some tool calls.</p>
+          </div>
+        </div>
+
+        <div class="proof-grid">
+          <article class="card proof-card">
+            <h3>Explicit operator lifecycle</h3>
+            <p class="muted">Stop, defer, resume, retry, replace, and supersession control are part of the system model, not afterthoughts.</p>
+          </article>
+
+          <article class="card proof-card">
+            <h3>DPI-safe targeting</h3>
+            <p class="muted">Per-monitor coordinate mapping connects screenshot space to final input space so actions are not guessed independently by each tool.</p>
+          </article>
+
+          <article class="card proof-card">
+            <h3>Bounded evidence architecture</h3>
+            <p class="muted">Desktop evidence is stored, summarized, and selected deterministically for approvals and follow-up reasoning.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="gallery">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>Interface</h2>
+            <p>A focused view of the chat-first desktop interface and operator workflow.</p>
+          </div>
+        </div>
+
+        <div class="gallery-grid">
+          <article class="card gallery-card">
+            <img src="images/ui-main.png" alt="AI Desktop Operator interface" />
+            <h3>Main UI</h3>
+            <p class="muted">Chat-first desktop interface with task flow and approval controls visible.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="footer" id="links">
+      <div class="container footer-grid">
+        <article class="card footer-card">
+          <h2>Repository</h2>
+          <p class="muted">The public repo contains the project code, architecture notes, prompts, and current implementation shape.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/mattebin/ai-desktop-agent" target="_blank" rel="noreferrer">Open GitHub Repo</a>
+          </div>
+        </article>
+
+        <aside class="card footer-card">
+          <h2>Notes</h2>
+          <ul class="clean">
+            <li>This showcase is designed for CV and portfolio use.</li>
+            <li>The page presents the project in a clear, lightweight format.</li>
+            <li>The public repository contains the current code and architecture notes.</li>
+          </ul>
+        </aside>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
