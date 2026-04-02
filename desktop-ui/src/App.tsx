@@ -28,6 +28,7 @@ import {
   listSessions,
   openSessionEventStream,
   rejectPending,
+  RunFocus,
   RunEntry,
   sendSessionMessage,
   SessionDetail,
@@ -87,6 +88,8 @@ const STREAM_EVENTS = [
   "stream.hello",
   "stream.reset",
   "stream.heartbeat",
+  "session.frame",
+  "operator.frame",
   "session.sync",
   "operator.sync",
   "session.updated",
@@ -982,6 +985,51 @@ function MessageBubble({ message }: { message: SessionMessage }) {
   );
 }
 
+const MemoMessageBubble = React.memo(
+  MessageBubble,
+  (previous, next) =>
+    previous.message.message_id === next.message.message_id &&
+    previous.message.created_at === next.message.created_at &&
+    previous.message.kind === next.message.kind &&
+    previous.message.status === next.message.status &&
+    previous.message.content === next.message.content,
+);
+
+type StreamFramePayload = {
+  session?: SessionSummary | SessionDetail;
+  snapshot?: StatusPayload;
+  alerts?: AlertItem[];
+  changed?: string[];
+  critical?: boolean;
+};
+
+type PendingStreamFrame = {
+  session?: SessionSummary | SessionDetail;
+  snapshot?: StatusPayload;
+  alerts?: AlertItem[];
+  messages: SessionMessage[];
+  activity: ActivityEntry[];
+  shouldRefreshControls: boolean;
+};
+
+function fingerprintValue(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function mergeSessionDetail(current: SessionDetail | null, session: SessionSummary | SessionDetail): SessionDetail | null {
+  if (!session?.session_id) {
+    return current;
+  }
+  if (!current || current.session_id !== session.session_id) {
+    return current;
+  }
+  return { ...current, ...session };
+}
+
 function SkeletonTranscript() {
   return (
     <div className="transcript transcript-loading">
@@ -1050,6 +1098,16 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const lastTranscriptSignatureRef = useRef("");
+  const lastStatusFingerprintRef = useRef("");
+  const lastSessionFingerprintRef = useRef("");
+  const runFocusLockedRef = useRef(false);
+  const runFocusSessionRef = useRef("");
+  const pendingStreamFrameRef = useRef<PendingStreamFrame>({
+    messages: [],
+    activity: [],
+    shouldRefreshControls: false,
+  });
+  const streamFlushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
@@ -1073,10 +1131,27 @@ export default function App() {
   }, [detailsOpen]);
 
   useEffect(() => {
+    const focus = (status?.run_focus || sessionDetail?.operator?.run_focus || {}) as RunFocus;
+    const phase = String(status?.run_phase || sessionDetail?.operator?.run_phase || "idle").toLowerCase();
+    runFocusLockedRef.current = Boolean(focus.locked) && phase === "executing";
+    runFocusSessionRef.current = String(focus.session_id || "").trim();
+  }, [status, sessionDetail]);
+
+  useEffect(() => {
+    return () => {
+      if (streamFlushTimerRef.current) {
+        window.clearTimeout(streamFlushTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     shouldStickToBottomRef.current = true;
     setIsNearTranscriptBottom(true);
     setPendingNewMessageCount(0);
     lastTranscriptSignatureRef.current = "";
+    lastStatusFingerprintRef.current = "";
+    lastSessionFingerprintRef.current = "";
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -1144,7 +1219,16 @@ export default function App() {
     const payload = await listSessions(apiBaseUrl, 32);
     const nextSessions = payload.sessions || payload.items || [];
     setSessions(nextSessions);
-    const preferred = preferredSessionId || selectedSessionRef.current || window.localStorage.getItem("ai-operator:selected-session") || "";
+    const lockedSessionId =
+      !preferredSessionId && runFocusLockedRef.current
+        ? runFocusSessionRef.current || selectedSessionRef.current
+        : "";
+    const preferred =
+      preferredSessionId ||
+      lockedSessionId ||
+      selectedSessionRef.current ||
+      window.localStorage.getItem("ai-operator:selected-session") ||
+      "";
     const resolved =
       nextSessions.find((item) => item.session_id === preferred)?.session_id ||
       nextSessions[0]?.session_id ||
@@ -1203,6 +1287,72 @@ export default function App() {
       recentRuns: runs.items || [],
       desktopEvidence: desktopEvidence.recent_summaries || [],
     });
+  }
+
+  function flushPendingStreamFrame() {
+    streamFlushTimerRef.current = null;
+    const pending = pendingStreamFrameRef.current;
+    pendingStreamFrameRef.current = {
+      messages: [],
+      activity: [],
+      shouldRefreshControls: false,
+    };
+
+    if (pending.activity.length) {
+      setActivity((current) => [...pending.activity, ...current].slice(0, 30));
+    }
+    if (pending.messages.length) {
+      setMessages((current) => normalizeMessages([...current, ...pending.messages]));
+    }
+    if (pending.session?.session_id) {
+      const sessionFingerprint = fingerprintValue(pending.session);
+      if (sessionFingerprint !== lastSessionFingerprintRef.current) {
+        lastSessionFingerprintRef.current = sessionFingerprint;
+        setSessions((current) => upsertSession(current, pending.session as SessionSummary));
+        setSessionDetail((current) => mergeSessionDetail(current, pending.session as SessionSummary | SessionDetail));
+      }
+    }
+    if (pending.snapshot) {
+      const snapshotFingerprint = fingerprintValue(pending.snapshot);
+      if (snapshotFingerprint !== lastStatusFingerprintRef.current) {
+        lastStatusFingerprintRef.current = snapshotFingerprint;
+        setStatus(pending.snapshot);
+      }
+    }
+    if (pending.alerts) {
+      setAlerts(pending.alerts);
+    }
+    if (pending.shouldRefreshControls && detailsOpenRef.current) {
+      void refreshControlData(selectedSessionRef.current);
+    }
+  }
+
+  function queueStreamFrame(update: Partial<PendingStreamFrame>) {
+    const pending = pendingStreamFrameRef.current;
+    if (update.session?.session_id) {
+      pending.session = update.session;
+    }
+    if (update.snapshot) {
+      pending.snapshot = update.snapshot;
+    }
+    if (update.alerts) {
+      pending.alerts = update.alerts;
+    }
+    if (update.messages?.length) {
+      pending.messages.push(...update.messages);
+    }
+    if (update.activity?.length) {
+      pending.activity.push(...update.activity);
+    }
+    if (update.shouldRefreshControls) {
+      pending.shouldRefreshControls = true;
+    }
+    if (streamFlushTimerRef.current) {
+      return;
+    }
+    streamFlushTimerRef.current = window.setTimeout(() => {
+      startTransition(() => flushPendingStreamFrame());
+    }, 70);
   }
 
   function scheduleConversationRefresh(sessionId = selectedSessionRef.current) {
@@ -1359,38 +1509,45 @@ export default function App() {
         setStreamState("live");
         setStreamNote("Live updates connected");
         const activityEntry = timelineFromEvent(payload);
-        if (activityEntry) {
-          setActivity((current) => [activityEntry, ...current].slice(0, 30));
-        }
+        const activityUpdate = activityEntry ? [activityEntry] : [];
 
         if (payload.event === "session.message") {
           const nextMessage = (payload.data.message || {}) as SessionMessage;
           if (nextMessage.message_id || nextMessage.content) {
-            setMessages((current) => normalizeMessages([...current, nextMessage]));
+            queueStreamFrame({
+              messages: [nextMessage],
+              activity: activityUpdate,
+            });
+            return;
           }
         }
 
-        if (payload.event === "session.sync" || payload.event === "operator.sync") {
-          const syncData = payload.data as {
-            session?: SessionDetail;
-            snapshot?: StatusPayload;
-            alerts?: AlertItem[];
-          };
-          if (syncData.session?.session_id) {
-            setSessionDetail((current) =>
-              current && current.session_id === syncData.session?.session_id
-                ? { ...current, ...syncData.session }
-                : current,
-            );
-            setSessions((current) => upsertSession(current, syncData.session as SessionSummary));
-          }
-          if (syncData.snapshot) {
-            setStatus(syncData.snapshot);
-          }
-          if (syncData.alerts) {
-            setAlerts(syncData.alerts);
-          }
+        if (
+          payload.event === "session.sync" ||
+          payload.event === "operator.sync" ||
+          payload.event === "session.frame" ||
+          payload.event === "operator.frame"
+        ) {
+          const syncData = payload.data as StreamFramePayload;
+          queueStreamFrame({
+            session: syncData.session,
+            snapshot: syncData.snapshot,
+            alerts: syncData.alerts,
+            activity: activityUpdate,
+            shouldRefreshControls: Boolean(syncData.snapshot || syncData.alerts?.length),
+          });
           return;
+        }
+
+        if (payload.event === "session.updated") {
+          const session = (payload.data.session || {}) as SessionSummary;
+          if (session.session_id) {
+            queueStreamFrame({
+              session,
+              activity: activityUpdate,
+            });
+            return;
+          }
         }
 
         if (payload.event === "alert") {
@@ -1398,15 +1555,17 @@ export default function App() {
           if (alert.alert_id || alert.message) {
             setAlerts((current) => [alert, ...current.filter((item) => item.alert_id !== alert.alert_id)].slice(0, 8));
           }
+          if (activityUpdate.length) {
+            queueStreamFrame({ activity: activityUpdate });
+          }
+          return;
         }
 
-        if (
-          payload.event.startsWith("task.") ||
-          payload.event.startsWith("approval.") ||
-          payload.event === "session.updated" ||
-          payload.event === "browser.workflow" ||
-          payload.event === "stream.reset"
-        ) {
+        if (activityUpdate.length) {
+          queueStreamFrame({ activity: activityUpdate });
+        }
+
+        if (payload.event === "stream.reset") {
           scheduleConversationRefresh(sessionId);
         }
       } catch (_error) {
@@ -1437,6 +1596,9 @@ export default function App() {
     : sessionDetail?.operator?.pending_approval?.kind
       ? sessionDetail.operator.pending_approval
       : status?.pending_approval || null;
+  const runPhase = String(status?.run_phase || sessionDetail?.operator?.run_phase || "idle").toLowerCase();
+  const runFocus = (status?.run_focus || sessionDetail?.operator?.run_focus || null) as RunFocus | null;
+  const runFocusLocked = Boolean(runFocus?.locked) && runPhase === "executing";
   const runtimeModel = status?.runtime?.active_model || "";
   const runtimeEffort = status?.runtime?.reasoning_effort || "";
   const runtimeEffortLabel =
@@ -1715,6 +1877,8 @@ export default function App() {
             <div className="chat-meta-row">
               {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
               {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
+              {runPhase !== "idle" ? <span className="meta-pill">Phase {runPhase.replace(/_/g, " ")}</span> : null}
+              {runFocusLocked ? <span className="meta-pill">Run focus locked</span> : null}
               {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
               {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
               <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
@@ -1789,7 +1953,7 @@ export default function App() {
           ) : (
             <div className="transcript" onScroll={handleTranscriptScroll} ref={transcriptRef}>
               {messages.map((message, index) => (
-                <MessageBubble
+                <MemoMessageBubble
                   key={message.message_id || `${message.created_at || index}:${message.role || "assistant"}:${message.kind || "message"}`}
                   message={message}
                 />

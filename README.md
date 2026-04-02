@@ -64,6 +64,7 @@ This project is now a serious local operator framework with:
 - a bounded desktop scene interpretation layer for app/workflow/readiness understanding
 - evidence-aware desktop reasoning for bounded investigations and approval grounding
 - workflow-aware target proposals that bridge evidence and scene state into bounded next-step candidates
+- explicit active run phases with batched live runtime frames for steadier execution UI behavior
 - a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
 - a per-monitor-DPI-safe desktop coordinate mapping layer from capture space to action space
 - live eval coverage for core and realistic workflows
@@ -166,6 +167,13 @@ Recent architecture work also strengthened the plug-in seams around:
 - process/background diagnostics
 - readiness and control-state probing
 - deterministic direct-vision packaging
+
+Recent runtime stabilization work also added:
+
+- explicit run phases (`idle`, `planning`, `awaiting_approval`, `executing`, `post_execution`)
+- batched live operator/session frames on top of the existing event stream
+- stable execution-focus behavior in the desktop UI so active runs stop forcing chat/view churn during bounded execution
+- conservative proposal-aware desktop action pacing so the same unchanged target is not hammered repeatedly
 
 Those summaries now feed compact UI/client presentation too:
 

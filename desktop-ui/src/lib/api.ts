@@ -101,6 +101,8 @@ export type SessionDetail = SessionSummary & {
     status?: string;
     running?: boolean;
     paused?: boolean;
+    run_phase?: string;
+    run_focus?: RunFocus;
     active_task?: ActiveTask;
     pending_approval?: PendingApproval;
     result_status?: string;
@@ -110,12 +112,28 @@ export type SessionDetail = SessionSummary & {
 
 export type ActiveTask = {
   task_id?: string;
+  session_id?: string;
   status?: string;
   goal?: string;
   last_message?: string;
   run_id?: string;
   approval_needed?: boolean;
   approval_reason?: string;
+  progress?: {
+    stage?: string;
+    detail?: string;
+    result_status?: string;
+  };
+};
+
+export type RunFocus = {
+  phase?: string;
+  reason?: string;
+  locked?: boolean;
+  task_id?: string;
+  session_id?: string;
+  run_id?: string;
+  detail?: string;
 };
 
 export type BrowserState = {
@@ -214,6 +232,8 @@ export type StatusPayload = {
   status?: string;
   running?: boolean;
   paused?: boolean;
+  run_phase?: string;
+  run_focus?: RunFocus;
   current_step?: string;
   goal?: string;
   result_status?: string;

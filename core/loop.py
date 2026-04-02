@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
+import time
 
 from core.safety import stop_requested
 from core.tool_runtime import ToolRuntime
@@ -40,6 +41,26 @@ _DESKTOP_RECOVERY_TOOLS = {
     "desktop_recover_window",
     "desktop_wait_for_window_ready",
 }
+_DESKTOP_MUTATING_TOOLS = {
+    "desktop_focus_window",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
+    "desktop_click_point",
+    "desktop_scroll",
+    "desktop_press_key",
+    "desktop_press_key_sequence",
+    "desktop_type_text",
+}
+_DESKTOP_PROPOSAL_APPROVAL_CONTROLLED_TOOLS = {
+    "desktop_click_mouse",
+    "desktop_click_point",
+    "desktop_scroll",
+    "desktop_press_key",
+    "desktop_press_key_sequence",
+    "desktop_type_text",
+}
+_DESKTOP_ACTION_PACING_SECONDS = 0.18
 FINALIZE_MESSAGE_TIMEOUT_SECONDS = 30
 
 
@@ -264,12 +285,15 @@ def _finalize_control_request(llm, task_state, request, *, session_store=None, p
 
 def _record_tool_result(task_state, tool_name, args, result):
     step_status = "paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed")
+    target_proposals = _desktop_active_target_proposals(task_state) if tool_name.startswith("desktop_") else {}
     step = {
         "type": "tool",
         "status": step_status,
         "tool": tool_name,
         "args": args,
         "result": result,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "target_proposals": target_proposals if isinstance(target_proposals, dict) else {},
     }
     task_state.add_step(step)
     task_state.update_memory_from_tool(tool_name, result)
@@ -569,6 +593,34 @@ def _execute_desktop_tool_step(
     progress_callback=None,
 ):
     args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
+    guarded_result = _maybe_guard_desktop_action(tool_runtime, task_state, planner_goal, tool_name, args)
+    if guarded_result is not None:
+        _emit_progress(
+            progress_callback,
+            "tool_step_attempted",
+            detail=f"Blocked bounded tool step before execution: {tool_name}.",
+            tool_name=tool_name,
+        )
+        _record_tool_result(task_state, tool_name, args, guarded_result)
+        _emit_progress(
+            progress_callback,
+            "tool_result_recorded",
+            detail=f"Recorded guarded result for bounded tool step: {tool_name}.",
+            tool_name=tool_name,
+            result_status="failed",
+        )
+        _persist_session_state(session_store, task_state)
+        return args, guarded_result
+
+    if tool_name in _DESKTOP_MUTATING_TOOLS:
+        _emit_progress(
+            progress_callback,
+            "tool_step_attempted",
+            detail=f"Pacing bounded desktop action before execution: {tool_name}.",
+            tool_name=tool_name,
+        )
+        time.sleep(_DESKTOP_ACTION_PACING_SECONDS)
+
     _emit_progress(
         progress_callback,
         "tool_step_attempted",
@@ -923,6 +975,171 @@ def _desktop_goal_mentions_changed_state(planner_goal: str) -> bool:
     except Exception:
         text = str(planner_goal or "").strip().lower()
         return any(term in text for term in {"changed", "before", "after", "compare", "what happened"})
+
+
+def _desktop_active_target_proposals(task_state) -> dict:
+    desktop_activity = task_state._collect_desktop_activity(limit=4)
+    checkpoint = desktop_activity.get("checkpoint_target_proposals", {}) if isinstance(desktop_activity.get("checkpoint_target_proposals", {}), dict) else {}
+    selected = desktop_activity.get("selected_target_proposals", {}) if isinstance(desktop_activity.get("selected_target_proposals", {}), dict) else {}
+    if getattr(task_state, "desktop_checkpoint_pending", False) and checkpoint.get("proposal_count", 0):
+        return checkpoint
+    return checkpoint if checkpoint.get("state") == "approval_context" and checkpoint.get("proposal_count", 0) else selected
+
+
+def _desktop_action_signature(tool_name: str, args: dict, proposal_context: dict) -> str:
+    normalized_args = args if isinstance(args, dict) else {}
+    top_proposals = proposal_context.get("proposals", []) if isinstance(proposal_context.get("proposals", []), list) else []
+    top_targets = "|".join(
+        str(item.get("target_id", "")).strip()
+        for item in top_proposals[:2]
+        if isinstance(item, dict) and str(item.get("target_id", "")).strip()
+    )
+    salient = [
+        str(normalized_args.get("x", "")).strip(),
+        str(normalized_args.get("y", "")).strip(),
+        str(normalized_args.get("direction", "")).strip(),
+        str(normalized_args.get("scroll_units", "")).strip(),
+        str(normalized_args.get("key", "")).strip(),
+        ",".join(str(item).strip() for item in normalized_args.get("modifiers", []) if str(item).strip()) if isinstance(normalized_args.get("modifiers", []), list) else "",
+        str(normalized_args.get("value", "")).strip(),
+        str(normalized_args.get("field_label", "")).strip(),
+        str(normalized_args.get("title", "")).strip(),
+        str(normalized_args.get("window_id", "")).strip(),
+        str(proposal_context.get("state", "")).strip(),
+        str(proposal_context.get("reason", "")).strip(),
+        str(top_targets).strip(),
+    ]
+    return "::".join([tool_name, *salient])
+
+
+def _proposal_supports_desktop_action(proposal: dict, tool_name: str) -> bool:
+    if not isinstance(proposal, dict):
+        return False
+    suggested = [str(item).strip() for item in list(proposal.get("suggested_next_actions", [])) if str(item).strip()]
+    if tool_name in suggested:
+        return True
+    target_kind = str(proposal.get("target_kind", "")).strip().lower()
+    if tool_name == "desktop_focus_window" and target_kind in {"focus_candidate", "recovery_candidate", "window", "ui_like_area"}:
+        return True
+    return False
+
+
+def _desktop_target_explicitly_approved(tool_runtime, task_state, planner_goal: str, args: dict) -> bool:
+    if tool_runtime.goal_has_explicit_desktop_approval(planner_goal):
+        return True
+    if str(getattr(task_state, "desktop_checkpoint_approval_status", "")).strip().lower() == "approved":
+        return True
+    return str((args or {}).get("approval_status", "")).strip().lower() == "approved"
+
+
+def _desktop_action_guard_result(task_state, tool_name: str, proposal_context: dict, *, kind: str, summary: str, terminal: bool = False) -> dict:
+    latest_recovery = _desktop_latest_recovery(task_state)
+    latest_readiness = _desktop_latest_window_readiness(task_state)
+    latest_scene = _desktop_selected_scene(task_state)
+    result = {
+        "ok": False,
+        "error": summary,
+        "summary": summary,
+        "proposal_guard": {
+            "kind": kind,
+            "terminal": bool(terminal),
+            "tool": tool_name,
+            "proposal_state": str(proposal_context.get("state", "")).strip(),
+            "proposal_reason": str(proposal_context.get("reason", "")).strip(),
+            "proposal_count": int(proposal_context.get("proposal_count", 0) or 0),
+        },
+    }
+    if latest_recovery:
+        result["recovery"] = latest_recovery
+    if latest_readiness:
+        result["window_readiness"] = latest_readiness
+    if latest_scene:
+        result["scene"] = latest_scene
+    return result
+
+
+def _desktop_action_repeat_guard(task_state, tool_name: str, args: dict, proposal_context: dict) -> bool:
+    signature = _desktop_action_signature(tool_name, args, proposal_context)
+    matching_failures = 0
+    for step in reversed(task_state.steps[-6:]):
+        if step.get("type") != "tool":
+            continue
+        if str(step.get("tool", "")).strip() != tool_name:
+            continue
+        previous_context = step.get("target_proposals", {}) if isinstance(step.get("target_proposals", {}), dict) else {}
+        previous_args = step.get("args", {}) if isinstance(step.get("args", {}), dict) else {}
+        if _desktop_action_signature(tool_name, previous_args, previous_context) != signature:
+            continue
+        if str(step.get("status", "")).strip() not in {"failed", "paused"}:
+            continue
+        matching_failures += 1
+        if matching_failures >= 1:
+            return True
+    return False
+
+
+def _maybe_guard_desktop_action(tool_runtime, task_state, planner_goal: str, tool_name: str, args: dict) -> dict | None:
+    if tool_name not in _DESKTOP_MUTATING_TOOLS:
+        return None
+
+    proposal_context = _desktop_active_target_proposals(task_state)
+    proposal_state = str(proposal_context.get("state", "")).strip().lower()
+    explicit_approval = _desktop_target_explicitly_approved(tool_runtime, task_state, planner_goal, args)
+    supporting = [
+        item
+        for item in list(proposal_context.get("proposals", []))
+        if isinstance(item, dict) and _proposal_supports_desktop_action(item, tool_name)
+    ]
+    best_score = max((int(item.get("confidence_score", 0) or 0) for item in supporting), default=0)
+
+    if proposal_state == "no_safe_target":
+        summary = str(proposal_context.get("summary", "")).strip() or "There is no safe visible desktop target to act on yet."
+        return _desktop_action_guard_result(task_state, tool_name, proposal_context, kind="no_safe_target", summary=summary, terminal=True)
+
+    if _desktop_action_repeat_guard(task_state, tool_name, args, proposal_context):
+        return _desktop_action_guard_result(
+            task_state,
+            tool_name,
+            proposal_context,
+            kind="unchanged_target_proposal",
+            summary="Stopped retrying the same bounded desktop action because the target proposal and evidence have not changed meaningfully.",
+            terminal=True,
+        )
+
+    if tool_name in _DESKTOP_PROPOSAL_APPROVAL_CONTROLLED_TOOLS and not explicit_approval:
+        return None
+
+    if supporting and best_score >= 82:
+        return None
+    if explicit_approval:
+        return None
+
+    summary = str(proposal_context.get("summary", "")).strip() or "The current desktop target proposals are not confident enough to execute that action without explicit approval."
+    return _desktop_action_guard_result(task_state, tool_name, proposal_context, kind="low_confidence_target", summary=summary, terminal=False)
+
+
+def _maybe_finalize_desktop_action_guard(llm, task_state, result: dict, *, session_store=None, progress_callback=None):
+    guard = result.get("proposal_guard", {}) if isinstance(result.get("proposal_guard", {}), dict) else {}
+    if not guard:
+        return None
+    if not bool(guard.get("terminal", False)):
+        return None
+    summary = str(result.get("summary", "") or result.get("error", "")).strip() or "Stopped the bounded desktop action because the target remained unchanged or unsafe."
+    outcome = _desktop_build_run_outcome(
+        task_state,
+        outcome="blocked" if str(guard.get("kind", "")).strip() == "no_safe_target" else "incomplete",
+        status="blocked" if str(guard.get("kind", "")).strip() == "no_safe_target" else "incomplete",
+        terminal=True,
+        reason=str(guard.get("kind", "")).strip() or "desktop_action_guard",
+        summary=summary,
+    )
+    return _finalize_desktop_run_outcome(
+        llm,
+        task_state,
+        outcome,
+        session_store=session_store,
+        progress_callback=progress_callback,
+    )
 
 
 def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) -> bool:
@@ -1919,21 +2136,32 @@ def run_task_loop(
                 progress_callback=progress_callback,
             )
 
-        _emit_progress(
-            progress_callback,
-            "tool_step_attempted",
-            detail=f"Attempting bounded tool step: {tool_name}.",
-            tool_name=tool_name,
-        )
-        result = tool_runtime.execute(tool_name, args)
-        _record_tool_result(task_state, tool_name, args, result)
-        _emit_progress(
-            progress_callback,
-            "tool_result_recorded",
-            detail=f"Recorded result from bounded tool step: {tool_name}.",
-            tool_name=tool_name,
-            result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
-        )
+        if tool_name.startswith("desktop_"):
+            args, result = _execute_desktop_tool_step(
+                tool_runtime,
+                task_state,
+                tool_name,
+                args,
+                planner_goal,
+                session_store=session_store,
+                progress_callback=progress_callback,
+            )
+        else:
+            _emit_progress(
+                progress_callback,
+                "tool_step_attempted",
+                detail=f"Attempting bounded tool step: {tool_name}.",
+                tool_name=tool_name,
+            )
+            result = tool_runtime.execute(tool_name, args)
+            _record_tool_result(task_state, tool_name, args, result)
+            _emit_progress(
+                progress_callback,
+                "tool_result_recorded",
+                detail=f"Recorded result from bounded tool step: {tool_name}.",
+                tool_name=tool_name,
+                result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
+            )
         if result.get("paused", False):
             if tool_name.startswith("desktop_"):
                 task_state.set_desktop_run_outcome(
@@ -1954,6 +2182,15 @@ def run_task_loop(
                 "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
                 "steps": task_state.steps,
             }
+        desktop_guard_terminal = _maybe_finalize_desktop_action_guard(
+            llm,
+            task_state,
+            result,
+            session_store=session_store,
+            progress_callback=progress_callback,
+        )
+        if desktop_guard_terminal is not None:
+            return desktop_guard_terminal
         desktop_recovery = _maybe_recover_desktop_action_failure(
             llm,
             tool_runtime,

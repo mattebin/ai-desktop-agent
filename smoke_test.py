@@ -94,7 +94,9 @@ from core.file_watch_backend import create_file_watch_backend
 from core.llm_client import _content_with_desktop_vision, _goal_requests_brief_answer, _goal_requests_single_recommendation
 from core.local_api import LocalOperatorApiServer, _status_payload
 from core.local_api_client import LocalOperatorApiClient, wait_for_local_api_status
+from core.local_api_events import LocalApiEventStream
 from core.loop import (
+    _execute_desktop_tool_step,
     _finalize_message,
     _is_redundant_desktop_observation,
     _maybe_finalize_desktop_terminal_outcome,
@@ -3167,6 +3169,210 @@ def _smoke_target_plugin(result, context):
 register_target_proposer("workflow", "smoke_target_plugin", _smoke_target_plugin)
 if "smoke_target_plugin" not in list_target_proposers().get("workflow", []):
     raise SystemExit("Desktop target proposer registry did not retain a workflow plugin registration.")
+
+run_phase_root = Path("data") / "smoke_execution_run_phase"
+shutil.rmtree(run_phase_root, ignore_errors=True)
+run_phase_root.mkdir(parents=True, exist_ok=True)
+
+
+class _RunPhaseSmokeAgent:
+    def __init__(self, settings):
+        self.settings = settings
+        self.history_store = SimpleNamespace(
+            get_recent_runs=lambda limit=6, session_id="", state_scope_id="": [],
+            get_latest_run=lambda session_id="", state_scope_id="": {},
+        )
+
+    def load_task_state(self, goal: str = "", *, state_scope_id: str = DEFAULT_STATE_SCOPE_ID, clear_pending_for_new_goal: bool = True):
+        return TaskState(goal, state_scope_id=state_scope_id)
+
+    def save_task_state(self, state: TaskState, *, state_scope_id: str | None = None):
+        return True
+
+    def get_runtime_config(self):
+        return {"active_model": "gpt-5.4", "reasoning_effort": "medium"}
+
+    def run_state(self, state: TaskState, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if callable(progress_callback):
+            progress_callback("planning_started", detail="Planning the next bounded action.")
+            time.sleep(0.05)
+            progress_callback("tool_step_attempted", detail="Attempting bounded desktop action.")
+            time.sleep(0.05)
+            progress_callback("tool_result_recorded", detail="Recorded bounded desktop action.", result_status="completed")
+        state.status = "completed"
+        state.add_note("Run phase smoke completed.")
+        return {"ok": True, "status": "completed", "message": "Run phase smoke completed.", "steps": state.steps}
+
+
+run_phase_settings = {
+    **SMOKE_SETTINGS,
+    "session_state_path": str(run_phase_root / "session_state.json"),
+    "run_history_path": str(run_phase_root / "run_history.json"),
+    "queue_state_path": str(run_phase_root / "task_queue.json"),
+    "scheduled_task_state_path": str(run_phase_root / "scheduled_tasks.json"),
+    "watch_state_path": str(run_phase_root / "watch_state.json"),
+    "alert_state_path": str(run_phase_root / "alert_history.json"),
+    "desktop_evidence_root": str(run_phase_root / "desktop_evidence"),
+    "desktop_auto_capture_enabled": False,
+}
+run_phase_manager = ExecutionManager(agent=_RunPhaseSmokeAgent(run_phase_settings))
+try:
+    started = run_phase_manager.start_goal("Execution phase smoke")
+    if not started.get("ok", False):
+        raise SystemExit("ExecutionManager run phase smoke could not start.")
+    time.sleep(0.08)
+    running_snapshot = run_phase_manager.get_snapshot()
+    if running_snapshot.get("run_phase") not in {"planning", "executing"}:
+        raise SystemExit(f"ExecutionManager snapshot did not expose a planning/executing run phase: {running_snapshot.get('run_phase')}")
+    deadline = time.time() + 8.0
+    while time.time() < deadline:
+        worker = run_phase_manager._worker
+        if worker is None or not worker.is_alive():
+            break
+        time.sleep(0.05)
+    done_snapshot = run_phase_manager.get_snapshot()
+    if done_snapshot.get("run_phase") != "post_execution":
+        raise SystemExit(f"ExecutionManager snapshot did not expose post_execution after a completed run: {done_snapshot.get('run_phase')}")
+finally:
+    run_phase_manager.shutdown()
+    shutil.rmtree(run_phase_root, ignore_errors=True)
+print("[OK] execution run phases")
+
+
+class _StreamSmokeController:
+    def __init__(self):
+        self.snapshot = {
+            "status": "running",
+            "running": True,
+            "paused": False,
+            "run_phase": "planning",
+            "run_focus": {"phase": "planning", "reason": "planning_started", "locked": False, "session_id": "session-stream-smoke"},
+            "current_step": "Planning",
+            "result_status": "",
+            "result_message": "",
+            "active_task": {"task_id": "task-stream-smoke", "status": "running", "goal": "Stream smoke"},
+            "pending_approval": {},
+            "browser": {},
+            "desktop": {},
+            "lifecycle": {},
+            "latest_run": {},
+        }
+
+    def get_snapshot(self, *, session_id: str = "", state_scope_id: str = ""):
+        return dict(self.snapshot)
+
+    def get_alerts(self, limit: int = 8, session_id: str = "", state_scope_id: str = ""):
+        return {"items": []}
+
+
+class _StreamSmokeChatManager:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def get_stream_view(self, session_id: str, limit: int = 24):
+        return {
+            "ok": True,
+            "session": {
+                "session_id": session_id,
+                "title": "Stream smoke",
+                "status": "running",
+                "updated_at": "2026-04-02T12:00:00",
+            },
+            "messages": [],
+            "snapshot": dict(self.controller.snapshot),
+        }
+
+
+stream_controller = _StreamSmokeController()
+stream_chat_manager = _StreamSmokeChatManager(stream_controller)
+stream_events = LocalApiEventStream(stream_controller, stream_chat_manager, poll_seconds=5, frame_min_seconds=0.1)
+try:
+    with stream_events._condition:
+        channel = stream_events._ensure_channel_locked("session-stream-smoke", "")
+        initial_state = stream_events._read_state(session_id="session-stream-smoke", state_scope_id="")
+        stream_events._bootstrap_channel_locked(channel, state=initial_state)
+        stream_events._apply_state_to_channel_locked(channel, initial_state)
+        before_count = len([event for event in channel.buffer if event.get("event") == "session.frame"])
+        stream_controller.snapshot = {
+            **stream_controller.snapshot,
+            "run_phase": "executing",
+            "run_focus": {"phase": "executing", "reason": "tool_step_attempted", "locked": True, "session_id": "session-stream-smoke"},
+            "current_step": "Attempting bounded tool step: desktop_click_mouse.",
+        }
+        updated_state = stream_events._read_state(session_id="session-stream-smoke", state_scope_id="")
+        stream_events._apply_state_to_channel_locked(channel, updated_state)
+        frame_events = [event for event in channel.buffer if event.get("event") == "session.frame"]
+        if len(frame_events) <= before_count:
+            raise SystemExit("LocalApiEventStream did not emit a batched session.frame update for a run phase transition.")
+        if frame_events[-1].get("data", {}).get("snapshot", {}).get("run_phase") != "executing":
+            raise SystemExit("LocalApiEventStream session.frame did not preserve the compact run_phase snapshot.")
+        repeated_count = len(frame_events)
+        stream_events._apply_state_to_channel_locked(channel, updated_state)
+        frame_events = [event for event in channel.buffer if event.get("event") == "session.frame"]
+        if len(frame_events) != repeated_count:
+            raise SystemExit("LocalApiEventStream did not deduplicate identical batched frame updates.")
+finally:
+    stream_events.shutdown()
+print("[OK] local api event frames")
+
+
+class _ProposalGuardToolRuntime:
+    def prepare_args(self, tool_name, seed_args, task_state, planning_goal=""):
+        return dict(seed_args)
+
+    def execute(self, tool_name, args):
+        return {"ok": False, "summary": "The target surface still has not changed."}
+
+    def goal_has_explicit_desktop_approval(self, goal: str) -> bool:
+        return False
+
+
+proposal_guard_state = TaskState("Click the same bounded target again if it still looks correct.")
+proposal_guard_state.desktop_observation_token = "proposal-guard-observation"
+proposal_guard_state.desktop_last_target_window = "Ready Surface Window"
+proposal_guard_state.desktop_active_window_title = "Ready Surface Window"
+proposal_guard_state._collect_desktop_activity = lambda limit=4: {
+    "selected_target_proposals": {
+        "state": "ready",
+        "reason": "proposal_ready",
+        "summary": "The same visible target surface is still selected.",
+        "proposal_count": 1,
+        "proposals": [
+            {
+                "target_id": "surface:ready-window",
+                "target_kind": "ui_like_area",
+                "confidence": "high",
+                "confidence_score": 91,
+                "suggested_next_actions": ["desktop_click_mouse"],
+            }
+        ],
+    },
+    "checkpoint_target_proposals": {},
+    "latest_recovery": {"state": "ready", "reason": "recovery_succeeded", "summary": "The target is foreground and ready."},
+    "latest_window_readiness": {"state": "ready", "reason": "ready", "summary": "The window is ready."},
+    "selected_scene": {"scene_class": "app_window", "workflow_state": "ready", "summary": "The same ready scene is still visible."},
+}
+guard_runtime = _ProposalGuardToolRuntime()
+_, first_guard_result = _execute_desktop_tool_step(
+    guard_runtime,
+    proposal_guard_state,
+    "desktop_click_mouse",
+    {"x": 220, "y": 160},
+    proposal_guard_state.goal,
+)
+if first_guard_result.get("proposal_guard"):
+    raise SystemExit("The first bounded desktop action attempt should not be blocked by the repeated-proposal guard.")
+_, second_guard_result = _execute_desktop_tool_step(
+    guard_runtime,
+    proposal_guard_state,
+    "desktop_click_mouse",
+    {"x": 220, "y": 160},
+    proposal_guard_state.goal,
+)
+if second_guard_result.get("proposal_guard", {}).get("kind") != "unchanged_target_proposal":
+    raise SystemExit("The repeated bounded desktop action did not stop on the unchanged-target proposal guard.")
+print("[OK] desktop proposal repeat guard")
 
 scene_image_path.unlink(missing_ok=True)
 print("[OK] desktop scene interpretation")

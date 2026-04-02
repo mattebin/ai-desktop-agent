@@ -16,6 +16,7 @@ DEFAULT_LOCAL_EVENT_ALERT_LIMIT = 8
 DEFAULT_LOCAL_EVENT_REPLAY_SIZE = 80
 DEFAULT_LOCAL_EVENT_CHANNEL_RETENTION_SECONDS = 45.0
 DEFAULT_LOCAL_EVENT_MAX_CHANNELS = 24
+DEFAULT_LOCAL_EVENT_FRAME_MIN_SECONDS = 0.45
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -56,6 +57,19 @@ def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
             "terminal_at": _trim_text(progress.get("terminal_at", ""), limit=40),
             "meaningful_progress": bool(progress.get("meaningful_progress", False)),
         },
+    }
+
+
+def _compact_run_focus(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    return {
+        "phase": _trim_text(value.get("phase", "idle"), limit=40),
+        "reason": _trim_text(value.get("reason", ""), limit=80),
+        "locked": bool(value.get("locked", False)),
+        "task_id": _trim_text(value.get("task_id", ""), limit=60),
+        "session_id": _trim_text(value.get("session_id", ""), limit=80),
+        "run_id": _trim_text(value.get("run_id", ""), limit=60),
+        "detail": _trim_text(value.get("detail", ""), limit=220),
     }
 
 
@@ -372,6 +386,8 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
         "status": _trim_text(snapshot.get("status", "idle"), limit=40),
         "running": bool(snapshot.get("running", False)),
         "paused": bool(snapshot.get("paused", False)),
+        "run_phase": _trim_text(snapshot.get("run_phase", "idle"), limit=40),
+        "run_focus": _compact_run_focus(snapshot.get("run_focus", {})),
         "current_step": _trim_text(snapshot.get("current_step", ""), limit=160),
         "result_status": _trim_text(snapshot.get("result_status", ""), limit=40),
         "result_message": _trim_text(snapshot.get("result_message", ""), limit=240),
@@ -434,6 +450,8 @@ class _ReplayChannel:
     last_emit_at: float = field(default_factory=time.monotonic)
     latest_state: Dict[str, Any] = field(default_factory=dict)
     cursor: Dict[str, Any] = field(default_factory=dict)
+    last_frame_at: float = field(default_factory=lambda: 0.0)
+    last_frame_fingerprint: str = ""
 
 
 class LocalApiEventStream:
@@ -449,6 +467,7 @@ class LocalApiEventStream:
         replay_size: int = DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
         channel_retention_seconds: float = DEFAULT_LOCAL_EVENT_CHANNEL_RETENTION_SECONDS,
         max_channels: int = DEFAULT_LOCAL_EVENT_MAX_CHANNELS,
+        frame_min_seconds: float = DEFAULT_LOCAL_EVENT_FRAME_MIN_SECONDS,
     ):
         self.controller = controller
         self.chat_manager = chat_manager
@@ -459,6 +478,7 @@ class LocalApiEventStream:
         self.replay_size = max(2, int(replay_size))
         self.channel_retention_seconds = max(self.heartbeat_seconds, float(channel_retention_seconds))
         self.max_channels = max(4, int(max_channels))
+        self.frame_min_seconds = max(0.1, float(frame_min_seconds))
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._channels: Dict[str, _ReplayChannel] = {}
@@ -510,6 +530,36 @@ class LocalApiEventStream:
             "data": data,
         }
 
+    def _frame_event_name(self, channel: _ReplayChannel) -> str:
+        return "session.frame" if channel.session_id else "operator.frame"
+
+    def _maybe_publish_frame_locked(
+        self,
+        channel: _ReplayChannel,
+        *,
+        state: Dict[str, Any],
+        changed: List[str],
+        critical: bool = False,
+    ):
+        snapshot = state.get("snapshot", {})
+        alerts = state.get("alerts", [])
+        frame_payload = {
+            "session": state.get("session", {}),
+            "snapshot": snapshot,
+            "alerts": alerts[:3],
+            "changed": [_trim_text(item, limit=40) for item in changed if _trim_text(item, limit=40)],
+            "critical": bool(critical),
+        }
+        frame_fingerprint = _json_fingerprint(frame_payload)
+        now = time.monotonic()
+        if frame_fingerprint == channel.last_frame_fingerprint:
+            return
+        if not critical and channel.last_frame_at and (now - channel.last_frame_at) < self.frame_min_seconds:
+            return
+        self._publish_locked(channel, self._frame_event_name(channel), data=frame_payload)
+        channel.last_frame_fingerprint = frame_fingerprint
+        channel.last_frame_at = now
+
     def _state_cursor(self, state: Dict[str, Any]) -> Dict[str, Any]:
         snapshot = state.get("snapshot", {})
         return {
@@ -517,6 +567,7 @@ class LocalApiEventStream:
             "snapshot": _json_fingerprint(
                 {
                     "status": snapshot.get("status", "idle"),
+                    "run_phase": snapshot.get("run_phase", "idle"),
                     "current_step": snapshot.get("current_step", ""),
                     "result_status": snapshot.get("result_status", ""),
                     "result_message": snapshot.get("result_message", ""),
@@ -634,12 +685,15 @@ class LocalApiEventStream:
         effective_state = self._bootstrap_channel_locked(channel, state=state)
         cursor = channel.cursor
         snapshot = effective_state.get("snapshot", {})
+        changed_sections: List[str] = []
+        critical_frame = False
 
         current_session = effective_state.get("session", {})
         session_fp = _json_fingerprint(current_session)
         if session_fp != cursor.get("session", ""):
             cursor["session"] = session_fp
             self._publish_locked(channel, "session.updated", data={"session": current_session})
+            changed_sections.append("session")
 
         current_messages = effective_state.get("messages", [])
         current_message_ids = [item.get("message_id", "") for item in current_messages if item.get("message_id")]
@@ -651,6 +705,8 @@ class LocalApiEventStream:
             self._publish_locked(channel, "session.message", data={"message": message})
             if message.get("kind") == "approval":
                 self._publish_locked(channel, _approval_event_type(message), data={"message": message})
+                critical_frame = True
+            changed_sections.append("messages")
         cursor["message_ids"] = current_message_ids[-self.message_limit :]
 
         current_pending = snapshot.get("pending_approval", {})
@@ -662,9 +718,13 @@ class LocalApiEventStream:
                 "approval.needed" if current_pending.get("kind") else "approval.cleared",
                 data={"pending_approval": current_pending},
             )
+            changed_sections.append("pending_approval")
+            critical_frame = True
 
         current_task = snapshot.get("active_task", {})
         previous_task = cursor.get("task", {}) if isinstance(cursor.get("task", {}), dict) else {}
+        previous_phase = _trim_text(cursor.get("run_phase", ""), limit=40)
+        current_phase = _trim_text(snapshot.get("run_phase", "idle"), limit=40)
         if _json_fingerprint(current_task) != _json_fingerprint(previous_task):
             self._publish_locked(
                 channel,
@@ -672,15 +732,20 @@ class LocalApiEventStream:
                 data={
                     "task": current_task,
                     "status": snapshot.get("status", "idle"),
+                    "run_phase": snapshot.get("run_phase", "idle"),
+                    "run_focus": snapshot.get("run_focus", {}),
                     "current_step": snapshot.get("current_step", ""),
                     "result_status": snapshot.get("result_status", ""),
                     "result_message": snapshot.get("result_message", ""),
                 },
             )
             cursor["task"] = current_task
+            changed_sections.append("task")
+            critical_frame = critical_frame or current_phase != previous_phase or str(current_task.get("status", "")).strip() in {"paused", "completed", "failed", "blocked", "incomplete"}
         elif current_task.get("status") == "running":
             snapshot_fp = _json_fingerprint(
                 {
+                    "run_phase": snapshot.get("run_phase", "idle"),
                     "current_step": snapshot.get("current_step", ""),
                     "result_status": snapshot.get("result_status", ""),
                     "result_message": snapshot.get("result_message", ""),
@@ -693,21 +758,27 @@ class LocalApiEventStream:
                     data={
                         "task": current_task,
                         "status": snapshot.get("status", "idle"),
+                        "run_phase": snapshot.get("run_phase", "idle"),
+                        "run_focus": snapshot.get("run_focus", {}),
                         "current_step": snapshot.get("current_step", ""),
                         "result_status": snapshot.get("result_status", ""),
                         "result_message": snapshot.get("result_message", ""),
                     },
                 )
+                changed_sections.append("task_progress")
+                critical_frame = critical_frame or current_phase != previous_phase
 
         browser_fp = _json_fingerprint(snapshot.get("browser", {}))
         if browser_fp != cursor.get("browser", ""):
             cursor["browser"] = browser_fp
             self._publish_locked(channel, "browser.workflow", data={"browser": snapshot.get("browser", {})})
+            changed_sections.append("browser")
 
         desktop_fp = _json_fingerprint(snapshot.get("desktop", {}))
         if desktop_fp != cursor.get("desktop", ""):
             cursor["desktop"] = desktop_fp
             self._publish_locked(channel, "desktop.state", data={"desktop": snapshot.get("desktop", {})})
+            changed_sections.append("desktop")
 
         current_alerts = effective_state.get("alerts", [])
         current_alert_ids = [item.get("alert_id", "") for item in current_alerts if item.get("alert_id")]
@@ -717,16 +788,27 @@ class LocalApiEventStream:
             if not alert_id or alert_id in seen_alert_ids:
                 continue
             self._publish_locked(channel, "alert", data={"alert": alert})
+            changed_sections.append("alerts")
+            critical_frame = True
         cursor["alert_ids"] = current_alert_ids[-self.alert_limit :]
 
         cursor["snapshot"] = _json_fingerprint(
             {
                 "status": snapshot.get("status", "idle"),
+                "run_phase": snapshot.get("run_phase", "idle"),
                 "current_step": snapshot.get("current_step", ""),
                 "result_status": snapshot.get("result_status", ""),
                 "result_message": snapshot.get("result_message", ""),
             }
         )
+        cursor["run_phase"] = current_phase
+        if changed_sections:
+            self._maybe_publish_frame_locked(
+                channel,
+                state=effective_state,
+                changed=changed_sections,
+                critical=critical_frame,
+            )
         channel.latest_state = effective_state
         channel.last_access_at = time.monotonic()
 

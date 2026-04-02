@@ -218,6 +218,34 @@ Responsibilities:
 
 Current normalized desktop outcomes:
 
+### 7a. Active run phases and stable live updates
+
+Primary files:
+
+- `core/execution_manager.py`
+- `core/local_api_events.py`
+- `core/local_api.py`
+- `desktop-ui/src/App.tsx`
+
+Responsibilities:
+
+- expose one compact active run phase through the authoritative runtime snapshot:
+  - `idle`
+  - `planning`
+  - `awaiting_approval`
+  - `executing`
+  - `post_execution`
+- keep live updates centered on the active run instead of forcing the UI to refetch the whole conversation on every stream event
+- publish compact batched `session.frame` / `operator.frame` updates alongside important transition events
+- let the UI keep chat focus stable while a bounded run is executing
+
+Current guardrails:
+
+- important transitions such as approvals, phase changes, and terminal outcomes still emit explicit events
+- identical frame payloads are deduplicated
+- non-critical frame emissions are throttled lightly so the UI sees one coherent update frame instead of several near-identical churn events
+- the frontend uses those frames to merge session/status updates incrementally and preserve transcript scroll position unless a real new message arrives
+
 - `completed`
 - `approval_needed`
 - `blocked`

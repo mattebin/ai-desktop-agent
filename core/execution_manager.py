@@ -58,6 +58,13 @@ TASK_PROGRESS_STAGES = {
     "final_reply_rendering",
     "terminal_outcome_reached",
 }
+RUN_PHASE_VALUES = {
+    "idle",
+    "planning",
+    "awaiting_approval",
+    "executing",
+    "post_execution",
+}
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -132,6 +139,13 @@ def _normalize_progress_stage(value: Any) -> str:
     if text in TASK_PROGRESS_STAGES:
         return text
     return ""
+
+
+def _normalize_run_phase(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text in RUN_PHASE_VALUES:
+        return text
+    return "idle"
 
 
 def _normalize_schedule_status(value: Any) -> str:
@@ -3239,6 +3253,50 @@ class ExecutionManager:
             "desktop_capture": self.desktop_capture_service.status_snapshot(),
         }
 
+    def _run_phase_snapshot_locked(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        primary_task: Dict[str, Any] | None = None,
+        live_running: bool = False,
+    ) -> Dict[str, Any]:
+        current_task = primary_task if isinstance(primary_task, dict) else {}
+        progress = current_task.get("progress", {}) if isinstance(current_task.get("progress", {}), dict) else {}
+        progress_stage = _normalize_progress_stage(progress.get("stage", ""))
+        status = _normalize_status(snapshot.get("status", "idle"))
+        result_status = _normalize_status(snapshot.get("result_status", status or "idle"))
+        pending = snapshot.get("pending_approval", {}) if isinstance(snapshot.get("pending_approval", {}), dict) else {}
+
+        phase = "idle"
+        reason = "idle"
+        if pending.get("kind") or status == "paused":
+            phase = "awaiting_approval"
+            reason = "pending_approval" if pending.get("kind") else "paused"
+        elif live_running or bool(snapshot.get("running", False)) or status == "running":
+            if progress_stage in {"", "worker_started", "run_state_entered", "loop_entered", "planning_started"}:
+                phase = "planning"
+                reason = progress_stage or "planning_started"
+            else:
+                phase = "executing"
+                reason = progress_stage or "executing"
+        elif result_status in QUEUE_TERMINAL_STATUSES or result_status == "completed" or str(snapshot.get("result_message", "")).strip():
+            phase = "post_execution"
+            reason = result_status or "post_execution"
+
+        task_id = _trim_text(current_task.get("task_id", ""), limit=60)
+        session_id = self._task_session_id_locked(current_task) if current_task else self._normalize_session_id(snapshot.get("session_id", ""))
+        run_id = _trim_text(current_task.get("run_id", ""), limit=60)
+        detail = _trim_text(progress.get("detail", "") or snapshot.get("current_step", ""), limit=220)
+        return {
+            "phase": _normalize_run_phase(phase),
+            "reason": _trim_text(reason, limit=80),
+            "locked": phase == "executing" and bool(session_id),
+            "task_id": task_id,
+            "session_id": session_id,
+            "run_id": run_id,
+            "detail": detail,
+        }
+
     def get_snapshot(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         auto_start = False
         filtered_view = bool(str(session_id).strip() or str(state_scope_id).strip())
@@ -3367,6 +3425,13 @@ class ExecutionManager:
             snapshot["session_id"] = normalized_session_id
             snapshot["state_scope_id"] = normalized_scope_id
             snapshot["paused"] = bool(snapshot.get("paused", False) or queue_snapshot.get("active_task", {}).get("status") == "paused")
+            run_focus = self._run_phase_snapshot_locked(
+                snapshot,
+                primary_task=primary_task,
+                live_running=live_scope_running if filtered_view else bool(is_running),
+            )
+            snapshot["run_phase"] = run_focus.get("phase", "idle")
+            snapshot["run_focus"] = run_focus
 
         if auto_start:
             self.start_next(auto_trigger=True)

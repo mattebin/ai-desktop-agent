@@ -129,6 +129,8 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "status": str(snapshot.get("status", "")).strip() or "idle",
         "running": bool(snapshot.get("running", False)),
         "paused": bool(snapshot.get("paused", False)),
+        "run_phase": _trim_text(snapshot.get("run_phase", "idle"), limit=40),
+        "run_focus": snapshot.get("run_focus", {}),
         "current_step": _trim_text(snapshot.get("current_step", ""), limit=140),
         "goal": _trim_text(snapshot.get("goal", ""), limit=240),
         "result_status": _trim_text(snapshot.get("result_status", ""), limit=80),
@@ -208,6 +210,8 @@ def _active_task_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "active_task": snapshot.get("active_task", {}),
         "pending_approval": snapshot.get("pending_approval", {}),
+        "run_phase": _trim_text(snapshot.get("run_phase", "idle"), limit=40),
+        "run_focus": snapshot.get("run_focus", {}),
         "browser": snapshot.get("browser", {}),
         "desktop": snapshot.get("desktop", {}),
         "lifecycle": snapshot.get("lifecycle", {}),
