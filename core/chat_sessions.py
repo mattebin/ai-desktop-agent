@@ -14,6 +14,7 @@ from core.operator_behavior import (
     CHAT_MODE_FINAL,
     CHAT_MODE_NORMAL,
     CHAT_MODE_PAUSED,
+    CHAT_MODE_WORKFLOW,
     SESSION_ACTIVE_STATUSES,
     SESSION_TERMINAL_STATUSES,
     classify_chat_turn,
@@ -632,6 +633,16 @@ class ChatSessionManager:
                 f"{_trim_text(browser.get('current_title') or browser.get('current_url') or '-', limit=140)}"
             )
 
+        desktop = snapshot.get("desktop", {}) if isinstance(snapshot.get("desktop", {}), dict) else {}
+        selected_scene = desktop.get("selected_scene", {}) if isinstance(desktop.get("selected_scene", {}), dict) else {}
+        checkpoint_scene = desktop.get("checkpoint_scene", {}) if isinstance(desktop.get("checkpoint_scene", {}), dict) else {}
+        selected_scene_summary = _trim_text(selected_scene.get("summary", ""), limit=220)
+        checkpoint_scene_summary = _trim_text(checkpoint_scene.get("summary", ""), limit=220)
+        if selected_scene_summary:
+            lines.append(f"Selected desktop scene: {selected_scene_summary}")
+        if checkpoint_scene_summary:
+            lines.append(f"Checkpoint desktop scene: {checkpoint_scene_summary}")
+
         recent_items = self._recent_conversation_items_locked(session, limit=4, include_transient=False)
         if recent_items:
             lines.append("Recent conversation:")
@@ -677,11 +688,32 @@ class ChatSessionManager:
 
     def _direct_reply_locked(self, session: Dict[str, Any], snapshot: Dict[str, Any], latest_message: str, route: Dict[str, str]) -> str:
         session_context = self._chat_context_lines_locked(session, snapshot, latest_message, route)
+        desktop_vision: Dict[str, Any] = {}
+        try:
+            desktop = snapshot.get("desktop", {}) if isinstance(snapshot.get("desktop", {}), dict) else {}
+            from core.desktop_evidence import get_desktop_evidence_store
+
+            store = get_desktop_evidence_store()
+            desktop_vision = store.select_vision_context(
+                selected_summary=desktop.get("selected_evidence", {}),
+                checkpoint_summary=desktop.get("checkpoint_evidence", {}),
+                recent_summaries=desktop.get("recent_context_evidence", []),
+                purpose="desktop_approval" if str(route.get("mode", "")).strip() == CHAT_MODE_APPROVAL else "desktop_investigation",
+                prompt_text=latest_message,
+                assessment=desktop.get("selected_evidence_assessment", {}),
+                checkpoint_assessment=desktop.get("checkpoint_evidence_assessment", {}),
+                selected_scene=desktop.get("selected_scene", {}),
+                checkpoint_scene=desktop.get("checkpoint_scene", {}),
+                prefer_before_after=True,
+            )
+        except Exception:
+            desktop_vision = {}
         try:
             reply = self._get_chat_client_locked().reply_in_chat(
                 latest_message,
                 session_context=session_context,
                 mode=route.get("mode", "chat"),
+                desktop_vision=desktop_vision,
             )
         except Exception:
             reply = self._fallback_chat_reply_locked(session, snapshot, route)

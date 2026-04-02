@@ -1,18 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, RunEvent};
 
@@ -33,6 +32,7 @@ struct ManagedApiProcess {
     owner_token: String,
     owner_pid: u32,
     child_pid: u32,
+    backend_log_path: PathBuf,
 }
 
 struct ApiProcessState {
@@ -42,6 +42,7 @@ struct ApiProcessState {
     shutdown_started: AtomicBool,
     runtime_status: Mutex<DesktopRuntimeStatus>,
     log_path: PathBuf,
+    backend_log_path: Mutex<Option<PathBuf>>,
 }
 
 impl Default for ApiProcessState {
@@ -53,6 +54,7 @@ impl Default for ApiProcessState {
             shutdown_started: AtomicBool::new(false),
             runtime_status: Mutex::new(DesktopRuntimeStatus::default()),
             log_path: default_runtime_log_path(),
+            backend_log_path: Mutex::new(None),
         }
     }
 }
@@ -65,6 +67,7 @@ struct EnsureLocalApiResponse {
     managed_by_desktop: bool,
     runtime_status: DesktopRuntimeStatus,
     log_path: String,
+    backend_log_path: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -85,6 +88,11 @@ struct DesktopRuntimeStatus {
 struct HealthEnvelope {
     ok: bool,
     data: HealthPayload,
+}
+
+#[derive(Deserialize, Default)]
+struct BasicEnvelope {
+    ok: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -127,6 +135,11 @@ struct DesiredRuntime {
     active_model: String,
     reasoning_effort: String,
     settings_path: String,
+}
+
+struct SpawnedLocalApi {
+    child: Child,
+    backend_log_path: PathBuf,
 }
 
 fn main() {
@@ -193,11 +206,15 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
                     started: false,
                     managed_by_desktop: true,
                     log_path: normalize_path_string(&state.log_path),
+                    backend_log_path: Some(normalize_path_string(&process.backend_log_path)),
                     runtime_status,
                 });
             }
         }
         let release = release_managed_process(&mut guard, &state.owner_token, state.owner_pid)?;
+        if !matches!(release, ManagedProcessRelease::ReleasedUnowned { .. }) {
+            set_backend_log_path(state.inner(), None);
+        }
         log_release_decision(state.inner(), &release, "bootstrap_refresh");
     }
 
@@ -222,6 +239,7 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
             started: false,
             managed_by_desktop: runtime_status.managed_by_desktop,
             log_path: normalize_path_string(&state.log_path),
+            backend_log_path: current_backend_log_path(state.inner()).map(|path| normalize_path_string(&path)),
             runtime_status,
         });
     }
@@ -262,7 +280,7 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
 
     {
         let mut guard = state.process.lock().map_err(|_| "Unable to lock local API process state.")?;
-        let child = match spawn_local_api(&repo_root, &host, spawn_port, &state.owner_token, state.owner_pid) {
+        let spawned = match spawn_local_api(&repo_root, &host, spawn_port, &state.owner_token, state.owner_pid) {
             Ok(child) => child,
             Err(error) => {
                 commit_runtime_status(
@@ -282,24 +300,38 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
                 return Err(error);
             }
         };
-        let child_pid = child.id();
+        let child_pid = spawned.child.id();
+        set_backend_log_path(state.inner(), Some(spawned.backend_log_path.clone()));
         *guard = Some(ManagedApiProcess {
             child_pid,
-            child,
+            child: spawned.child,
             base_url: base_url.clone(),
             owner_token: state.owner_token.clone(),
             owner_pid: state.owner_pid,
+            backend_log_path: spawned.backend_log_path,
         });
     }
 
-    if let Err(error) = wait_for_api(&base_url, Duration::from_secs(12), &desired_runtime) {
+    thread::sleep(Duration::from_millis(450));
+    let exited_early = state
+        .process
+        .lock()
+        .ok()
+        .and_then(|mut guard| {
+            guard
+                .as_mut()
+                .and_then(|process| process.child.try_wait().ok().flatten().map(|status| format!("{status}")))
+        });
+    if let Some(status) = exited_early {
+        let diagnostics = startup_failure_diagnostics(state.inner(), &base_url, &desired_runtime);
         let _ = shutdown_owned_api_process(state.inner());
+        let error = format!("The desktop-owned backend child exited before the local API became reachable. Exit status: {status}.{diagnostics}");
         commit_runtime_status(
             state.inner(),
             DesktopRuntimeStatus {
                 backend_state: "unhealthy".to_string(),
                 decision: "failed_to_start_owned_child".to_string(),
-                detail: format!("Started a desktop-owned backend but it did not become healthy in time: {error}"),
+                detail: error.clone(),
                 base_url: base_url.clone(),
                 attached: false,
                 managed_by_desktop: false,
@@ -321,15 +353,15 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
                 "started_owned_child_on_safe_port".to_string()
             },
             detail: if spawn_port == default_port {
-                "Started a desktop-owned local API on the default port.".to_string()
+                "Started a desktop-owned local API on the default port. The desktop UI will wait for the API to become reachable before loading conversations.".to_string()
             } else {
-                "Started a desktop-owned local API on a free local port because the default port was unavailable.".to_string()
+                "Started a desktop-owned local API on a free local port because the default port was unavailable. The desktop UI will wait for the API to become reachable before loading conversations.".to_string()
             },
             base_url: base_url.clone(),
             attached: true,
             managed_by_desktop: true,
             ownership_confirmed: true,
-            api_pid: api_health(&base_url).as_ref().and_then(infer_api_pid_from_health),
+            api_pid: None,
             child_pid: current_managed_child_pid(state.inner()),
         },
     );
@@ -339,6 +371,7 @@ fn ensure_local_api(state: tauri::State<'_, ApiProcessState>) -> Result<EnsureLo
         started: true,
         managed_by_desktop: true,
         log_path: normalize_path_string(&state.log_path),
+        backend_log_path: current_backend_log_path(state.inner()).map(|path| normalize_path_string(&path)),
         runtime_status,
     })
 }
@@ -353,15 +386,21 @@ fn local_api_base_url(host: &str, port: u16) -> String {
 }
 
 fn api_health(base_url: &str) -> Option<HealthPayload> {
-    let client = Client::builder()
-        .timeout(Duration::from_millis(900))
-        .build()
+    let (host, port) = parse_local_api_endpoint(base_url)?;
+    let address = format!("{host}:{port}");
+    let mut stream = TcpStream::connect_timeout(&address.parse().ok()?, Duration::from_millis(900)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
+    stream
+        .write_all(
+            format!(
+                "GET /health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+            )
+            .as_bytes(),
+        )
         .ok()?;
-    let response = client.get(format!("{base_url}/health")).send().ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body = response.text().ok()?;
+
+    let body = read_http_json_body(&mut stream)?;
     let parsed = serde_json::from_str::<HealthEnvelope>(&body).ok()?;
     if !parsed.ok {
         return None;
@@ -369,15 +408,121 @@ fn api_health(base_url: &str) -> Option<HealthPayload> {
     Some(parsed.data)
 }
 
-fn wait_for_api(base_url: &str, timeout: Duration, desired_runtime: &DesiredRuntime) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if api_matches_desired_runtime(base_url, desired_runtime) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(250));
+fn request_api_shutdown(base_url: &str, owner_token: &str, owner_pid: u32) -> bool {
+    let Some((host, port)) = parse_local_api_endpoint(base_url) else {
+        return false;
+    };
+    let address = format!("{host}:{port}");
+    let Some(socket_address) = address.parse().ok() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, Duration::from_millis(1200)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
+    let body = serde_json::json!({
+        "owner_token": owner_token,
+        "owner_pid": owner_pid,
+    })
+    .to_string();
+    let request = format!(
+        "POST /shutdown HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.as_bytes().len(),
+        body
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
     }
-    Err("The local API did not become healthy with the expected runtime before timeout.".to_string())
+    let Some(response_body) = read_http_json_body(&mut stream) else {
+        return false;
+    };
+    serde_json::from_str::<BasicEnvelope>(&response_body)
+        .map(|parsed| parsed.ok)
+        .unwrap_or(false)
+}
+
+fn parse_local_api_endpoint(base_url: &str) -> Option<(String, u16)> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let target = trimmed.strip_prefix("http://")?;
+    let (host, port) = target.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    Some((host.to_string(), port))
+}
+
+fn read_http_json_body(stream: &mut TcpStream) -> Option<String> {
+    let mut response = Vec::new();
+    let mut content_length: Option<usize> = None;
+    let separator = b"\r\n\r\n";
+    let mut buffer = [0_u8; 4096];
+
+    loop {
+        let bytes_read = stream.read(&mut buffer).ok()?;
+        if bytes_read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..bytes_read]);
+        if let Some(index) = response.windows(separator.len()).position(|window| window == separator) {
+            if content_length.is_none() {
+                let headers = String::from_utf8(response[..index].to_vec()).ok()?;
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            return value.trim().parse::<usize>().ok();
+                        }
+                        None
+                    });
+            }
+            let body = &response[index + separator.len()..];
+            if let Some(expected_length) = content_length {
+                if body.len() >= expected_length {
+                    return String::from_utf8(body[..expected_length].to_vec()).ok();
+                }
+            }
+        }
+    }
+
+    extract_http_json_body(&response)
+}
+
+fn extract_http_json_body(response: &[u8]) -> Option<String> {
+    let separator = b"\r\n\r\n";
+    let index = response.windows(separator.len()).position(|window| window == separator)?;
+    let body = &response[index + separator.len()..];
+    String::from_utf8(body.to_vec()).ok()
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let start = SystemTime::now();
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        if SystemTime::now()
+            .duration_since(start)
+            .unwrap_or_default()
+            >= timeout
+        {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+#[cfg(windows)]
+fn stop_process_tree(pid: u32) -> bool {
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    status.map(|value| value.success()).unwrap_or(false)
 }
 
 fn port_available(host: &str, port: u16) -> bool {
@@ -387,12 +532,39 @@ fn port_available(host: &str, port: u16) -> bool {
     }).unwrap_or(false)
 }
 
-fn spawn_local_api(repo_root: &Path, host: &str, port: u16, owner_token: &str, owner_pid: u32) -> Result<Child, String> {
+fn spawn_local_api(repo_root: &Path, host: &str, port: u16, owner_token: &str, owner_pid: u32) -> Result<SpawnedLocalApi, String> {
     let python = locate_python(repo_root).unwrap_or_else(|| OsString::from("python"));
     let main_py = repo_root.join("main.py");
     if !main_py.exists() {
         return Err("The local operator main.py entrypoint was not found.".to_string());
     }
+
+    let backend_log_path = next_backend_log_path(repo_root);
+    if let Some(parent) = backend_log_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("Unable to prepare local API log directory: {error}"))?;
+    }
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&backend_log_path)
+        .map_err(|error| format!("Unable to open the local API backend log: {error}"))?;
+    let stdout_log = log_file
+        .try_clone()
+        .map_err(|error| format!("Unable to prepare the local API stdout log: {error}"))?;
+    let stderr_log = log_file
+        .try_clone()
+        .map_err(|error| format!("Unable to prepare the local API stderr log: {error}"))?;
+    let _ = writeln!(
+        log_file,
+        "[bootstrap] repo_root={} python={} main={} host={} port={} owner_token={} owner_pid={}",
+        repo_root.display(),
+        PathBuf::from(&python).display(),
+        main_py.display(),
+        host,
+        port,
+        owner_token,
+        owner_pid,
+    );
 
     let mut command = Command::new(python);
     command
@@ -407,15 +579,20 @@ fn spawn_local_api(repo_root: &Path, host: &str, port: u16, owner_token: &str, o
         .env("AI_OPERATOR_DESKTOP_OWNER_TOKEN", owner_token)
         .env("AI_OPERATOR_DESKTOP_OWNER_PID", owner_pid.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log));
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    command
+    let child = command
         .spawn()
-        .map_err(|error| format!("Unable to launch the local API process: {error}"))
+        .map_err(|error| format!("Unable to launch the local API process: {error}"))?;
+
+    Ok(SpawnedLocalApi {
+        child,
+        backend_log_path,
+    })
 }
 
 fn pick_free_port(host: &str) -> Result<u16, String> {
@@ -583,6 +760,9 @@ fn shutdown_owned_api_process(state: &ApiProcessState) -> Result<bool, String> {
         .lock()
         .map_err(|_| "Unable to lock local API process state.")?;
     let release = release_managed_process(&mut guard, &state.owner_token, state.owner_pid)?;
+    if !matches!(release, ManagedProcessRelease::ReleasedUnowned { .. }) {
+        set_backend_log_path(state, None);
+    }
     let stopped = matches!(release, ManagedProcessRelease::Stopped { .. });
     log_release_decision(state, &release, "shutdown");
     Ok(stopped)
@@ -620,6 +800,18 @@ fn release_managed_process(
         return Ok(ManagedProcessRelease::AlreadyExited { base_url, child_pid });
     }
 
+    if request_api_shutdown(&process.base_url, owner_token, owner_pid)
+        && wait_for_child_exit(&mut process.child, Duration::from_secs(4))
+    {
+        return Ok(ManagedProcessRelease::Stopped { base_url, child_pid });
+    }
+
+    #[cfg(windows)]
+    if stop_process_tree(process.child_pid) {
+        let _ = process.child.wait();
+        return Ok(ManagedProcessRelease::Stopped { base_url, child_pid });
+    }
+
     process
         .child
         .kill()
@@ -650,6 +842,31 @@ fn current_managed_child_pid(state: &ApiProcessState) -> Option<u32> {
         .lock()
         .ok()
         .and_then(|guard| guard.as_ref().map(|process| process.child_pid))
+}
+
+fn current_backend_log_path(state: &ApiProcessState) -> Option<PathBuf> {
+    state
+        .backend_log_path
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().cloned())
+}
+
+fn set_backend_log_path(state: &ApiProcessState, value: Option<PathBuf>) {
+    if let Ok(mut guard) = state.backend_log_path.lock() {
+        *guard = value;
+    }
+}
+
+fn next_backend_log_path(repo_root: &Path) -> PathBuf {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    repo_root
+        .join("data")
+        .join("local_api_runtime")
+        .join(format!("local-api-{timestamp_ms}.log"))
 }
 
 fn infer_api_pid_from_health(health: &HealthPayload) -> Option<u32> {
@@ -721,6 +938,67 @@ fn append_runtime_log(state: &ApiProcessState, status: &DesktopRuntimeStatus) {
     }
 }
 
+fn describe_runtime_observation(health: &HealthPayload, desired_runtime: &DesiredRuntime) -> String {
+    let runtime = health.runtime.as_ref();
+    let active_model = normalize_text(runtime.and_then(|value| value.active_model.as_deref()).unwrap_or(""));
+    let reasoning_effort = normalize_text(runtime.and_then(|value| value.reasoning_effort.as_deref()).unwrap_or(""));
+    let settings_path = normalize_path_string(Path::new(runtime.and_then(|value| value.settings_path.as_deref()).unwrap_or("")));
+
+    format!(
+        "Observed runtime model='{active_model}', reasoning='{reasoning_effort}', settings='{settings_path}'. Expected model='{}', reasoning='{}', settings='{}'.",
+        desired_runtime.active_model,
+        desired_runtime.reasoning_effort,
+        desired_runtime.settings_path,
+    )
+}
+
+fn read_log_tail(path: &Path, limit: usize) -> String {
+    fs::read_to_string(path)
+        .ok()
+        .map(|body| {
+            let lines = body.lines().collect::<Vec<_>>();
+            let start = lines.len().saturating_sub(limit);
+            lines[start..].join(" | ")
+        })
+        .unwrap_or_default()
+}
+
+fn startup_failure_diagnostics(state: &ApiProcessState, base_url: &str, desired_runtime: &DesiredRuntime) -> String {
+    let process_state = state
+        .process
+        .lock()
+        .ok()
+        .and_then(|mut guard| {
+            guard.as_mut().and_then(|process| {
+                process
+                    .child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .map(|status| format!(" Child exited early with status: {status}."))
+            })
+        })
+        .unwrap_or_default();
+
+    let observed = api_health(base_url)
+        .as_ref()
+        .map(|health| format!(" {}", describe_runtime_observation(health, desired_runtime)))
+        .unwrap_or_else(|| " No matching /health response was available at failure time.".to_string());
+
+    let backend_log = current_backend_log_path(state)
+        .map(|path| {
+            let tail = read_log_tail(&path, 16);
+            if tail.is_empty() {
+                format!(" Backend log: {}.", path.display())
+            } else {
+                format!(" Backend log: {}. Tail: {}.", path.display(), tail)
+            }
+        })
+        .unwrap_or_default();
+
+    format!("{process_state}{observed}{backend_log}")
+}
+
 fn log_release_decision(state: &ApiProcessState, release: &ManagedProcessRelease, phase: &str) {
     let status = match release {
         ManagedProcessRelease::NotPresent => DesktopRuntimeStatus {
@@ -777,5 +1055,8 @@ fn normalize_text(value: &str) -> String {
 
 fn normalize_path_string(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    resolved.to_string_lossy().replace('/', "\\").to_ascii_lowercase()
+    let normalized = resolved.to_string_lossy().replace('/', "\\");
+    normalized
+        .trim_start_matches(r"\\?\")
+        .to_ascii_lowercase()
 }

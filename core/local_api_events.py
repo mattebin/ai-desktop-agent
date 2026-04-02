@@ -34,6 +34,7 @@ def _json_fingerprint(value: Any) -> str:
 
 def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
     task = task if isinstance(task, dict) else {}
+    progress = task.get("progress", {}) if isinstance(task.get("progress", {}), dict) else {}
     return {
         "task_id": _trim_text(task.get("task_id", ""), limit=60),
         "status": _trim_text(task.get("status", ""), limit=40),
@@ -42,6 +43,34 @@ def _compact_task(task: Dict[str, Any] | None) -> Dict[str, Any]:
         "run_id": _trim_text(task.get("run_id", ""), limit=60),
         "approval_needed": bool(task.get("approval_needed", False)),
         "approval_reason": _trim_text(task.get("approval_reason", ""), limit=180),
+        "progress": {
+            "stage": _trim_text(progress.get("stage", ""), limit=60),
+            "detail": _trim_text(progress.get("detail", ""), limit=220),
+            "result_status": _trim_text(progress.get("result_status", ""), limit=40),
+            "at": _trim_text(progress.get("at", ""), limit=40),
+            "worker_started_at": _trim_text(progress.get("worker_started_at", ""), limit=40),
+            "run_state_entered_at": _trim_text(progress.get("run_state_entered_at", ""), limit=40),
+            "first_loop_at": _trim_text(progress.get("first_loop_at", ""), limit=40),
+            "first_step_at": _trim_text(progress.get("first_step_at", ""), limit=40),
+            "first_result_at": _trim_text(progress.get("first_result_at", ""), limit=40),
+            "terminal_at": _trim_text(progress.get("terminal_at", ""), limit=40),
+            "meaningful_progress": bool(progress.get("meaningful_progress", False)),
+        },
+    }
+
+
+def _compact_lifecycle(lifecycle: Dict[str, Any] | None) -> Dict[str, Any]:
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    return {
+        "event": _trim_text(lifecycle.get("event", ""), limit=60),
+        "task_id": _trim_text(lifecycle.get("task_id", ""), limit=60),
+        "session_id": _trim_text(lifecycle.get("session_id", ""), limit=80),
+        "state_scope_id": _trim_text(lifecycle.get("state_scope_id", ""), limit=120),
+        "reason": _trim_text(lifecycle.get("reason", ""), limit=80),
+        "detail": _trim_text(lifecycle.get("detail", ""), limit=220),
+        "from_status": _trim_text(lifecycle.get("from_status", ""), limit=40),
+        "to_status": _trim_text(lifecycle.get("to_status", ""), limit=40),
+        "timestamp": _trim_text(lifecycle.get("timestamp", ""), limit=40),
     }
 
 
@@ -52,6 +81,25 @@ def _compact_pending(pending: Dict[str, Any] | None) -> Dict[str, Any]:
         "reason": _trim_text(pending.get("reason", ""), limit=180),
         "summary": _trim_text(pending.get("summary", ""), limit=180),
         "step": _trim_text(pending.get("step", ""), limit=120),
+        "tool": _trim_text(pending.get("tool", ""), limit=120),
+        "target": _trim_text(pending.get("target", ""), limit=180),
+        "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
+        "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
+        "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
+        "evidence_assessment": {
+            "state": _trim_text(pending.get("evidence_assessment", {}).get("state", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(pending.get("evidence_assessment", {}).get("reason", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(pending.get("evidence_assessment", {}).get("summary", "") if isinstance(pending.get("evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(pending.get("evidence_assessment", {}).get("sufficient", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(pending.get("evidence_assessment", {}).get("needs_refresh", False)) if isinstance(pending.get("evidence_assessment", {}), dict) else False,
+        },
+        "scene_preview": {
+            "scene_class": _trim_text(pending.get("scene_preview", {}).get("scene_class", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(pending.get("scene_preview", {}).get("workflow_state", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "reason": _trim_text(pending.get("scene_preview", {}).get("reason", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=40),
+            "summary": _trim_text(pending.get("scene_preview", {}).get("summary", "") if isinstance(pending.get("scene_preview", {}), dict) else "", limit=220),
+            "direct_image_helpful": bool(pending.get("scene_preview", {}).get("direct_image_helpful", False)) if isinstance(pending.get("scene_preview", {}), dict) else False,
+        },
     }
 
 
@@ -85,7 +133,135 @@ def _compact_desktop(desktop: Dict[str, Any] | None) -> Dict[str, Any]:
         "checkpoint_tool": _trim_text(desktop.get("checkpoint_tool", ""), limit=80),
         "checkpoint_reason": _trim_text(desktop.get("checkpoint_reason", ""), limit=180),
         "checkpoint_target": _trim_text(desktop.get("checkpoint_target", ""), limit=180),
+        "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
         "screenshot_path": _trim_text(desktop.get("screenshot_path", ""), limit=220),
+        "evidence_id": _trim_text(desktop.get("evidence_id", ""), limit=80),
+        "evidence_summary": _trim_text(desktop.get("evidence_summary", ""), limit=220),
+        "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
+        "evidence_reason": _trim_text(desktop.get("evidence_reason", ""), limit=80),
+        "evidence_timestamp": _trim_text(desktop.get("evidence_timestamp", ""), limit=40),
+        "selected_evidence": {
+            "evidence_id": _trim_text(desktop.get("selected_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("selected_evidence", {}).get("summary", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=220),
+            "reason": _trim_text(desktop.get("selected_evidence", {}).get("reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
+            "selection_reason": _trim_text(desktop.get("selected_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("selected_evidence", {}), dict) else "", limit=40),
+        },
+        "recent_context_evidence": [
+            {
+                "evidence_id": _trim_text(item.get("evidence_id", ""), limit=80),
+                "summary": _trim_text(item.get("summary", ""), limit=180),
+                "importance": _trim_text(item.get("importance", ""), limit=40),
+                "capture_mode": _trim_text(item.get("capture_mode", ""), limit=40),
+            }
+            for item in list(desktop.get("recent_context_evidence", []))[:3]
+            if isinstance(item, dict)
+        ],
+        "selected_evidence_assessment": {
+            "state": _trim_text(desktop.get("selected_evidence_assessment", {}).get("state", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_evidence_assessment", {}).get("reason", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(desktop.get("selected_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(desktop.get("selected_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("selected_evidence_assessment", {}), dict) else False,
+        },
+        "selected_scene": {
+            "scene_class": _trim_text(desktop.get("selected_scene", {}).get("scene_class", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(desktop.get("selected_scene", {}).get("workflow_state", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_scene", {}).get("reason", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_scene", {}).get("summary", "") if isinstance(desktop.get("selected_scene", {}), dict) else "", limit=220),
+            "scene_changed": bool(desktop.get("selected_scene", {}).get("scene_changed", False)) if isinstance(desktop.get("selected_scene", {}), dict) else False,
+            "direct_image_helpful": bool(desktop.get("selected_scene", {}).get("direct_image_helpful", False)) if isinstance(desktop.get("selected_scene", {}), dict) else False,
+        },
+        "selected_vision": {
+            "mode": _trim_text(desktop.get("selected_vision", {}).get("mode", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("selected_vision", {}).get("reason", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("selected_vision", {}).get("summary", "") if isinstance(desktop.get("selected_vision", {}), dict) else "", limit=220),
+            "needs_direct_image": bool(desktop.get("selected_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("selected_vision", {}), dict) else False,
+        },
+        "checkpoint_evidence": {
+            "evidence_id": _trim_text(desktop.get("checkpoint_evidence", {}).get("evidence_id", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("checkpoint_evidence", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=220),
+            "reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
+            "selection_reason": _trim_text(desktop.get("checkpoint_evidence", {}).get("selection_reason", "") if isinstance(desktop.get("checkpoint_evidence", {}), dict) else "", limit=40),
+        },
+        "checkpoint_evidence_assessment": {
+            "state": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("state", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("reason", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_evidence_assessment", {}).get("summary", "") if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else "", limit=220),
+            "sufficient": bool(desktop.get("checkpoint_evidence_assessment", {}).get("sufficient", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
+            "needs_refresh": bool(desktop.get("checkpoint_evidence_assessment", {}).get("needs_refresh", False)) if isinstance(desktop.get("checkpoint_evidence_assessment", {}), dict) else False,
+        },
+        "checkpoint_scene": {
+            "scene_class": _trim_text(desktop.get("checkpoint_scene", {}).get("scene_class", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "workflow_state": _trim_text(desktop.get("checkpoint_scene", {}).get("workflow_state", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_scene", {}).get("reason", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_scene", {}).get("summary", "") if isinstance(desktop.get("checkpoint_scene", {}), dict) else "", limit=220),
+            "scene_changed": bool(desktop.get("checkpoint_scene", {}).get("scene_changed", False)) if isinstance(desktop.get("checkpoint_scene", {}), dict) else False,
+            "direct_image_helpful": bool(desktop.get("checkpoint_scene", {}).get("direct_image_helpful", False)) if isinstance(desktop.get("checkpoint_scene", {}), dict) else False,
+        },
+        "checkpoint_vision": {
+            "mode": _trim_text(desktop.get("checkpoint_vision", {}).get("mode", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("checkpoint_vision", {}).get("reason", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=40),
+            "summary": _trim_text(desktop.get("checkpoint_vision", {}).get("summary", "") if isinstance(desktop.get("checkpoint_vision", {}), dict) else "", limit=220),
+            "needs_direct_image": bool(desktop.get("checkpoint_vision", {}).get("needs_direct_image", False)) if isinstance(desktop.get("checkpoint_vision", {}), dict) else False,
+        },
+        "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
+        "latest_recovery": {
+            "state": _trim_text(desktop.get("latest_recovery", {}).get("state", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_recovery", {}).get("reason", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_recovery", {}).get("summary", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=220),
+            "strategy": _trim_text(desktop.get("latest_recovery", {}).get("strategy", "") if isinstance(desktop.get("latest_recovery", {}), dict) else "", limit=60),
+        },
+        "latest_window_readiness": {
+            "state": _trim_text(desktop.get("latest_window_readiness", {}).get("state", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_window_readiness", {}).get("reason", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_window_readiness", {}).get("summary", "") if isinstance(desktop.get("latest_window_readiness", {}), dict) else "", limit=220),
+        },
+        "latest_visual_stability": {
+            "state": _trim_text(desktop.get("latest_visual_stability", {}).get("state", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=40),
+            "reason": _trim_text(desktop.get("latest_visual_stability", {}).get("reason", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=60),
+            "summary": _trim_text(desktop.get("latest_visual_stability", {}).get("summary", "") if isinstance(desktop.get("latest_visual_stability", {}), dict) else "", limit=220),
+        },
+        "latest_process_context": {
+            "process_name": _trim_text(desktop.get("latest_process_context", {}).get("process_name", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=120),
+            "status": _trim_text(desktop.get("latest_process_context", {}).get("status", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=60),
+            "running": bool(desktop.get("latest_process_context", {}).get("running", False)) if isinstance(desktop.get("latest_process_context", {}), dict) else False,
+            "summary": _trim_text(desktop.get("latest_process_context", {}).get("summary", "") if isinstance(desktop.get("latest_process_context", {}), dict) else "", limit=220),
+        },
+        "latest_mouse_action": {
+            "action": _trim_text(desktop.get("latest_mouse_action", {}).get("action", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=40),
+            "button": _trim_text(desktop.get("latest_mouse_action", {}).get("button", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=20),
+            "click_count": int(desktop.get("latest_mouse_action", {}).get("click_count", 0) or 0) if isinstance(desktop.get("latest_mouse_action", {}), dict) else 0,
+            "coordinate_mode": _trim_text(desktop.get("latest_mouse_action", {}).get("coordinate_mode", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=40),
+            "mapping_reason": _trim_text(desktop.get("latest_mouse_action", {}).get("mapping_reason", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=80),
+            "monitor": _trim_text(desktop.get("latest_mouse_action", {}).get("monitor", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=120),
+            "point": _trim_text(desktop.get("latest_mouse_action", {}).get("point", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=80),
+            "summary": _trim_text(desktop.get("latest_mouse_action", {}).get("summary", "") if isinstance(desktop.get("latest_mouse_action", {}), dict) else "", limit=220),
+        },
+        "latest_process_action": {
+            "action": _trim_text(desktop.get("latest_process_action", {}).get("action", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=40),
+            "pid": int(desktop.get("latest_process_action", {}).get("pid", 0) or 0) if isinstance(desktop.get("latest_process_action", {}), dict) else 0,
+            "process_name": _trim_text(desktop.get("latest_process_action", {}).get("process_name", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=120),
+            "owned": bool(desktop.get("latest_process_action", {}).get("owned", False)) if isinstance(desktop.get("latest_process_action", {}), dict) else False,
+            "owned_label": _trim_text(desktop.get("latest_process_action", {}).get("owned_label", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=120),
+            "summary": _trim_text(desktop.get("latest_process_action", {}).get("summary", "") if isinstance(desktop.get("latest_process_action", {}), dict) else "", limit=220),
+        },
+        "latest_command_result": {
+            "command": _trim_text(desktop.get("latest_command_result", {}).get("command", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=220),
+            "shell_kind": _trim_text(desktop.get("latest_command_result", {}).get("shell_kind", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=40),
+            "exit_code": int(desktop.get("latest_command_result", {}).get("exit_code", 0) or 0) if isinstance(desktop.get("latest_command_result", {}), dict) else 0,
+            "timed_out": bool(desktop.get("latest_command_result", {}).get("timed_out", False)) if isinstance(desktop.get("latest_command_result", {}), dict) else False,
+            "summary": _trim_text(desktop.get("latest_command_result", {}).get("summary", "") if isinstance(desktop.get("latest_command_result", {}), dict) else "", limit=220),
+        },
+        "latest_processes": [
+            {
+                "pid": int(item.get("pid", 0) or 0),
+                "process_name": _trim_text(item.get("process_name", ""), limit=120),
+                "status": _trim_text(item.get("status", ""), limit=60),
+                "owned": bool(item.get("owned", False)),
+            }
+            for item in list(desktop.get("latest_processes", []))[:4]
+            if isinstance(item, dict)
+        ],
     }
 
 
@@ -136,6 +312,25 @@ def _compact_alert(alert: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
+def _compact_desktop_outcome(outcome: Dict[str, Any] | None) -> Dict[str, Any]:
+    outcome = outcome if isinstance(outcome, dict) else {}
+    return {
+        "outcome": _trim_text(outcome.get("outcome", ""), limit=60),
+        "status": _trim_text(outcome.get("status", ""), limit=40),
+        "terminal": bool(outcome.get("terminal", False)),
+        "reason": _trim_text(outcome.get("reason", ""), limit=60),
+        "summary": _trim_text(outcome.get("summary", ""), limit=220),
+        "scene_class": _trim_text(outcome.get("scene_class", ""), limit=40),
+        "workflow_state": _trim_text(outcome.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(outcome.get("readiness_state", ""), limit=40),
+        "recovery_state": _trim_text(outcome.get("recovery_state", ""), limit=40),
+        "recovery_reason": _trim_text(outcome.get("recovery_reason", ""), limit=60),
+        "recovery_strategy": _trim_text(outcome.get("recovery_strategy", ""), limit=80),
+        "attempt_count": int(outcome.get("attempt_count", 0) or 0),
+        "max_attempts": int(outcome.get("max_attempts", 0) or 0),
+    }
+
+
 def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     latest_run = snapshot.get("latest_run", {}) if isinstance(snapshot.get("latest_run", {}), dict) else {}
@@ -150,6 +345,7 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
         "pending_approval": _compact_pending(snapshot.get("pending_approval", {})),
         "browser": _compact_browser(snapshot.get("browser", {})),
         "desktop": _compact_desktop(snapshot.get("desktop", {})),
+        "lifecycle": _compact_lifecycle(snapshot.get("lifecycle", {})),
         "latest_run": {
             "run_id": _trim_text(latest_run.get("run_id", ""), limit=60),
             "final_status": _trim_text(latest_run.get("final_status", ""), limit=40),

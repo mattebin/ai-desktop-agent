@@ -16,6 +16,9 @@ from core.alerts import (
     alert_counts,
     alert_summary,
 )
+from core.desktop_capture_service import DesktopCaptureService
+from core.file_watch_backend import FILE_WATCH_SUPPORTED_CONDITIONS, create_file_watch_backend
+from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID
 from core.state import MAX_TASK_GOAL_CHARS, MAX_TASK_REPLACEMENT_GOAL_CHARS, TaskState
 from core.watchers import (
@@ -34,6 +37,8 @@ DEFAULT_MAX_QUEUE_ITEMS = 24
 DEFAULT_SCHEDULED_STATE_PATH = "data/scheduled_tasks.json"
 DEFAULT_MAX_SCHEDULED_ITEMS = 24
 DEFAULT_SCHEDULER_POLL_SECONDS = 5
+DEFAULT_TASK_STARTUP_TIMEOUT_SECONDS = 45
+DEFAULT_TASK_POST_RESULT_TIMEOUT_SECONDS = 30
 QUEUE_ACTIVE_STATUSES = {"running", "paused"}
 QUEUE_RESUMABLE_STATUSES = {"paused", "deferred"}
 QUEUE_TERMINAL_STATUSES = {"completed", "failed", "blocked", "incomplete", "stopped", "needs_attention", "superseded", "deferred"}
@@ -42,6 +47,17 @@ SCHEDULE_ACTIVE_STATUSES = {"scheduled", "queued", "running", "paused", "deferre
 SCHEDULE_ALLOWED_STATUSES = {"scheduled"} | QUEUE_ALLOWED_STATUSES
 SCHEDULE_RECURRENCE_VALUES = {"once", "daily"}
 TASK_CONTROL_ACTIONS = {"stop", "defer", "supersede"}
+TASK_PROGRESS_STAGES = {
+    "",
+    "worker_started",
+    "run_state_entered",
+    "loop_entered",
+    "planning_started",
+    "tool_step_attempted",
+    "tool_result_recorded",
+    "final_reply_rendering",
+    "terminal_outcome_reached",
+}
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -111,6 +127,13 @@ def _normalize_status(value: Any) -> str:
     return "queued"
 
 
+def _normalize_progress_stage(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text in TASK_PROGRESS_STAGES:
+        return text
+    return ""
+
+
 def _normalize_schedule_status(value: Any) -> str:
     text = str(value).strip().lower()
     if text in SCHEDULE_ALLOWED_STATUSES:
@@ -162,6 +185,17 @@ def _normalize_task_item(value: Any) -> Dict[str, Any]:
         "replacement_task_id": _trim_text(value.get("replacement_task_id", ""), limit=60),
         "replacement_goal": _trim_text(value.get("replacement_goal", ""), limit=MAX_TASK_REPLACEMENT_GOAL_CHARS),
         "resume_available": _normalize_bool(value.get("resume_available", False)),
+        "progress_stage": _normalize_progress_stage(value.get("progress_stage", "")),
+        "progress_detail": _trim_text(value.get("progress_detail", ""), limit=220),
+        "progress_result_status": _trim_text(value.get("progress_result_status", ""), limit=40),
+        "progress_at": _trim_text(value.get("progress_at", ""), limit=40),
+        "worker_started_at": _trim_text(value.get("worker_started_at", ""), limit=40),
+        "run_state_entered_at": _trim_text(value.get("run_state_entered_at", ""), limit=40),
+        "first_loop_at": _trim_text(value.get("first_loop_at", ""), limit=40),
+        "first_step_at": _trim_text(value.get("first_step_at", ""), limit=40),
+        "first_result_at": _trim_text(value.get("first_result_at", ""), limit=40),
+        "terminal_at": _trim_text(value.get("terminal_at", ""), limit=40),
+        "meaningful_progress": _normalize_bool(value.get("meaningful_progress", False)),
     }
 
 
@@ -391,6 +425,12 @@ class ExecutionManager:
         alert_state_path = self.agent.settings.get("alert_state_path", DEFAULT_ALERT_HISTORY_PATH)
         self.alert_store = AlertStore(alert_state_path, max_items=max_alert_items)
         self.scheduler_poll_seconds = max(1, int(self.agent.settings.get("scheduler_poll_seconds", DEFAULT_SCHEDULER_POLL_SECONDS)))
+        self.scheduler_backend = create_scheduler_backend(self.agent.settings)
+        self.file_watch_backend = create_file_watch_backend(self.agent.settings)
+        self.desktop_capture_service = DesktopCaptureService(
+            self.agent.settings,
+            context_getter=self._desktop_capture_context,
+        )
 
         loaded = self.queue_store.load()
         self._tasks: List[Dict[str, Any]] = list(loaded.get("tasks", []))
@@ -404,9 +444,14 @@ class ExecutionManager:
 
         self._lock = threading.RLock()
         self._worker: threading.Thread | None = None
+        self._worker_task_id: str = ""
+        self._worker_token: str = ""
+        self._worker_state: TaskState | None = None
+        self._abandoned_worker_tokens: set[str] = set()
         self._scheduler_thread: threading.Thread | None = None
         self._scheduler_stop = threading.Event()
         self._control_requests: Dict[str, Dict[str, Any]] = {}
+        self._last_lifecycle_event: Dict[str, Any] = {}
         self._state_scope_id = DEFAULT_STATE_SCOPE_ID
         active_task = self._active_task_locked()
         if active_task is not None:
@@ -422,9 +467,20 @@ class ExecutionManager:
             )
         self._last_result: Dict[str, Any] = {}
         self._last_result_message: str = ""
+        self._recent_file_watch_events: List[Dict[str, Any]] = []
+        self.task_startup_timeout_seconds = max(
+            10.0,
+            float(self.agent.settings.get("task_startup_timeout_seconds", DEFAULT_TASK_STARTUP_TIMEOUT_SECONDS)),
+        )
+        self.task_post_result_timeout_seconds = max(
+            10.0,
+            float(self.agent.settings.get("task_post_result_timeout_seconds", DEFAULT_TASK_POST_RESULT_TIMEOUT_SECONDS)),
+        )
 
         auto_start = False
         with self._lock:
+            self.scheduler_backend.sync_scheduled_tasks(self._scheduled_tasks)
+            self.file_watch_backend.sync_watches(self._watches)
             changed = self._sync_scheduled_tasks_locked()
             promoted, scheduled_auto_start = self._promote_due_scheduled_tasks_locked()
             watch_changed, watch_auto_start = self._process_watches_locked(force_check=True)
@@ -438,11 +494,24 @@ class ExecutionManager:
                 self._persist_alerts_locked()
 
         self._start_scheduler_thread()
+        self.desktop_capture_service.start()
         if auto_start:
             self.start_next(auto_trigger=True)
 
     def shutdown(self):
         self._scheduler_stop.set()
+        try:
+            self.scheduler_backend.shutdown()
+        except Exception:
+            pass
+        try:
+            self.file_watch_backend.shutdown()
+        except Exception:
+            pass
+        try:
+            self.desktop_capture_service.shutdown()
+        except Exception:
+            pass
 
     def _start_scheduler_thread(self):
         if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
@@ -452,11 +521,14 @@ class ExecutionManager:
             while not self._scheduler_stop.is_set():
                 auto_start = False
                 with self._lock:
+                    stalled_finalized = self._maybe_finalize_stalled_active_task_locked()
                     changed = self._sync_scheduled_tasks_locked()
                     promoted, scheduled_auto_start = self._promote_due_scheduled_tasks_locked()
                     watch_changed, watch_auto_start = self._process_watches_locked()
-                    auto_start = scheduled_auto_start or watch_auto_start
-                    if changed or promoted or watch_changed:
+                    auto_start = scheduled_auto_start or watch_auto_start or (
+                        stalled_finalized and self._has_queued_tasks_locked() and not self._is_running()
+                    )
+                    if stalled_finalized or changed or promoted or watch_changed:
                         self._persist_all_locked()
                 if auto_start:
                     self.start_next(auto_trigger=True)
@@ -464,6 +536,21 @@ class ExecutionManager:
 
         self._scheduler_thread = threading.Thread(target=runner, name="operator-scheduler", daemon=True)
         self._scheduler_thread.start()
+
+    def _desktop_capture_context(self) -> Dict[str, Any]:
+        with self._lock:
+            active_task = self._active_task_locked()
+            active_task_id = str((active_task or {}).get("task_id", "")).strip()
+            state = self._state
+            return {
+                "state_scope_id": str(getattr(state, "state_scope_id", "")).strip(),
+                "task_id": active_task_id,
+                "task_status": str(getattr(state, "status", "")).strip(),
+                "checkpoint_pending": bool(getattr(state, "desktop_checkpoint_pending", False)),
+                "checkpoint_tool": str(getattr(state, "desktop_checkpoint_tool", "")).strip(),
+                "checkpoint_target": str(getattr(state, "desktop_checkpoint_target", "")).strip(),
+                "active_window_title": str(getattr(state, "desktop_active_window_title", "")).strip(),
+            }
 
     def _is_running(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
@@ -476,6 +563,170 @@ class ExecutionManager:
     def _set_last_result(self, result: Dict[str, Any] | None):
         self._last_result = result if isinstance(result, dict) else {}
         self._last_result_message = str(self._last_result.get("message", "")).strip()
+
+    def _clear_worker_tracking_locked(self, *, task_id: str = "", token: str = ""):
+        expected_task_id = _trim_text(task_id, limit=60)
+        expected_token = _trim_text(token, limit=60)
+        if expected_token and self._worker_token and expected_token != self._worker_token:
+            return
+        if expected_task_id and self._worker_task_id and expected_task_id != self._worker_task_id:
+            return
+        self._worker = None
+        self._worker_task_id = ""
+        self._worker_token = ""
+        self._worker_state = None
+
+    def _task_progress_payload_locked(self, task: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not isinstance(task, dict):
+            return {}
+        return {
+            "stage": _normalize_progress_stage(task.get("progress_stage", "")),
+            "detail": _trim_text(task.get("progress_detail", ""), limit=220),
+            "result_status": _trim_text(task.get("progress_result_status", ""), limit=40),
+            "at": _trim_text(task.get("progress_at", ""), limit=40),
+            "worker_started_at": _trim_text(task.get("worker_started_at", ""), limit=40),
+            "run_state_entered_at": _trim_text(task.get("run_state_entered_at", ""), limit=40),
+            "first_loop_at": _trim_text(task.get("first_loop_at", ""), limit=40),
+            "first_step_at": _trim_text(task.get("first_step_at", ""), limit=40),
+            "first_result_at": _trim_text(task.get("first_result_at", ""), limit=40),
+            "terminal_at": _trim_text(task.get("terminal_at", ""), limit=40),
+            "meaningful_progress": bool(task.get("meaningful_progress", False)),
+        }
+
+    def _reset_task_progress_locked(self, task: Dict[str, Any], *, detail: str = ""):
+        now_text = _iso_timestamp()
+        task["progress_stage"] = "worker_started"
+        task["progress_detail"] = _trim_text(detail or "Started the bounded worker for this run.", limit=220)
+        task["progress_result_status"] = ""
+        task["progress_at"] = now_text
+        task["worker_started_at"] = now_text
+        task["run_state_entered_at"] = ""
+        task["first_loop_at"] = ""
+        task["first_step_at"] = ""
+        task["first_result_at"] = ""
+        task["terminal_at"] = ""
+        task["meaningful_progress"] = False
+
+    def _update_task_progress_locked(
+        self,
+        task: Dict[str, Any],
+        *,
+        stage: str,
+        detail: str = "",
+        result_status: str = "",
+        meaningful_progress: bool = False,
+        record_lifecycle: bool = True,
+    ) -> bool:
+        normalized_stage = _normalize_progress_stage(stage)
+        if not normalized_stage:
+            return False
+        now_text = _iso_timestamp()
+        changed = False
+        if task.get("progress_stage", "") != normalized_stage:
+            task["progress_stage"] = normalized_stage
+            changed = True
+        trimmed_detail = _trim_text(detail, limit=220)
+        if task.get("progress_detail", "") != trimmed_detail:
+            task["progress_detail"] = trimmed_detail
+            changed = True
+        trimmed_result_status = _trim_text(result_status, limit=40)
+        if task.get("progress_result_status", "") != trimmed_result_status:
+            task["progress_result_status"] = trimmed_result_status
+            changed = True
+        if task.get("progress_at", "") != now_text:
+            task["progress_at"] = now_text
+            changed = True
+
+        if normalized_stage == "worker_started" and not task.get("worker_started_at", ""):
+            task["worker_started_at"] = now_text
+            changed = True
+        if normalized_stage == "run_state_entered" and not task.get("run_state_entered_at", ""):
+            task["run_state_entered_at"] = now_text
+            changed = True
+        if normalized_stage == "loop_entered" and not task.get("first_loop_at", ""):
+            task["first_loop_at"] = now_text
+            changed = True
+        if normalized_stage == "tool_step_attempted" and not task.get("first_step_at", ""):
+            task["first_step_at"] = now_text
+            changed = True
+        if normalized_stage == "tool_result_recorded" and not task.get("first_result_at", ""):
+            task["first_result_at"] = now_text
+            changed = True
+        if normalized_stage == "terminal_outcome_reached" and not task.get("terminal_at", ""):
+            task["terminal_at"] = now_text
+            changed = True
+
+        if meaningful_progress and not bool(task.get("meaningful_progress", False)):
+            task["meaningful_progress"] = True
+            changed = True
+
+        if changed and record_lifecycle:
+            self._record_lifecycle_event_locked(
+                f"task_{normalized_stage}",
+                task=task,
+                reason=normalized_stage,
+                detail=trimmed_detail or f"Task progress advanced to {normalized_stage}.",
+                from_status=task.get("status", ""),
+                to_status=task.get("status", ""),
+            )
+        return changed
+
+    def _record_lifecycle_event_locked(
+        self,
+        event: str,
+        *,
+        task: Dict[str, Any] | None = None,
+        session_id: str = "",
+        state_scope_id: str = "",
+        reason: str = "",
+        detail: str = "",
+        from_status: str = "",
+        to_status: str = "",
+    ):
+        effective_task = task if isinstance(task, dict) else {}
+        effective_session_id = self._normalize_session_id(session_id or effective_task.get("session_id", ""))
+        effective_scope_id = self._normalize_state_scope_id(
+            state_scope_id or effective_task.get("state_scope_id", ""),
+            session_id=effective_session_id,
+        )
+        self._last_lifecycle_event = {
+            "event": _trim_text(event, limit=60),
+            "task_id": _trim_text(effective_task.get("task_id", ""), limit=60),
+            "session_id": effective_session_id,
+            "state_scope_id": effective_scope_id,
+            "reason": _trim_text(reason, limit=80),
+            "detail": _trim_text(detail, limit=220),
+            "from_status": _trim_text(from_status or effective_task.get("status", ""), limit=40),
+            "to_status": _trim_text(to_status, limit=40),
+            "timestamp": _iso_timestamp(),
+        }
+
+    def _lifecycle_matches_locked(self, event: Dict[str, Any], *, session_id: str = "", state_scope_id: str = "") -> bool:
+        if not isinstance(event, dict):
+            return False
+        normalized_session_id = self._normalize_session_id(session_id)
+        normalized_scope_id = self._normalize_state_scope_id(state_scope_id, session_id=normalized_session_id)
+        if normalized_session_id and self._normalize_session_id(event.get("session_id", "")) != normalized_session_id:
+            return False
+        if normalized_scope_id and self._normalize_state_scope_id(event.get("state_scope_id", ""), session_id=event.get("session_id", "")) != normalized_scope_id:
+            return False
+        return True
+
+    def _lifecycle_snapshot_locked(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
+        event = self._last_lifecycle_event if self._lifecycle_matches_locked(self._last_lifecycle_event, session_id=session_id, state_scope_id=state_scope_id) else {}
+        if not isinstance(event, dict):
+            event = {}
+        return {
+            "event": _trim_text(event.get("event", ""), limit=60),
+            "task_id": _trim_text(event.get("task_id", ""), limit=60),
+            "session_id": _trim_text(event.get("session_id", ""), limit=80),
+            "state_scope_id": _trim_text(event.get("state_scope_id", ""), limit=120),
+            "reason": _trim_text(event.get("reason", ""), limit=80),
+            "detail": _trim_text(event.get("detail", ""), limit=220),
+            "from_status": _trim_text(event.get("from_status", ""), limit=40),
+            "to_status": _trim_text(event.get("to_status", ""), limit=40),
+            "timestamp": _trim_text(event.get("timestamp", ""), limit=40),
+        }
 
     def _set_task_control_fields_locked(
         self,
@@ -678,8 +929,88 @@ class ExecutionManager:
                 return task
         return None
 
+    def _canonical_task_locked(self, task: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not isinstance(task, dict):
+            return None
+        task_id = _trim_text(task.get("task_id", ""), limit=60)
+        if not task_id:
+            return None
+        return self._find_task_locked(task_id) or task
+
+    def _reconcile_active_task_locked(self) -> tuple[Dict[str, Any] | None, bool]:
+        task = self._find_task_locked(self._active_task_id)
+        changed = False
+        if task is None:
+            if self._active_task_id:
+                previous_id = self._active_task_id
+                self._active_task_id = ""
+                changed = True
+                self._record_lifecycle_event_locked(
+                    "active_task_reset",
+                    reason="missing_active_task",
+                    detail=f"Cleared stale active task pointer for {previous_id}.",
+                    from_status="unknown",
+                    to_status="idle",
+                )
+            return None, changed
+
+        task_status = _normalize_status(task.get("status", "queued"))
+        if task_status in QUEUE_ACTIVE_STATUSES:
+            return task, changed
+
+        if task_status == "queued" and self._is_running():
+            state = self._load_state_for_scope_locked(self._task_state_scope_id_locked(task), clear_pending_for_new_goal=False)
+            pending = state.get_control_snapshot().get("pending_approval", {})
+            reconciled_status = "paused" if pending.get("kind") or str(state.status).strip() == "paused" else ""
+            if not reconciled_status and str(state.status).strip() == "running":
+                reconciled_status = "running"
+            if reconciled_status:
+                previous_status = task_status
+                task["status"] = reconciled_status
+                task["started_at"] = task.get("started_at") or _iso_timestamp()
+                task["ended_at"] = ""
+                task["paused"] = reconciled_status == "paused"
+                if reconciled_status == "paused":
+                    task["approval_needed"] = bool(pending.get("kind"))
+                    task["approval_reason"] = _trim_text(pending.get("reason", "") or pending.get("summary", ""), limit=180)
+                    if not task.get("last_message"):
+                        task["last_message"] = "Paused and waiting for approval."
+                else:
+                    task["approval_needed"] = False
+                    task["approval_reason"] = ""
+                    if not task.get("last_message"):
+                        task["last_message"] = "Running in background."
+                changed = True
+                self._record_lifecycle_event_locked(
+                    "active_task_reconciled",
+                    task=task,
+                    reason="queued_running_handoff_reconciled",
+                    detail="Promoted a stale queued active task into the current running/paused lifecycle state.",
+                    from_status=previous_status,
+                    to_status=reconciled_status,
+                )
+                return task, changed
+
+        previous_status = task_status
+        self._active_task_id = ""
+        changed = True
+        self._record_lifecycle_event_locked(
+            "active_task_reset",
+            task=task,
+            reason="terminal_active_task_reset" if task_status in QUEUE_TERMINAL_STATUSES else "non_active_status_reset",
+            detail="Cleared a stale active task pointer that no longer represented live work.",
+            from_status=previous_status,
+            to_status="idle",
+        )
+        return None, changed
+
     def _active_task_locked(self) -> Dict[str, Any] | None:
-        return self._find_task_locked(self._active_task_id)
+        if self._maybe_finalize_stalled_active_task_locked():
+            self._persist_all_locked()
+        task, changed = self._reconcile_active_task_locked()
+        if changed:
+            self._persist_queue_locked()
+        return task
 
     def _has_queued_tasks_locked(self) -> bool:
         return any(task.get("status") == "queued" for task in self._tasks)
@@ -689,9 +1020,11 @@ class ExecutionManager:
 
     def _persist_scheduled_locked(self):
         self.scheduled_store.save(self._scheduled_tasks)
+        self.scheduler_backend.sync_scheduled_tasks(self._scheduled_tasks)
 
     def _persist_watches_locked(self):
         self.watch_store.save(self._watches)
+        self.file_watch_backend.sync_watches(self._watches)
 
     def _persist_alerts_locked(self):
         self.alert_store.save(self._alerts)
@@ -1103,11 +1436,14 @@ class ExecutionManager:
         )
         self._tasks.append(task)
         self._tasks = self.queue_store._trim_tasks(self._tasks, self._active_task_id)
-        if not any(existing.get("task_id") == task.get("task_id") for existing in self._tasks):
+        task_id = _trim_text(task.get("task_id", ""), limit=60)
+        live_task = self._find_task_locked(task_id)
+        if live_task is None:
             return None
-        return task
+        return live_task
 
     def _can_start_next_locked(self) -> bool:
+        self._active_task_locked()
         if self._is_running():
             return False
         active_task = self._active_task_locked()
@@ -1155,6 +1491,11 @@ class ExecutionManager:
                 state.steps,
                 state.get_observation(),
                 state.get_final_context(),
+                desktop_vision=state.get_desktop_vision_context(
+                    purpose="desktop_final",
+                    prompt_text=state.goal,
+                    prefer_before_after=True,
+                ),
             )
         except Exception:
             rendered = ""
@@ -1409,6 +1750,7 @@ class ExecutionManager:
         promoted = 0
         auto_start = False
         now = _local_now()
+        due_ids = self.scheduler_backend.drain_due_scheduled_ids()
         had_queued_before = self._has_queued_tasks_locked()
 
         for scheduled_task in self._scheduled_tasks:
@@ -1416,7 +1758,9 @@ class ExecutionManager:
                 continue
 
             next_run = _parse_local_datetime(scheduled_task.get("next_run_at", ""))
-            if next_run is None or next_run > now:
+            scheduled_id = str(scheduled_task.get("scheduled_id", "")).strip()
+            backend_due = bool(scheduled_id and scheduled_id in due_ids)
+            if not backend_due and (next_run is None or next_run > now):
                 continue
 
             queue_task = self._enqueue_task_locked(
@@ -1452,6 +1796,12 @@ class ExecutionManager:
 
     def _watch_due_locked(self, watch: Dict[str, Any], now_ts: float) -> bool:
         last_checked = _parse_local_datetime(watch.get("last_checked_at", ""))
+        condition_type = str(watch.get("condition_type", "")).strip().lower()
+        target_path = str(watch.get("target", "")).strip()
+        if condition_type in FILE_WATCH_SUPPORTED_CONDITIONS and target_path:
+            since_timestamp = last_checked.timestamp() if last_checked is not None else 0.0
+            if self.file_watch_backend.has_recent_signal(target_path, since_timestamp=since_timestamp):
+                return True
         if last_checked is None:
             return True
         interval_seconds = max(2, int(watch.get("interval_seconds", self.scheduler_poll_seconds)))
@@ -1484,6 +1834,9 @@ class ExecutionManager:
         auto_start = False
         now_ts = time.time()
         now_text = _iso_timestamp(now_ts)
+        backend_events = self.file_watch_backend.consume_events(limit=24)
+        if backend_events:
+            self._recent_file_watch_events = list(backend_events)[-24:]
         had_queued_before = self._has_queued_tasks_locked()
         state = self._load_state_for_scope_locked(DEFAULT_STATE_SCOPE_ID)
 
@@ -1610,7 +1963,9 @@ class ExecutionManager:
         return changed, auto_start
 
     def _update_task_from_result_locked(self, task: Dict[str, Any], state: TaskState, result: Dict[str, Any]):
+        task = self._canonical_task_locked(task) or task
         queue_status, keep_active, pending = self._task_queue_status_from_state(state, result)
+        previous_status = _normalize_status(task.get("status", "queued"))
         task["goal"] = _trim_text(state.goal, limit=MAX_TASK_GOAL_CHARS)
         task["status"] = queue_status
         task["run_id"] = _trim_text(result.get("run_id", ""), limit=60)
@@ -1635,6 +1990,15 @@ class ExecutionManager:
             task["ended_at"] = _iso_timestamp()
             if self._active_task_id == task.get("task_id", ""):
                 self._active_task_id = ""
+        lifecycle_reason = "approval_needed" if queue_status == "paused" else "terminal_desktop_outcome" if queue_status in {"completed", "blocked", "incomplete"} else "result_status"
+        self._record_lifecycle_event_locked(
+            "task_finalized" if queue_status in QUEUE_TERMINAL_STATUSES else "task_paused" if queue_status == "paused" else "task_status_updated",
+            task=task,
+            reason=lifecycle_reason,
+            detail=_trim_text(result.get("message", "") or state.last_summary, limit=220),
+            from_status=previous_status,
+            to_status=queue_status,
+        )
         self._append_task_status_alert_locked(task, state, result, queue_status=queue_status, pending=pending)
         self._sync_scheduled_tasks_locked()
         self._process_watches_locked(force_check=False)
@@ -1654,6 +2018,8 @@ class ExecutionManager:
         replacement_goal: str = "",
         resume_available: bool = False,
     ):
+        task = self._canonical_task_locked(task) or task
+        previous_status = _normalize_status(task.get("status", "queued"))
         effective_event = control_event or (getattr(state, "task_control_event", "") if state is not None else "")
         effective_replacement_task_id = replacement_task_id or (getattr(state, "task_replacement_task_id", "") if state is not None else "")
         effective_replacement_goal = replacement_goal or (getattr(state, "task_replacement_goal", "") if state is not None else "")
@@ -1686,8 +2052,175 @@ class ExecutionManager:
                 self._active_task_id = ""
         if state is not None:
             self._append_manual_status_alert_locked(task, state, status=status, message=message)
+        self._record_lifecycle_event_locked(
+            "task_manual_update",
+            task=task,
+            reason=effective_event or status or "manual_update",
+            detail=message,
+            from_status=previous_status,
+            to_status=status,
+        )
         self._sync_scheduled_tasks_locked()
         self._process_watches_locked(force_check=False)
+
+    def _goal_is_likely_desktop_locked(self, task: Dict[str, Any], state: TaskState) -> bool:
+        if bool(getattr(state, "desktop_checkpoint_pending", False)):
+            return True
+        if str(getattr(state, "desktop_last_target_window", "")).strip():
+            return True
+        if str(getattr(state, "desktop_active_window_title", "")).strip():
+            return True
+        goal_text = str(getattr(state, "goal", "") or task.get("goal", "")).strip().lower()
+        if not goal_text:
+            return False
+        return any(
+            term in goal_text
+            for term in (
+                "desktop",
+                "window titled",
+                "window",
+                "foreground",
+                "focus",
+                "screenshot",
+                "tray",
+                "background-like",
+                "dialog",
+                "modal",
+                "click",
+                "type",
+                "press",
+            )
+        )
+
+    def _finalize_stalled_startup_locked(self, task: Dict[str, Any], *, reason: str, detail: str) -> bool:
+        task = self._canonical_task_locked(task) or task
+        if _normalize_status(task.get("status", "queued")) != "running":
+            return False
+
+        state = self._worker_state if self._worker_state is not None else self._load_state_for_scope_locked(
+            self._task_state_scope_id_locked(task),
+            clear_pending_for_new_goal=False,
+        )
+        state.state_scope_id = self._task_state_scope_id_locked(task)
+        state.status = "blocked"
+        if self._goal_is_likely_desktop_locked(task, state) and hasattr(state, "set_desktop_run_outcome"):
+            try:
+                from core.backend_schemas import normalize_desktop_run_outcome
+
+                state.set_desktop_run_outcome(
+                    normalize_desktop_run_outcome(
+                        {
+                            "outcome": "blocked",
+                            "status": "blocked",
+                            "terminal": True,
+                            "reason": reason,
+                            "summary": detail,
+                            "target_window_title": str(getattr(state, "desktop_last_target_window", "")).strip(),
+                            "active_window_title": str(getattr(state, "desktop_active_window_title", "")).strip(),
+                            "checkpoint_pending": bool(getattr(state, "desktop_checkpoint_pending", False)),
+                            "evidence_id": str(getattr(state, "desktop_last_evidence_id", "")).strip(),
+                            "timestamp": str(getattr(state, "desktop_last_evidence_timestamp", "")).strip(),
+                        }
+                    )
+                )
+            except Exception:
+                pass
+        state.add_step(
+            {
+                "type": "system",
+                "status": "blocked",
+                "message": detail,
+                "tool": "execution_manager",
+            }
+        )
+        state.add_note(detail)
+        self._refresh_summary(state)
+        try:
+            self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+        except Exception:
+            pass
+        self._set_current_state_locked(state)
+
+        result_payload = {
+            "ok": False,
+            "status": "blocked",
+            "message": detail,
+            "steps": state.steps,
+        }
+        if getattr(state, "desktop_run_outcome", {}):
+            result_payload["desktop_run_outcome"] = dict(getattr(state, "desktop_run_outcome", {}))
+        entry = self._record_manual_history(
+            state,
+            started_at=time.time(),
+            step_start_index=max(0, len(state.steps) - 1),
+            result=result_payload,
+            source="startup_timeout",
+            session_id=self._task_session_id_locked(task),
+        )
+        result_payload["run_id"] = entry.get("run_id", "")
+        self._update_task_progress_locked(
+            task,
+            stage="terminal_outcome_reached",
+            detail=detail,
+            result_status="blocked",
+            meaningful_progress=bool(task.get("meaningful_progress", False)),
+        )
+        self._update_task_from_result_locked(task, state, result_payload)
+        self._control_requests.pop(task.get("task_id", ""), None)
+        self._set_last_result(result_payload)
+        if self._worker_token:
+            self._abandoned_worker_tokens.add(self._worker_token)
+        self._clear_worker_tracking_locked(task_id=task.get("task_id", ""))
+        self._persist_all_locked()
+        return True
+
+    def _maybe_finalize_stalled_active_task_locked(self) -> bool:
+        active_task = self._find_task_locked(self._active_task_id)
+        if active_task is None:
+            return False
+        if _normalize_status(active_task.get("status", "queued")) != "running":
+            return False
+
+        worker_started_text = str(active_task.get("worker_started_at", "") or active_task.get("started_at", "")).strip()
+        worker_started_dt = _parse_local_datetime(worker_started_text)
+        if worker_started_dt is None:
+            return False
+
+        elapsed = max(0.0, time.time() - worker_started_dt.timestamp())
+        if elapsed < self.task_startup_timeout_seconds:
+            return False
+
+        first_loop_at = str(active_task.get("first_loop_at", "")).strip()
+        first_step_at = str(active_task.get("first_step_at", "")).strip()
+        first_result_at = str(active_task.get("first_result_at", "")).strip()
+
+        if not first_loop_at:
+            detail = (
+                "The bounded desktop run started but did not reach its first loop entry in time, "
+                "so it was finalized as blocked instead of lingering invisibly."
+            )
+            return self._finalize_stalled_startup_locked(active_task, reason="loop_entry_timeout", detail=detail)
+
+        if not first_step_at and not first_result_at:
+            detail = (
+                "The bounded desktop run entered the loop but did not reach its first actionable desktop step in time, "
+                "so it was finalized as blocked instead of lingering invisibly."
+            )
+            return self._finalize_stalled_startup_locked(active_task, reason="first_progress_timeout", detail=detail)
+
+        if first_result_at and not str(active_task.get("terminal_at", "")).strip():
+            last_progress_text = str(active_task.get("progress_at", "") or first_result_at).strip()
+            last_progress_dt = _parse_local_datetime(last_progress_text)
+            if last_progress_dt is not None:
+                since_last_progress = max(0.0, time.time() - last_progress_dt.timestamp())
+                if since_last_progress >= self.task_post_result_timeout_seconds:
+                    detail = (
+                        "The bounded desktop run produced a desktop result but did not reach a clean terminal decision in time, "
+                        "so it was finalized as blocked instead of lingering invisibly."
+                    )
+                    return self._finalize_stalled_startup_locked(active_task, reason="post_result_timeout", detail=detail)
+
+        return False
 
     def _start_worker_locked(
         self,
@@ -1699,36 +2232,137 @@ class ExecutionManager:
         run_source: str = "goal_run",
         session_id: str = "",
     ):
+        worker_token = f"worker-{uuid4().hex[:12]}"
+
         def control_callback():
             with self._lock:
                 return self._consume_control_request_locked(task_id)
 
-        def runner():
-            result = self.agent.run_state(
-                state,
-                planning_goal=planning_goal,
-                history_start_index=history_start_index,
-                run_source=run_source,
-                session_id=session_id,
-                control_callback=control_callback,
-            )
-            auto_start_next = False
+        def progress_callback(stage: str, **payload):
             with self._lock:
-                self._set_current_state_locked(state)
-                self._set_last_result(result)
-                self._control_requests.pop(task_id, None)
+                if worker_token in self._abandoned_worker_tokens:
+                    return
+                if self._worker_token != worker_token or self._worker_task_id != task_id:
+                    return
                 task = self._find_task_locked(task_id)
-                if task is not None:
-                    self._update_task_from_result_locked(task, state, result)
-                    auto_start_next = not task.get("paused", False) and self._has_queued_tasks_locked()
-                self._worker = None
-                self._persist_all_locked()
+                if task is None:
+                    return
+                meaningful_progress = stage in {"tool_step_attempted", "tool_result_recorded", "terminal_outcome_reached"}
+                if self._update_task_progress_locked(
+                    task,
+                    stage=stage,
+                    detail=str(payload.get("detail", "")).strip(),
+                    result_status=str(payload.get("result_status", "")).strip(),
+                    meaningful_progress=meaningful_progress,
+                ):
+                    self._persist_queue_locked()
+
+        def runner():
+            auto_start_next = False
+            result: Dict[str, Any] = {}
+            try:
+                result = self.agent.run_state(
+                    state,
+                    planning_goal=planning_goal,
+                    history_start_index=history_start_index,
+                    run_source=run_source,
+                    session_id=session_id,
+                    control_callback=control_callback,
+                    progress_callback=progress_callback,
+                )
+                with self._lock:
+                    if worker_token in self._abandoned_worker_tokens:
+                        self._abandoned_worker_tokens.discard(worker_token)
+                        self._control_requests.pop(task_id, None)
+                        return
+                    self._set_current_state_locked(state)
+                    self._set_last_result(result)
+                    self._control_requests.pop(task_id, None)
+                    task = self._find_task_locked(task_id)
+                    if task is not None:
+                        self._update_task_progress_locked(
+                            task,
+                            stage="terminal_outcome_reached",
+                            detail=str(result.get("message", "") or state.last_summary).strip(),
+                            result_status=str(result.get("status", "")).strip(),
+                            meaningful_progress=bool(task.get("meaningful_progress", False) or result.get("status") in QUEUE_TERMINAL_STATUSES or result.get("status") == "paused"),
+                        )
+                        self._update_task_from_result_locked(task, state, result)
+                        auto_start_next = not task.get("paused", False) and self._has_queued_tasks_locked()
+                    self._clear_worker_tracking_locked(task_id=task_id, token=worker_token)
+                    self._persist_all_locked()
+            except Exception as exc:
+                failure_message = f"Execution manager post-processing failed: {type(exc).__name__}: {exc}"
+                with self._lock:
+                    if worker_token in self._abandoned_worker_tokens:
+                        self._abandoned_worker_tokens.discard(worker_token)
+                        self._control_requests.pop(task_id, None)
+                        return
+                    self._control_requests.pop(task_id, None)
+                    state.status = "blocked"
+                    state.add_step(
+                        {
+                            "type": "system",
+                            "status": "failed",
+                            "message": failure_message,
+                            "tool": "execution_manager",
+                        }
+                    )
+                    state.add_note(failure_message)
+                    self._refresh_summary(state)
+                    try:
+                        self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                    except Exception:
+                        pass
+                    self._set_current_state_locked(state)
+                    task = self._find_task_locked(task_id)
+                    if task is not None:
+                        self._update_task_progress_locked(
+                            task,
+                            stage="terminal_outcome_reached",
+                            detail=failure_message,
+                            result_status="blocked",
+                            meaningful_progress=bool(task.get("meaningful_progress", False)),
+                        )
+                        task["status"] = "blocked"
+                        task["last_message"] = _trim_text(failure_message, limit=280)
+                        task["approval_needed"] = False
+                        task["approval_reason"] = ""
+                        task["paused"] = False
+                        task["ended_at"] = _iso_timestamp()
+                        if str(result.get("run_id", "")).strip():
+                            task["run_id"] = _trim_text(result.get("run_id", ""), limit=60)
+                    if self._active_task_id == task_id:
+                        self._active_task_id = ""
+                    self._set_last_result(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "message": failure_message,
+                            "error": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "run_id": _trim_text(result.get("run_id", ""), limit=60),
+                            "steps": state.steps,
+                        }
+                    )
+                    self._clear_worker_tracking_locked(task_id=task_id, token=worker_token)
+                    self._persist_all_locked()
 
             if auto_start_next:
                 self.start_next(auto_trigger=True)
 
         worker = threading.Thread(target=runner, name="operator-execution-run", daemon=True)
+        self._worker_task_id = _trim_text(task_id, limit=60)
+        self._worker_token = worker_token
+        self._worker_state = state
         self._worker = worker
+        task = self._find_task_locked(task_id)
+        if task is not None:
+            self._update_task_progress_locked(
+                task,
+                stage="worker_started",
+                detail="Started the bounded worker for this desktop-capable run.",
+            )
         worker.start()
 
     def _start_task_locked(
@@ -1739,11 +2373,14 @@ class ExecutionManager:
         planning_goal: str | None = None,
         history_start_index: int | None = None,
     ):
+        task = self._canonical_task_locked(task) or task
         state_scope_id = self._task_state_scope_id_locked(task)
         session_id = self._task_session_id_locked(task)
         state = self.agent.load_task_state(task.get("goal", ""), state_scope_id=state_scope_id)
         state.state_scope_id = state_scope_id
         state.status = "running"
+        if hasattr(state, "clear_desktop_run_outcome"):
+            state.clear_desktop_run_outcome()
         self.agent.save_task_state(state, state_scope_id=state_scope_id)
         self._set_current_state_locked(state)
         task["status"] = "running"
@@ -1754,9 +2391,18 @@ class ExecutionManager:
         task["approval_reason"] = ""
         task["paused"] = False
         self._set_task_control_fields_locked(task)
+        self._reset_task_progress_locked(task, detail="Started the queued task and prepared the bounded worker.")
         state.clear_task_control()
         self._active_task_id = task.get("task_id", "")
         self._set_last_result({})
+        self._record_lifecycle_event_locked(
+            "task_started",
+            task=task,
+            reason="start_goal" if run_source == "goal_run" else run_source or "task_started",
+            detail="Started queued work in the bounded background operator loop.",
+            from_status="queued",
+            to_status="running",
+        )
         if task.get("scheduled_task_id") or str(task.get("source", "")).strip() == "scheduled_goal":
             self._append_alert_locked(
                 severity="info",
@@ -1855,6 +2501,14 @@ class ExecutionManager:
                 self._start_task_locked(task, run_source=source)
                 started = True
             else:
+                self._record_lifecycle_event_locked(
+                    "task_queued",
+                    task=task,
+                    reason="queued_behind_running_task" if self._is_running() else "queued_waiting_start",
+                    detail="Queued follow-up work and left it waiting for a clean bounded start.",
+                    from_status="queued",
+                    to_status="queued",
+                )
                 self._persist_all_locked()
 
         response = {
@@ -2089,6 +2743,9 @@ class ExecutionManager:
 
     def start_next(self, *, auto_trigger: bool = False) -> Dict[str, Any]:
         with self._lock:
+            if self._maybe_finalize_stalled_active_task_locked():
+                self._persist_all_locked()
+            self._active_task_locked()
             if self._is_running():
                 return {"ok": False, "message": "A background task is already running."}
 
@@ -2140,6 +2797,8 @@ class ExecutionManager:
                 self._refresh_summary(state)
                 state.status = "running"
                 state.set_task_control(event="approved", reason=note, resume_available=False)
+                if hasattr(state, "clear_desktop_run_outcome"):
+                    state.clear_desktop_run_outcome()
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
                 self._update_task_after_manual_action_locked(active_task, status="running", message=note, approval_needed=False, approval_reason="", state=state)
@@ -2169,6 +2828,8 @@ class ExecutionManager:
                 state.add_note(note)
                 state.status = "running"
                 state.set_task_control(event="approved", reason=note, resume_available=False)
+                if hasattr(state, "clear_desktop_run_outcome"):
+                    state.clear_desktop_run_outcome()
                 self._refresh_summary(state)
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
@@ -2337,6 +2998,18 @@ class ExecutionManager:
                 self._refresh_summary(state)
                 state.status = "blocked"
                 state.set_task_control(event="rejected", reason=message, resume_available=False)
+                if hasattr(state, "set_desktop_run_outcome"):
+                    state.set_desktop_run_outcome(
+                        {
+                            "outcome": "blocked",
+                            "status": "blocked",
+                            "terminal": True,
+                            "reason": "approval_needed",
+                            "summary": message,
+                            "target_window_title": getattr(state, "desktop_last_target_window", ""),
+                            "active_window_title": getattr(state, "desktop_active_window_title", ""),
+                        }
+                    )
                 self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
                 self._set_current_state_locked(state)
                 reply_message = self._render_authoritative_manual_reply_locked(state, message)
@@ -2453,6 +3126,7 @@ class ExecutionManager:
             "approval_reason": _trim_text(task.get("approval_reason", ""), limit=180),
             "paused": bool(task.get("paused", False)),
             "control": self._task_control_payload_locked(task),
+            "progress": self._task_progress_payload_locked(task),
         }
 
     def _scheduled_summary_locked(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -2536,6 +3210,35 @@ class ExecutionManager:
             "counts": counts,
             "latest_alert": items[0] if items else {},
         }
+
+    def _infrastructure_snapshot_locked(self) -> Dict[str, Any]:
+        try:
+            from tools.desktop import get_desktop_backend_status
+        except Exception:
+            desktop_status = {
+                "window": {"active": "unavailable", "reason": "error", "available": False},
+                "screenshot": {"active": "unavailable", "reason": "error", "available": False},
+                "ui_evidence": {"active": "unavailable", "reason": "error", "available": False},
+            }
+        else:
+            try:
+                desktop_status = get_desktop_backend_status()
+            except Exception:
+                desktop_status = {
+                    "window": {"active": "unavailable", "reason": "error", "available": False},
+                    "screenshot": {"active": "unavailable", "reason": "error", "available": False},
+                    "ui_evidence": {"active": "unavailable", "reason": "error", "available": False},
+                }
+        return {
+            "scheduler": self.scheduler_backend.status_snapshot(),
+            "file_watch": {
+                **self.file_watch_backend.status_snapshot(),
+                "recent_events": list(self._recent_file_watch_events[-12:]),
+            },
+            "desktop": desktop_status,
+            "desktop_capture": self.desktop_capture_service.status_snapshot(),
+        }
+
     def get_snapshot(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         auto_start = False
         filtered_view = bool(str(session_id).strip() or str(state_scope_id).strip())
@@ -2543,11 +3246,16 @@ class ExecutionManager:
         normalized_scope_id = self._normalize_state_scope_id(state_scope_id, session_id=normalized_session_id)
 
         with self._lock:
+            stalled_finalized = self._maybe_finalize_stalled_active_task_locked()
+            if stalled_finalized:
+                self._persist_all_locked()
             changed = self._sync_scheduled_tasks_locked()
             promoted, scheduled_auto_start = self._promote_due_scheduled_tasks_locked()
             watch_changed, watch_auto_start = self._process_watches_locked()
-            auto_start = scheduled_auto_start or watch_auto_start
-            if changed or promoted or watch_changed:
+            auto_start = scheduled_auto_start or watch_auto_start or (
+                stalled_finalized and self._has_queued_tasks_locked() and not self._is_running()
+            )
+            if stalled_finalized or changed or promoted or watch_changed:
                 self._persist_all_locked()
 
             queue_snapshot = self._queue_snapshot_locked(
@@ -2616,6 +3324,12 @@ class ExecutionManager:
             if filtered_view and not live_scope_running and latest_run_status:
                 if not primary_task or snapshot["result_status"] in QUEUE_TERMINAL_STATUSES:
                     snapshot["result_status"] = latest_run_status
+            if filtered_view and not live_scope_running:
+                primary_status = _trim_text(primary_task.get("status", ""), limit=40)
+                if primary_status in QUEUE_TERMINAL_STATUSES or primary_status == "paused":
+                    snapshot["status"] = primary_status
+                elif latest_run_status and snapshot.get("status", "") in {"", "idle", "queued", "running"}:
+                    snapshot["status"] = latest_run_status
             if not snapshot["result_status"] and not filtered_view:
                 snapshot["result_status"] = str(self._last_result.get("status", snapshot.get("status", ""))).strip()
 
@@ -2638,6 +3352,10 @@ class ExecutionManager:
             snapshot["queue"] = queue_snapshot
             snapshot["active_task"] = queue_snapshot.get("active_task", {})
             snapshot["queued_tasks"] = queue_snapshot.get("queued_tasks", [])
+            snapshot["lifecycle"] = self._lifecycle_snapshot_locked(
+                session_id=normalized_session_id if filtered_view else "",
+                state_scope_id=normalized_scope_id if filtered_view else "",
+            )
             snapshot["scheduled"] = scheduled_snapshot
             snapshot["scheduled_tasks"] = scheduled_snapshot.get("tasks", [])
             snapshot["watches"] = watch_snapshot
@@ -2645,6 +3363,7 @@ class ExecutionManager:
             snapshot["alerts"] = alert_snapshot
             snapshot["alert_items"] = alert_snapshot.get("items", [])
             snapshot["latest_alert"] = alert_snapshot.get("latest_alert", {})
+            snapshot["infrastructure"] = self._infrastructure_snapshot_locked()
             snapshot["session_id"] = normalized_session_id
             snapshot["state_scope_id"] = normalized_scope_id
             snapshot["paused"] = bool(snapshot.get("paused", False) or queue_snapshot.get("active_task", {}).get("status") == "paused")

@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -23,6 +24,7 @@ from core.local_api_events import (
     DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
     LocalApiEventStream,
 )
+from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -58,6 +60,20 @@ def _management_payload() -> Dict[str, Any]:
         "owner_pid": owner_pid,
         "api_pid": os.getpid(),
     }
+
+
+def _desktop_shutdown_allowed(body: Dict[str, Any] | None) -> tuple[bool, str]:
+    management = _management_payload()
+    if not management.get("managed_by_desktop", False):
+        return False, "This local API process is not desktop-managed."
+    payload = body if isinstance(body, dict) else {}
+    requested_token = _trim_text(payload.get("owner_token", ""), limit=160)
+    requested_pid = _coerce_int(payload.get("owner_pid", 0), 0, minimum=0, maximum=2**31 - 1)
+    if not requested_token or requested_pid <= 0:
+        return False, "Desktop shutdown requires the current owner token and owner pid."
+    if requested_token != management.get("owner_token", "") or requested_pid != management.get("owner_pid", 0):
+        return False, "Desktop shutdown ownership did not match the running local API process."
+    return True, ""
 
 
 def _trim_text(value: Any, limit: int = 240) -> str:
@@ -127,6 +143,12 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "tool": _trim_text(pending.get("tool", ""), limit=120),
             "target": _trim_text(pending.get("target", ""), limit=180),
             "approval_status": _trim_text(pending.get("approval_status", ""), limit=40),
+            "evidence_id": _trim_text(pending.get("evidence_id", ""), limit=80),
+            "evidence_summary": _trim_text(pending.get("evidence_summary", ""), limit=220),
+            "evidence_preview": _compact_evidence_payload(pending.get("evidence_preview", {})),
+            "evidence_assessment": _compact_evidence_assessment(pending.get("evidence_assessment", {})),
+            "scene_preview": _compact_scene_payload(pending.get("scene_preview", {})),
+            "vision_preview": _compact_vision_payload(pending.get("vision_preview", {})),
         },
         "active_task": snapshot.get("active_task", {}),
         "browser": {
@@ -148,11 +170,31 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "checkpoint_tool": _trim_text(desktop.get("checkpoint_tool", ""), limit=80),
             "checkpoint_reason": _trim_text(desktop.get("checkpoint_reason", ""), limit=180),
             "screenshot_path": _trim_text(desktop.get("screenshot_path", ""), limit=220),
+            "evidence_id": _trim_text(desktop.get("evidence_id", ""), limit=80),
+            "evidence_summary": _trim_text(desktop.get("evidence_summary", ""), limit=220),
+            "evidence_bundle_path": _trim_text(desktop.get("evidence_bundle_path", ""), limit=260),
+            "checkpoint_evidence_id": _trim_text(desktop.get("checkpoint_evidence_id", ""), limit=80),
+            "selected_evidence": _compact_evidence_payload(desktop.get("selected_evidence", {})),
+            "selected_evidence_assessment": _compact_evidence_assessment(desktop.get("selected_evidence_assessment", {})),
+            "selected_scene": _compact_scene_payload(desktop.get("selected_scene", {})),
+            "selected_vision": _compact_vision_payload(desktop.get("selected_vision", {})),
+            "checkpoint_evidence": _compact_evidence_payload(desktop.get("checkpoint_evidence", {})),
+            "checkpoint_evidence_assessment": _compact_evidence_assessment(desktop.get("checkpoint_evidence_assessment", {})),
+            "checkpoint_scene": _compact_scene_payload(desktop.get("checkpoint_scene", {})),
+            "checkpoint_vision": _compact_vision_payload(desktop.get("checkpoint_vision", {})),
+            "run_outcome": _compact_desktop_outcome(desktop.get("run_outcome", {})),
+            "latest_mouse_action": _compact_mouse_action(desktop.get("latest_mouse_action", {})),
+            "latest_process_action": _compact_process_action(desktop.get("latest_process_action", {})),
+            "latest_command_result": _compact_command_result(desktop.get("latest_command_result", {})),
+            "latest_processes": [_compact_process_preview(item) for item in list(desktop.get("latest_processes", []))[:4] if isinstance(item, dict)],
+            "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
         "latest_run": snapshot.get("latest_run", {}),
+        "lifecycle": snapshot.get("lifecycle", {}),
         "runtime": snapshot.get("runtime", {}),
+        "infrastructure": snapshot.get("infrastructure", {}),
         "behavior": behavior,
         "human_control": snapshot.get("human_control", {}),
         "action_policy": snapshot.get("action_policy", {}),
@@ -166,12 +208,14 @@ def _active_task_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "pending_approval": snapshot.get("pending_approval", {}),
         "browser": snapshot.get("browser", {}),
         "desktop": snapshot.get("desktop", {}),
+        "lifecycle": snapshot.get("lifecycle", {}),
         "current_step": _trim_text(snapshot.get("current_step", ""), limit=160),
         "result_status": _trim_text(snapshot.get("result_status", ""), limit=80),
         "result_message": _trim_text(snapshot.get("result_message", ""), limit=280),
         "behavior": snapshot.get("behavior", {}),
         "human_control": snapshot.get("human_control", {}),
         "task_control": snapshot.get("task_control", {}),
+        "infrastructure": snapshot.get("infrastructure", {}),
     }
 
 
@@ -196,6 +240,214 @@ def _watch_payload(watch_state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "counts": watch_state.get("counts", {}),
         "tasks": watch_state.get("tasks", []),
+    }
+
+
+def _compact_evidence_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    preview = compact_evidence_preview(value if isinstance(value, dict) else {})
+    return {
+        "evidence_id": _trim_text(preview.get("evidence_id", ""), limit=80),
+        "timestamp": _trim_text(preview.get("timestamp", ""), limit=40),
+        "evidence_kind": _trim_text(preview.get("evidence_kind", ""), limit=60),
+        "reason": _trim_text(preview.get("reason", ""), limit=40),
+        "summary": _trim_text(preview.get("summary", ""), limit=220),
+        "active_window_title": _trim_text(preview.get("active_window_title", ""), limit=180),
+        "active_window_process": _trim_text(preview.get("active_window_process", ""), limit=120),
+        "target_window_title": _trim_text(preview.get("target_window_title", ""), limit=180),
+        "has_screenshot": bool(preview.get("has_screenshot", False)),
+        "has_artifact": bool(preview.get("has_artifact", False)),
+        "screenshot_scope": _trim_text(preview.get("screenshot_scope", ""), limit=60),
+        "screenshot_backend": _trim_text(preview.get("screenshot_backend", ""), limit=60),
+        "monitor_count": _coerce_int(preview.get("monitor_count", 0), 0, minimum=0, maximum=16),
+        "primary_monitor_label": _trim_text(preview.get("primary_monitor_label", ""), limit=120),
+        "screen_capture_policy": _trim_text(preview.get("screen_capture_policy", ""), limit=60),
+        "ui_evidence_present": bool(preview.get("ui_evidence_present", False)),
+        "ui_control_count": _coerce_int(preview.get("ui_control_count", 0), 0, minimum=0, maximum=128),
+        "is_partial": bool(preview.get("is_partial", False)),
+        "recency_seconds": _coerce_int(preview.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "selection_reason": _trim_text(preview.get("selection_reason", ""), limit=40),
+        "capture_mode": _trim_text(preview.get("capture_mode", ""), limit=40),
+        "importance": _trim_text(preview.get("importance", ""), limit=40),
+        "importance_reason": _trim_text(preview.get("importance_reason", ""), limit=120),
+        "task_id": _trim_text(preview.get("task_id", ""), limit=60),
+        "task_status": _trim_text(preview.get("task_status", ""), limit=40),
+        "checkpoint_pending": bool(preview.get("checkpoint_pending", False)),
+    }
+
+
+def _compact_evidence_assessment(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    assessment = value if isinstance(value, dict) else {}
+    return {
+        "evidence_id": _trim_text(assessment.get("evidence_id", ""), limit=80),
+        "purpose": _trim_text(assessment.get("purpose", ""), limit=80),
+        "state": _trim_text(assessment.get("state", ""), limit=40),
+        "reason": _trim_text(assessment.get("reason", ""), limit=40),
+        "summary": _trim_text(assessment.get("summary", ""), limit=220),
+        "sufficient": bool(assessment.get("sufficient", False)),
+        "needs_refresh": bool(assessment.get("needs_refresh", False)),
+        "target_window_title": _trim_text(assessment.get("target_window_title", ""), limit=180),
+        "target_window_match": bool(assessment.get("target_window_match", False)),
+        "has_screenshot": bool(assessment.get("has_screenshot", False)),
+        "is_partial": bool(assessment.get("is_partial", False)),
+        "recency_seconds": _coerce_int(assessment.get("recency_seconds", 0), 0, minimum=0, maximum=10_000_000),
+        "stale": bool(assessment.get("stale", False)),
+    }
+
+
+def _compact_vision_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    vision = value if isinstance(value, dict) else {}
+    images = []
+    for item in list(vision.get("images", []))[:2]:
+        if not isinstance(item, dict):
+            continue
+        images.append(
+            {
+                "evidence_id": _trim_text(item.get("evidence_id", ""), limit=80),
+                "role": _trim_text(item.get("role", ""), limit=40),
+                "summary": _trim_text(item.get("summary", ""), limit=180),
+                "artifact_available": bool(item.get("artifact_available", False)),
+            }
+        )
+    return {
+        "purpose": _trim_text(vision.get("purpose", ""), limit=60),
+        "mode": _trim_text(vision.get("mode", ""), limit=40),
+        "reason": _trim_text(vision.get("reason", ""), limit=40),
+        "summary": _trim_text(vision.get("summary", ""), limit=220),
+        "needs_direct_image": bool(vision.get("needs_direct_image", False)),
+        "image_count": _coerce_int(vision.get("image_count", len(images)), len(images), minimum=0, maximum=2),
+        "primary_evidence_id": _trim_text(vision.get("primary_evidence_id", ""), limit=80),
+        "comparison_evidence_id": _trim_text(vision.get("comparison_evidence_id", ""), limit=80),
+        "images": images,
+    }
+
+
+def _compact_mouse_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    action = value if isinstance(value, dict) else {}
+    return {
+        "action": _trim_text(action.get("action", ""), limit=40),
+        "button": _trim_text(action.get("button", ""), limit=20),
+        "click_count": _coerce_int(action.get("click_count", 0), 0, minimum=0, maximum=4),
+        "coordinate_mode": _trim_text(action.get("coordinate_mode", ""), limit=40),
+        "mapping_reason": _trim_text(action.get("mapping_reason", ""), limit=80),
+        "monitor": _trim_text(action.get("monitor", ""), limit=120),
+        "point": _trim_text(action.get("point", ""), limit=80),
+        "summary": _trim_text(action.get("summary", ""), limit=220),
+    }
+
+
+def _compact_process_preview(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    preview = value if isinstance(value, dict) else {}
+    return {
+        "pid": _coerce_int(preview.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(preview.get("process_name", ""), limit=120),
+        "status": _trim_text(preview.get("status", ""), limit=60),
+        "owned": bool(preview.get("owned", False)),
+    }
+
+
+def _compact_process_action(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    action = value if isinstance(value, dict) else {}
+    return {
+        "action": _trim_text(action.get("action", ""), limit=40),
+        "pid": _coerce_int(action.get("pid", 0), 0, minimum=0, maximum=10_000_000),
+        "process_name": _trim_text(action.get("process_name", ""), limit=120),
+        "owned": bool(action.get("owned", False)),
+        "owned_label": _trim_text(action.get("owned_label", ""), limit=120),
+        "summary": _trim_text(action.get("summary", ""), limit=220),
+    }
+
+
+def _compact_command_result(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    result = value if isinstance(value, dict) else {}
+    return {
+        "command": _trim_text(result.get("command", ""), limit=220),
+        "shell_kind": _trim_text(result.get("shell_kind", ""), limit=40),
+        "exit_code": _coerce_int(result.get("exit_code", 0), 0, minimum=-1_000_000, maximum=1_000_000),
+        "timed_out": bool(result.get("timed_out", False)),
+        "stdout_excerpt": _trim_text(result.get("stdout_excerpt", ""), limit=220),
+        "stderr_excerpt": _trim_text(result.get("stderr_excerpt", ""), limit=220),
+        "summary": _trim_text(result.get("summary", ""), limit=220),
+    }
+
+
+def _compact_scene_payload(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    scene = value if isinstance(value, dict) else {}
+    return {
+        "scene_class": _trim_text(scene.get("scene_class", ""), limit=40),
+        "app_class": _trim_text(scene.get("app_class", ""), limit=40),
+        "workflow_state": _trim_text(scene.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(scene.get("readiness_state", ""), limit=40),
+        "presentation": _trim_text(scene.get("presentation", ""), limit=40),
+        "confidence": _trim_text(scene.get("confidence", ""), limit=20),
+        "confidence_score": _coerce_int(scene.get("confidence_score", 0), 0, minimum=0, maximum=100),
+        "reason": _trim_text(scene.get("reason", ""), limit=40),
+        "summary": _trim_text(scene.get("summary", ""), limit=220),
+        "transition_summary": _trim_text(scene.get("transition_summary", ""), limit=220),
+        "scene_changed": bool(scene.get("scene_changed", False)),
+        "change_reason": _trim_text(scene.get("change_reason", ""), limit=40),
+        "direct_image_helpful": bool(scene.get("direct_image_helpful", False)),
+        "prefer_before_after": bool(scene.get("prefer_before_after", False)),
+        "pending_tool": _trim_text(scene.get("pending_tool", ""), limit=80),
+    }
+
+
+def _compact_desktop_outcome(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    outcome = value if isinstance(value, dict) else {}
+    return {
+        "outcome": _trim_text(outcome.get("outcome", ""), limit=60),
+        "status": _trim_text(outcome.get("status", ""), limit=40),
+        "terminal": bool(outcome.get("terminal", False)),
+        "reason": _trim_text(outcome.get("reason", ""), limit=60),
+        "summary": _trim_text(outcome.get("summary", ""), limit=220),
+        "scene_class": _trim_text(outcome.get("scene_class", ""), limit=40),
+        "workflow_state": _trim_text(outcome.get("workflow_state", ""), limit=40),
+        "readiness_state": _trim_text(outcome.get("readiness_state", ""), limit=40),
+        "recovery_state": _trim_text(outcome.get("recovery_state", ""), limit=40),
+        "recovery_reason": _trim_text(outcome.get("recovery_reason", ""), limit=60),
+        "recovery_strategy": _trim_text(outcome.get("recovery_strategy", ""), limit=80),
+        "attempt_count": _coerce_int(outcome.get("attempt_count", 0), 0, minimum=0, maximum=16),
+        "max_attempts": _coerce_int(outcome.get("max_attempts", 0), 0, minimum=0, maximum=16),
+        "evidence_id": _trim_text(outcome.get("evidence_id", ""), limit=80),
+        "target_window_title": _trim_text(outcome.get("target_window_title", ""), limit=180),
+        "active_window_title": _trim_text(outcome.get("active_window_title", ""), limit=180),
+    }
+
+
+def _desktop_evidence_payload(limit: int = 8) -> Dict[str, Any]:
+    store = get_desktop_evidence_store()
+    return {
+        "recent": store.recent_refs(limit=limit),
+        "recent_summaries": [_compact_evidence_payload(item) for item in store.recent_summaries(limit=limit)],
+        "status": store.status_snapshot(),
+    }
+
+
+def _desktop_evidence_selection_payload(parsed) -> Dict[str, Any]:
+    query = parse_qs(parsed.query)
+    store = get_desktop_evidence_store()
+    result = store.select_summary(
+        strategy=str(query.get("strategy", ["latest"])[0]).strip(),
+        evidence_id=str(query.get("evidence_id", [""])[0]).strip(),
+        observation_token=str(query.get("observation_token", [""])[0]).strip(),
+        active_window_title=str(query.get("active_window_title", [""])[0]).strip(),
+        target_window_title=str(query.get("target_window_title", [""])[0]).strip(),
+        checkpoint_evidence_id=str(query.get("checkpoint_evidence_id", [""])[0]).strip(),
+        checkpoint_target=str(query.get("checkpoint_target", [""])[0]).strip(),
+        task_evidence_id=str(query.get("task_evidence_id", [""])[0]).strip(),
+    )
+    return {
+        "strategy": _trim_text(result.get("strategy", ""), limit=60),
+        "reason": _trim_text(result.get("reason", ""), limit=40),
+        "candidate_count": _coerce_int(result.get("candidate_count", 0), 0, minimum=0, maximum=10_000),
+        "selected": _compact_evidence_payload(result.get("selected", {})),
+    }
+
+
+def _desktop_evidence_artifact_payload(evidence_id: str, *, content_path: str = "") -> Dict[str, Any]:
+    store = get_desktop_evidence_store()
+    metadata = store.artifact_metadata(evidence_id, content_path=content_path)
+    return {
+        "artifact": metadata,
     }
 
 
@@ -257,6 +509,16 @@ class LocalOperatorApiServer:
                 self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _send_file(self, path: Path, *, content_type: str):
+                data = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(data)
 
             def _send_sse_headers(self):
                 self.send_response(200)
@@ -484,6 +746,49 @@ class LocalOperatorApiServer:
                     self._respond_ok(_watch_payload(server_ref.controller.get_watch_state()))
                     return
 
+                if path == "/desktop/evidence":
+                    limit = self._query_limit(parsed, default=8, maximum=24)
+                    self._respond_ok(_desktop_evidence_payload(limit=limit))
+                    return
+
+                if path == "/desktop/evidence/selected":
+                    self._respond_ok(_desktop_evidence_selection_payload(parsed))
+                    return
+
+                evidence_segments = self._path_segments(path)
+                if len(evidence_segments) == 5 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence" and evidence_segments[3] == "artifact" and evidence_segments[4] == "content":
+                    evidence_id = unquote(evidence_segments[2])
+                    artifact_file = get_desktop_evidence_store().artifact_file_path(evidence_id)
+                    if not artifact_file:
+                        self._respond_error(404, f"Desktop evidence artifact is unavailable: {evidence_id}")
+                        return
+                    metadata = get_desktop_evidence_store().artifact_metadata(evidence_id)
+                    content_type = _trim_text(metadata.get("artifact_type", ""), limit=80) or "application/octet-stream"
+                    try:
+                        self._send_file(artifact_file, content_type=content_type)
+                    except FileNotFoundError:
+                        self._respond_error(404, f"Desktop evidence artifact is unavailable: {evidence_id}")
+                    return
+
+                if len(evidence_segments) == 4 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence" and evidence_segments[3] == "artifact":
+                    evidence_id = unquote(evidence_segments[2])
+                    self._respond_ok(
+                        _desktop_evidence_artifact_payload(
+                            evidence_id,
+                            content_path=f"/desktop/evidence/{evidence_id}/artifact/content",
+                        )
+                    )
+                    return
+
+                if len(evidence_segments) == 3 and evidence_segments[0] == "desktop" and evidence_segments[1] == "evidence":
+                    evidence_id = unquote(evidence_segments[2])
+                    bundle = get_desktop_evidence_store().load_bundle(evidence_id)
+                    if not bundle:
+                        self._respond_error(404, f"Desktop evidence not found: {evidence_id}")
+                        return
+                    self._respond_ok({"bundle": bundle})
+                    return
+
                 self._respond_error(404, f"Unknown endpoint: {path}")
 
             def _handle_post(self, path: str):
@@ -588,6 +893,15 @@ class LocalOperatorApiServer:
                         self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)), "session": session_update.get("session", {})})
                     else:
                         self._respond_error(400, result.get("message", "Unable to reject pending action."))
+                    return
+
+                if path == "/shutdown":
+                    allowed, message = _desktop_shutdown_allowed(body)
+                    if not allowed:
+                        self._respond_error(403, message)
+                        return
+                    self._respond_ok({"accepted": True, "management": _management_payload()})
+                    threading.Timer(0.05, server_ref.shutdown).start()
                     return
 
                 self._respond_error(404, f"Unknown endpoint: {path}")

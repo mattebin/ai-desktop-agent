@@ -9,8 +9,13 @@ import {
   BrowserState,
   createSession,
   DesktopRuntimeStatus,
+  EvidenceArtifact,
+  EvidenceSummary,
   ensureLocalApi,
   getAlerts,
+  getDesktopEvidenceArtifact,
+  getDesktopEvidenceArtifactContentUrl,
+  getDesktopEvidence,
   getQueueState,
   getRecentRuns,
   getScheduledState,
@@ -49,9 +54,20 @@ type ControlSnapshot = {
   scheduled: ScheduledPayload | null;
   watches: WatchPayload | null;
   recentRuns: RunEntry[];
+  desktopEvidence: EvidenceSummary[];
 };
 
 type ThemeMode = "light" | "dark";
+
+type ArtifactViewerState = {
+  open: boolean;
+  loading: boolean;
+  requestedEvidenceId: string;
+  sourceLabel: string;
+  heading: string;
+  artifact: EvidenceArtifact | null;
+  error: string;
+};
 
 const QUICK_PROMPTS = [
   "Inspect this project and explain the main architecture.",
@@ -63,7 +79,7 @@ const THEME_STORAGE_KEY = "ai-operator:theme";
 const DRAFTS_STORAGE_KEY = "ai-operator:drafts";
 const NEW_SESSION_DRAFT_KEY = "__new__";
 const TRANSCRIPT_BOTTOM_THRESHOLD = 120;
-const COMPOSER_MAX_HEIGHT = 220;
+const COMPOSER_MAX_HEIGHT = 180;
 
 const STREAM_EVENTS = [
   "stream.hello",
@@ -382,6 +398,384 @@ function approvalSummary(pending?: PendingApproval | null): string {
   return pending.reason || pending.summary || pending.step || pending.kind;
 }
 
+function UiIcon({
+  name,
+  className,
+}: {
+  name:
+    | "brand"
+    | "menu"
+    | "refresh"
+    | "theme-light"
+    | "theme-dark"
+    | "new"
+    | "chat"
+    | "approval"
+    | "task"
+    | "alert"
+    | "activity"
+    | "evidence"
+    | "details";
+  className?: string;
+}) {
+  const common = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    className: clsx("ui-icon", className),
+    "aria-hidden": true,
+  };
+
+  switch (name) {
+    case "brand":
+      return (
+        <svg {...common}>
+          <path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z" />
+          <path d="M8.5 10.5 12 8l3.5 2.5v3L12 16l-3.5-2.5v-3Z" />
+        </svg>
+      );
+    case "menu":
+      return (
+        <svg {...common}>
+          <path d="M5 7h14" />
+          <path d="M5 12h14" />
+          <path d="M5 17h14" />
+        </svg>
+      );
+    case "refresh":
+      return (
+        <svg {...common}>
+          <path d="M20 11a8 8 0 1 0 2 5.5" />
+          <path d="M20 4v7h-7" />
+        </svg>
+      );
+    case "theme-light":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2.5v2.5" />
+          <path d="M12 19v2.5" />
+          <path d="m4.9 4.9 1.8 1.8" />
+          <path d="m17.3 17.3 1.8 1.8" />
+          <path d="M2.5 12H5" />
+          <path d="M19 12h2.5" />
+          <path d="m4.9 19.1 1.8-1.8" />
+          <path d="m17.3 6.7 1.8-1.8" />
+        </svg>
+      );
+    case "theme-dark":
+      return (
+        <svg {...common}>
+          <path d="M20 14.3A7.5 7.5 0 0 1 9.7 4 8.5 8.5 0 1 0 20 14.3Z" />
+        </svg>
+      );
+    case "new":
+      return (
+        <svg {...common}>
+          <path d="M12 5v14" />
+          <path d="M5 12h14" />
+        </svg>
+      );
+    case "chat":
+      return (
+        <svg {...common}>
+          <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5v-6Z" />
+        </svg>
+      );
+    case "approval":
+      return (
+        <svg {...common}>
+          <path d="M12 3 6 5.8v5.4c0 4 2.6 7.7 6 9 3.4-1.3 6-5 6-9V5.8L12 3Z" />
+          <path d="m9.5 12 1.8 1.8 3.2-3.6" />
+        </svg>
+      );
+    case "task":
+      return (
+        <svg {...common}>
+          <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" />
+        </svg>
+      );
+    case "alert":
+      return (
+        <svg {...common}>
+          <path d="M12 4a4 4 0 0 0-4 4v2.6c0 .7-.2 1.4-.6 2L6 15h12l-1.4-2.4a4 4 0 0 1-.6-2V8a4 4 0 0 0-4-4Z" />
+          <path d="M10 18a2 2 0 0 0 4 0" />
+        </svg>
+      );
+    case "activity":
+      return (
+        <svg {...common}>
+          <path d="M3 12h4l2-5 4 10 2-5h6" />
+        </svg>
+      );
+    case "evidence":
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="m8 14 2.5-2.5 2 2 2.5-3 3 3.5" />
+          <circle cx="9" cy="9.5" r="1" />
+        </svg>
+      );
+    case "details":
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="M10 9h6" />
+          <path d="M10 12h6" />
+          <path d="M10 15h4" />
+          <path d="M7.5 9h.01" />
+          <path d="M7.5 12h.01" />
+          <path d="M7.5 15h.01" />
+        </svg>
+      );
+  }
+}
+
+function SectionTitle({
+  icon,
+  children,
+}: {
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+}) {
+  return (
+    <span className="section-title">
+      <UiIcon name={icon} />
+      <span>{children}</span>
+    </span>
+  );
+}
+
+function CompactMenu({
+  label,
+  icon,
+  children,
+}: {
+  label: string;
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="compact-menu">
+      <summary className="ghost-button compact-menu-trigger">
+        <UiIcon name={icon} />
+        <span>{label}</span>
+      </summary>
+      <div className="compact-menu-popover">{children}</div>
+    </details>
+  );
+}
+
+function CompactMenuButton({
+  icon,
+  children,
+  onClick,
+}: {
+  icon: Parameters<typeof UiIcon>[0]["name"];
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className="compact-menu-item"
+      type="button"
+      onClick={(event) => {
+        onClick();
+        const details = event.currentTarget.closest("details");
+        if (details instanceof HTMLDetailsElement) {
+          details.open = false;
+        }
+      }}
+    >
+      <UiIcon name={icon} />
+      <span>{children}</span>
+    </button>
+  );
+}
+
+function hasEvidencePreview(preview?: EvidenceSummary | null): boolean {
+  if (!preview) {
+    return false;
+  }
+  return Boolean(
+    preview.evidence_id ||
+      preview.summary ||
+      preview.active_window_title ||
+      preview.target_window_title ||
+      preview.has_screenshot ||
+      preview.ui_evidence_present,
+  );
+}
+
+function formatEvidenceRecency(seconds?: number): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    return "";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s ago`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m ago`;
+  }
+  if (seconds < 86400) {
+    return `${Math.round(seconds / 3600)}h ago`;
+  }
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+function evidenceMetaItems(preview?: EvidenceSummary | null): string[] {
+  if (!preview) {
+    return [];
+  }
+  const items = [
+    preview.active_window_title ? `Window: ${preview.active_window_title}` : "",
+    preview.target_window_title ? `Target: ${preview.target_window_title}` : "",
+    preview.active_window_process ? `Process: ${preview.active_window_process}` : "",
+    preview.screen_summary || preview.window_summary || "",
+    formatEvidenceRecency(preview.recency_seconds),
+  ].filter(Boolean);
+  return items.slice(0, 3);
+}
+
+function evidenceSummaryText(preview?: EvidenceSummary | null): string {
+  if (!preview) {
+    return "";
+  }
+  return (
+    preview.summary ||
+    preview.active_window_title ||
+    preview.target_window_title ||
+    preview.window_summary ||
+    preview.screen_summary ||
+    "Desktop evidence captured."
+  );
+}
+
+function evidenceBadges(preview?: EvidenceSummary | null): string[] {
+  if (!preview) {
+    return [];
+  }
+  const badges: string[] = [];
+  if (preview.is_partial) {
+    badges.push("Partial");
+  }
+  if (preview.has_screenshot) {
+    badges.push(preview.has_artifact ? "Screenshot retained" : "Screenshot unavailable");
+  }
+  if (preview.ui_evidence_present) {
+    badges.push(preview.ui_control_count ? `UI evidence (${preview.ui_control_count})` : "UI evidence");
+  }
+  return badges;
+}
+
+function evidenceNote(preview?: EvidenceSummary | null): string {
+  if (!preview) {
+    return "";
+  }
+  if (preview.has_screenshot && !preview.has_artifact) {
+    return "A screenshot was collected earlier, but the retained artifact is no longer available.";
+  }
+  if (preview.is_partial) {
+    return "This evidence bundle is partial, so some desktop context may still be missing.";
+  }
+  return "";
+}
+
+function artifactStateMessage(artifact?: EvidenceArtifact | null): string {
+  if (!artifact) {
+    return "";
+  }
+  const state = String(artifact.availability_state || "").toLowerCase();
+  if (state === "available") {
+    return "Retained screenshot available.";
+  }
+  if (state === "missing") {
+    return "The retained screenshot is no longer available in local storage.";
+  }
+  if (state === "pruned") {
+    return "This retained screenshot was pruned from the local evidence store.";
+  }
+  if (state === "not_found") {
+    return "This evidence reference is no longer available in the local evidence store.";
+  }
+  return "This evidence bundle does not currently include a retained artifact.";
+}
+
+function EvidencePreviewCard({
+  title,
+  preview,
+  emptyText,
+  onViewArtifact,
+  artifactLoading,
+}: {
+  title: string;
+  preview?: EvidenceSummary | null;
+  emptyText?: string;
+  onViewArtifact?: (preview: EvidenceSummary) => void;
+  artifactLoading?: boolean;
+}) {
+  if (!hasEvidencePreview(preview)) {
+    if (!emptyText) {
+      return null;
+    }
+    return (
+      <div className="evidence-preview evidence-preview-empty">
+        <div className="evidence-preview-header">
+          <span className="evidence-preview-title">{title}</span>
+        </div>
+        <p className="evidence-preview-summary">{emptyText}</p>
+      </div>
+    );
+  }
+
+  const metaItems = evidenceMetaItems(preview);
+  const badges = evidenceBadges(preview);
+  const note = evidenceNote(preview);
+
+  return (
+    <div className={clsx("evidence-preview", preview?.is_partial && "is-partial")}>
+      <div className="evidence-preview-header">
+        <span className="evidence-preview-title">{title}</span>
+        {preview?.reason && preview.reason !== "collected" ? <span className="muted-label">{plainTextPreview(preview.reason, 28)}</span> : null}
+      </div>
+      <p className="evidence-preview-summary">{plainTextPreview(evidenceSummaryText(preview), 180)}</p>
+      {metaItems.length ? (
+        <div className="evidence-preview-meta">
+          {metaItems.map((item) => (
+            <span key={item} className="evidence-chip">
+              {plainTextPreview(item, 48)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {badges.length ? (
+        <div className="evidence-preview-meta">
+          {badges.map((item) => (
+            <span key={item} className="evidence-chip evidence-chip-soft">
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="evidence-preview-footer">
+        {preview?.evidence_id ? <span className="evidence-reference">Ref {preview.evidence_id}</span> : null}
+        <div className="evidence-preview-actions">
+          {preview?.selection_reason ? <span className="muted-label">{plainTextPreview(preview.selection_reason, 26)}</span> : null}
+          {onViewArtifact && preview?.evidence_id && (preview.has_screenshot || preview.has_artifact) ? (
+            <button className="ghost-button evidence-action-button" onClick={() => onViewArtifact(preview)} type="button" disabled={artifactLoading}>
+              {artifactLoading ? "Loading..." : "View artifact"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {note ? <p className="evidence-preview-note">{note}</p> : null}
+    </div>
+  );
+}
+
 function timelineFromEvent(event: StreamEvent<Record<string, unknown>>): ActivityEntry | null {
   const now = event.emitted_at || new Date().toISOString();
   const data = event.data || {};
@@ -596,12 +990,22 @@ export default function App() {
     scheduled: null,
     watches: null,
     recentRuns: [],
+    desktopEvidence: [],
   });
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
   const [loadingConversation, setLoadingConversation] = useState(false);
+  const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
+    open: false,
+    loading: false,
+    requestedEvidenceId: "",
+    sourceLabel: "",
+    heading: "",
+    artifact: null,
+    error: "",
+  });
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [streamNote, setStreamNote] = useState("Waiting for live updates");
   const [isNearTranscriptBottom, setIsNearTranscriptBottom] = useState(true);
@@ -653,7 +1057,7 @@ export default function App() {
       return;
     }
     textarea.style.height = "0px";
-    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 118), COMPOSER_MAX_HEIGHT);
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 92), COMPOSER_MAX_HEIGHT);
     textarea.style.height = `${nextHeight}px`;
   }, [draft, selectedSessionId]);
 
@@ -757,17 +1161,19 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
-    const [queue, scheduled, watches, runs] = await Promise.all([
+    const [queue, scheduled, watches, runs, desktopEvidence] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
       getRecentRuns(apiBaseUrl, sessionId, 10),
+      getDesktopEvidence(apiBaseUrl, 6),
     ]);
     setControlData({
       queue,
       scheduled,
       watches,
       recentRuns: runs.items || [],
+      desktopEvidence: desktopEvidence.recent_summaries || [],
     });
   }
 
@@ -1010,6 +1416,13 @@ export default function App() {
       ? `${runtimeEffort} (chat/final)`
       : runtimeEffort;
   const activeTask = sessionDetail?.operator?.active_task || status?.active_task || null;
+  const selectedDesktopEvidence = status?.desktop?.selected_evidence || null;
+  const checkpointDesktopEvidence = status?.desktop?.checkpoint_evidence || null;
+  const pendingApprovalEvidence = pendingApproval?.evidence_preview || checkpointDesktopEvidence || null;
+  const distinctCheckpointEvidence =
+    checkpointDesktopEvidence?.evidence_id && checkpointDesktopEvidence.evidence_id === selectedDesktopEvidence?.evidence_id
+      ? null
+      : checkpointDesktopEvidence;
   const title = sessionDetail?.title || "New conversation";
   const emptyState = !messages.length && !loadingConversation;
   const composerHint =
@@ -1114,6 +1527,55 @@ export default function App() {
     }
   }
 
+  async function handleViewEvidenceArtifact(preview: EvidenceSummary | null | undefined, sourceLabel: string) {
+    if (!apiBaseUrl || !preview?.evidence_id) {
+      return;
+    }
+    setArtifactViewer({
+      open: true,
+      loading: true,
+      requestedEvidenceId: preview.evidence_id,
+      sourceLabel,
+      heading: evidenceSummaryText(preview),
+      artifact: null,
+      error: "",
+    });
+    try {
+      const payload = await getDesktopEvidenceArtifact(apiBaseUrl, preview.evidence_id);
+      setArtifactViewer({
+        open: true,
+        loading: false,
+        requestedEvidenceId: preview.evidence_id,
+        sourceLabel,
+        heading: evidenceSummaryText(preview),
+        artifact: payload.artifact || null,
+        error: "",
+      });
+    } catch (error) {
+      setArtifactViewer({
+        open: true,
+        loading: false,
+        requestedEvidenceId: preview.evidence_id,
+        sourceLabel,
+        heading: evidenceSummaryText(preview),
+        artifact: null,
+        error: error instanceof Error ? error.message : "Unable to load the retained artifact.",
+      });
+    }
+  }
+
+  function closeArtifactViewer() {
+    setArtifactViewer({
+      open: false,
+      loading: false,
+      requestedEvidenceId: "",
+      sourceLabel: "",
+      heading: "",
+      artifact: null,
+      error: "",
+    });
+  }
+
   async function handleRefresh() {
     if (bootState !== "ready") {
       setBootstrapTick((current) => current + 1);
@@ -1131,31 +1593,47 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-header">
-          <div>
-            <div className="eyebrow">AI Operator</div>
-            <h1>Chat-first local operator</h1>
+        <div className="sidebar-top">
+          <div className="sidebar-brand">
+            <div className="brand-mark">
+              <UiIcon name="brand" />
+            </div>
+            <div>
+              <div className="eyebrow">AI Operator</div>
+              <h1>Local operator</h1>
+              <p className="sidebar-subtitle">Chat-first desktop control surface</p>
+            </div>
           </div>
-          <div className="sidebar-header-actions">
-            <button
-              className="ghost-button theme-toggle"
-              onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
-              type="button"
-            >
-              {themeMode === "light" ? "Dark mode" : "Light mode"}
+          <div className="sidebar-actions">
+            <button className="sidebar-primary-button" onClick={() => void handleNewChat()} disabled={sending} type="button">
+              <UiIcon name="new" />
+              <span>New chat</span>
             </button>
-            <button className="ghost-button" onClick={() => void handleNewChat()} disabled={sending}>
-              New chat
-            </button>
+            <CompactMenu label="Workspace" icon="menu">
+              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
+                {detailsOpen ? "Hide details" : "Show details"}
+              </CompactMenuButton>
+              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
+                {bootState === "ready" ? "Refresh data" : "Retry startup"}
+              </CompactMenuButton>
+              <CompactMenuButton
+                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
+                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+              >
+                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              </CompactMenuButton>
+            </CompactMenu>
           </div>
         </div>
 
         <label className="search-box">
-          <span>Search conversations</span>
+          <span className="search-box-label">
+            <SectionTitle icon="chat">Conversations</SectionTitle>
+          </span>
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter by title, summary, status..."
+            placeholder="Filter title, status, summary..."
           />
         </label>
 
@@ -1172,8 +1650,8 @@ export default function App() {
               </div>
               <p className="session-preview">{sessionPreviewText(session)}</p>
               <div className="session-card-footer">
-                <span>{session.message_count || 0} messages</span>
-                {session.pending_approval?.kind ? <span className="approval-dot">Approval needed</span> : <span>{formatDateTime(session.updated_at)}</span>}
+                <span>{formatDateTime(session.updated_at) || "Just now"}</span>
+                {session.pending_approval?.kind ? <span className="approval-dot">Needs approval</span> : <span>{session.message_count || 0} msgs</span>}
               </div>
             </button>
           ))}
@@ -1183,16 +1661,12 @@ export default function App() {
 
       <main className="chat-layout">
         <header className="chat-header">
-          <div>
+          <div className="chat-header-main">
             <div className="chat-title-row">
               <h2>{title}</h2>
               <span className={clsx("status-pill", `tone-${statusTone(sessionDetail?.status || status?.status)}`)}>
                 {sessionDetail?.status || status?.status || "idle"}
               </span>
-              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
-              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
-              {runtimeModel ? <span className="meta-pill">Model: {runtimeModel}</span> : null}
-              {runtimeEffortLabel ? <span className="meta-pill">Reasoning: {runtimeEffortLabel}</span> : null}
             </div>
             <p className="chat-subtitle">
               {pendingApproval?.kind
@@ -1202,16 +1676,29 @@ export default function App() {
                     220,
                   )}
             </p>
+            <div className="chat-meta-row">
+              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
+              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
+              {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
+              {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
+              <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
+            </div>
           </div>
           <div className="chat-header-actions">
-            <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
-            <span className="meta-pill">Theme: {themeMode}</span>
-            <button className="ghost-button" onClick={() => setDetailsOpen((current) => !current)}>
-              {detailsOpen ? "Hide details" : "Show details"}
-            </button>
-            <button className="ghost-button" onClick={() => void handleRefresh()}>
-              {bootState === "ready" ? "Refresh" : "Retry"}
-            </button>
+            <CompactMenu label="View" icon="menu">
+              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
+                {detailsOpen ? "Hide details" : "Show details"}
+              </CompactMenuButton>
+              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
+                {bootState === "ready" ? "Refresh data" : "Retry startup"}
+              </CompactMenuButton>
+              <CompactMenuButton
+                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
+                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+              >
+                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              </CompactMenuButton>
+            </CompactMenu>
           </div>
         </header>
 
@@ -1307,13 +1794,24 @@ export default function App() {
       <aside className="right-rail">
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Approval</h3>
+            <h3><SectionTitle icon="approval">Approval</SectionTitle></h3>
             {pendingApproval?.kind ? <span className="approval-dot">Needed</span> : <span className="muted-label">Clear</span>}
           </div>
           {pendingApproval?.kind ? (
             <>
               <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
               <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
+              <EvidencePreviewCard
+                title="Linked evidence"
+                preview={pendingApprovalEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Approval evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === pendingApprovalEvidence?.evidence_id}
+                emptyText={
+                  pendingApproval?.evidence_summary
+                    ? plainTextPreview(pendingApproval.evidence_summary, 180)
+                    : "No desktop evidence is linked to this checkpoint yet."
+                }
+              />
               <p className="approval-footnote">The operator is paused until you approve or reject this step.</p>
               <div className="approval-actions">
                 <button className="approve-button" disabled={Boolean(approving)} onClick={() => void handleApproval("approve")}>
@@ -1331,7 +1829,7 @@ export default function App() {
 
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Active task</h3>
+            <h3><SectionTitle icon="task">Active task</SectionTitle></h3>
             <span className={clsx("status-pill", `tone-${statusTone(activeTask?.status || status?.status)}`)}>
               {activeTask?.status || status?.status || "idle"}
             </span>
@@ -1350,11 +1848,28 @@ export default function App() {
               <p>{plainTextPreview(status?.browser?.current_title || status?.browser?.current_url || "No live browser page.", 140)}</p>
             </div>
           </div>
+          <div className="rail-evidence-stack">
+            <EvidencePreviewCard
+              title="Selected evidence"
+              preview={selectedDesktopEvidence}
+              onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+              artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
+              emptyText="No desktop evidence is selected for the current task."
+            />
+            {distinctCheckpointEvidence ? (
+              <EvidencePreviewCard
+                title="Checkpoint evidence"
+                preview={distinctCheckpointEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+              />
+            ) : null}
+          </div>
         </section>
 
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3>Recent alerts</h3>
+            <h3><SectionTitle icon="alert">Recent alerts</SectionTitle></h3>
             <span className="muted-label">{alerts.length}</span>
           </div>
           <div className="mini-list">
@@ -1370,7 +1885,7 @@ export default function App() {
 
         <section className="rail-card rail-card-grow">
           <div className="rail-card-header">
-            <h3>Live activity</h3>
+            <h3><SectionTitle icon="activity">Live activity</SectionTitle></h3>
             <span className="muted-label">{activity.length}</span>
           </div>
           <div className="mini-list">
@@ -1403,6 +1918,55 @@ export default function App() {
             </header>
 
             <div className="details-grid">
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4><SectionTitle icon="evidence">Desktop evidence</SectionTitle></h4>
+                  <span className="muted-label">{controlData.desktopEvidence.length}</span>
+                </div>
+                <EvidencePreviewCard
+                  title="Selected for this task"
+                  preview={selectedDesktopEvidence}
+                  onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+                  artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
+                  emptyText="No selected desktop evidence for the current task."
+                />
+                {distinctCheckpointEvidence ? (
+                  <EvidencePreviewCard
+                    title="Linked checkpoint"
+                    preview={distinctCheckpointEvidence}
+                    onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                    artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+                  />
+                ) : null}
+                <div className="mini-list evidence-mini-list">
+                  {controlData.desktopEvidence.map((item) => (
+                    <article
+                      key={item.evidence_id || item.timestamp || item.summary}
+                      className={clsx("mini-list-item", item.is_partial ? "tone-warning" : "tone-neutral")}
+                    >
+                      <div className="mini-list-title">
+                        {plainTextPreview(item.active_window_title || item.summary || item.evidence_id || "Desktop evidence", 56)}
+                        <span className="mini-list-time">{formatDateTime(item.timestamp)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(evidenceSummaryText(item), 132)}</div>
+                      <div className="evidence-list-footer">
+                        {item.evidence_id ? <span className="evidence-reference">Ref {item.evidence_id}</span> : null}
+                        {item.has_screenshot ? <span className="evidence-chip evidence-chip-soft">Screenshot</span> : null}
+                        {item.is_partial ? <span className="evidence-chip">Partial</span> : null}
+                        {item.evidence_id && (item.has_screenshot || item.has_artifact) ? (
+                          <button className="ghost-button evidence-action-button" onClick={() => void handleViewEvidenceArtifact(item, "Recent evidence")} type="button">
+                            View artifact
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  ))}
+                  {!controlData.desktopEvidence.length ? (
+                    <p className="secondary-copy">No recent desktop evidence has been retained for this operator session.</p>
+                  ) : null}
+                </div>
+              </section>
+
               <section className="details-card">
                 <div className="rail-card-header">
                   <h4>Recent runs</h4>
@@ -1468,6 +2032,57 @@ export default function App() {
                 </div>
               </section>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {artifactViewer.open ? (
+        <div className="artifact-viewer">
+          <div className="artifact-viewer-backdrop" onClick={closeArtifactViewer} />
+          <section className="artifact-viewer-panel">
+            <header className="artifact-viewer-header">
+              <div>
+                <div className="eyebrow">{artifactViewer.sourceLabel || "Desktop evidence"}</div>
+                <h3>Evidence artifact</h3>
+                <p className="secondary-copy">{plainTextPreview(artifactViewer.heading || artifactViewer.artifact?.summary || "Desktop evidence artifact", 180)}</p>
+              </div>
+              <button className="ghost-button" onClick={closeArtifactViewer} type="button">
+                Close
+              </button>
+            </header>
+
+            <div className="artifact-viewer-body">
+              {artifactViewer.loading ? (
+                <div className="artifact-viewer-empty">
+                  <div className="spinner" />
+                  <p>Loading retained evidence...</p>
+                </div>
+              ) : artifactViewer.error ? (
+                <div className="artifact-viewer-empty artifact-viewer-empty-error">
+                  <h4>Unable to load the artifact</h4>
+                  <p>{artifactViewer.error}</p>
+                </div>
+              ) : artifactViewer.artifact?.artifact_available && artifactViewer.artifact?.can_preview && artifactViewer.artifact?.evidence_id ? (
+                <div className="artifact-preview-shell">
+                  <img
+                    alt={artifactViewer.heading || artifactViewer.artifact.summary || "Desktop evidence artifact"}
+                    className="artifact-preview-image"
+                    src={getDesktopEvidenceArtifactContentUrl(apiBaseUrl, artifactViewer.artifact.evidence_id)}
+                  />
+                </div>
+              ) : (
+                <div className="artifact-viewer-empty">
+                  <h4>Artifact unavailable</h4>
+                  <p>{artifactStateMessage(artifactViewer.artifact)}</p>
+                </div>
+              )}
+            </div>
+
+            <footer className="artifact-viewer-footer">
+              {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
+              {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
+              {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
+            </footer>
           </section>
         </div>
       ) : null}

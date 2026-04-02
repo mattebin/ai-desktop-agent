@@ -19,7 +19,16 @@ BROWSER_APPROVAL_CONTROLLED_TOOLS = {
 }
 DESKTOP_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_click_point",
+    "desktop_move_mouse",
+    "desktop_hover_point",
+    "desktop_click_mouse",
+    "desktop_scroll",
+    "desktop_press_key",
+    "desktop_press_key_sequence",
     "desktop_type_text",
+    "desktop_start_process",
+    "desktop_stop_process",
+    "desktop_run_command",
 }
 BROWSER_APPROVAL_POSITIVE_PHRASES = (
     "approval granted",
@@ -53,7 +62,14 @@ DESKTOP_APPROVAL_POSITIVE_PHRASES = (
     "approval_status=approved",
     "approved to continue",
     "approved to click",
+    "approved to scroll",
+    "approved to hover",
+    "approved to move the mouse",
+    "approved to press",
     "approved to type",
+    "approved to run the command",
+    "approved to start the process",
+    "approved to stop the process",
     "desktop action is now approved",
     "desktop step is now approved",
     "explicitly approve the paused desktop action",
@@ -288,26 +304,93 @@ class ToolRuntime:
     def _prepare_desktop_args(self, tool_name: str, task_state, args: Dict[str, Any], planning_goal: str | None = None):
         goal_text = planning_goal if isinstance(planning_goal, str) and planning_goal.strip() else getattr(task_state, "goal", "")
         goal_has_explicit_approval = self._goal_has_explicit_desktop_approval(goal_text)
+        targeted_window_tool = tool_name in {
+            "desktop_focus_window",
+            "desktop_inspect_window_state",
+            "desktop_recover_window",
+            "desktop_wait_for_window_ready",
+        }
+        has_explicit_window_target = any(
+            str(args.get(key, "")).strip()
+            for key in ("title", "match", "window_id", "expected_window_title", "expected_window_id")
+        )
+        checkpoint_target = str(getattr(task_state, "desktop_checkpoint_target", "")).strip()
+        remembered_target_title = checkpoint_target or str(getattr(task_state, "desktop_last_target_window", "")).strip()
 
         if getattr(task_state, "desktop_observation_token", ""):
             args.setdefault("observation_token", task_state.desktop_observation_token)
-        if getattr(task_state, "desktop_active_window_title", ""):
+        if targeted_window_tool and not has_explicit_window_target and remembered_target_title:
+            args.setdefault("title", remembered_target_title)
+            args.setdefault("expected_window_title", remembered_target_title)
+            args.setdefault("exact", True)
+        elif getattr(task_state, "desktop_active_window_title", "") and not (targeted_window_tool and has_explicit_window_target):
             args.setdefault("expected_window_title", task_state.desktop_active_window_title)
-        if getattr(task_state, "desktop_active_window_id", ""):
+        if getattr(task_state, "desktop_active_window_id", "") and not (
+            targeted_window_tool and (has_explicit_window_target or remembered_target_title)
+        ):
             args.setdefault("expected_window_id", task_state.desktop_active_window_id)
 
         if tool_name == "desktop_list_windows":
             args.setdefault("limit", 12)
         elif tool_name == "desktop_get_active_window":
             args.setdefault("limit", 12)
+        elif tool_name == "desktop_inspect_window_state":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("check_visual_stability", True)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
+        elif tool_name == "desktop_recover_window":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("max_attempts", 2)
+            args.setdefault("wait_seconds", 2.2)
+            args.setdefault("poll_interval_seconds", 0.16)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
+        elif tool_name == "desktop_wait_for_window_ready":
+            args.setdefault("limit", 12)
+            args.setdefault("ui_limit", 8)
+            args.setdefault("wait_seconds", 2.2)
+            args.setdefault("poll_interval_seconds", 0.16)
+            args.setdefault("stability_samples", 3)
+            args.setdefault("stability_interval_ms", 120)
         elif tool_name == "desktop_capture_screenshot":
             args.setdefault("scope", "active_window")
             args.setdefault("limit", 12)
+        elif tool_name in {"desktop_move_mouse", "desktop_hover_point", "desktop_click_mouse", "desktop_scroll"}:
+            args.setdefault("max_observation_age_seconds", 45)
+            if tool_name == "desktop_hover_point":
+                args.setdefault("hover_ms", 600)
+            if tool_name == "desktop_scroll":
+                args.setdefault("direction", "down")
+                args.setdefault("scroll_units", 3)
         elif tool_name == "desktop_click_point":
+            args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_press_key":
+            args.setdefault("repeat", 1)
+            args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_press_key_sequence":
             args.setdefault("max_observation_age_seconds", 45)
         elif tool_name == "desktop_type_text":
             args.setdefault("max_text_length", 160)
             args.setdefault("max_observation_age_seconds", 45)
+        elif tool_name == "desktop_list_processes":
+            args.setdefault("limit", 8)
+            args.setdefault("include_background", True)
+        elif tool_name == "desktop_inspect_process":
+            args.setdefault("child_limit", 4)
+            if not any(str(args.get(key, "")).strip() for key in ("pid", "process_name", "owned_label")):
+                active_process_name = str(getattr(task_state, "desktop_active_window_process", "")).strip()
+                if active_process_name:
+                    args.setdefault("process_name", active_process_name)
+        elif tool_name == "desktop_start_process":
+            args.setdefault("owned_label", "")
+        elif tool_name == "desktop_stop_process":
+            args.setdefault("wait_seconds", 2)
+        elif tool_name == "desktop_run_command":
+            args.setdefault("timeout_seconds", 8)
+            args.setdefault("shell_kind", "powershell")
 
         if tool_name in DESKTOP_APPROVAL_CONTROLLED_TOOLS:
             approval_status = str(args.get("approval_status", "")).strip().lower()
@@ -317,7 +400,6 @@ class ToolRuntime:
         checkpoint_pending = bool(getattr(task_state, "desktop_checkpoint_pending", False))
         checkpoint_tool = getattr(task_state, "desktop_checkpoint_tool", "")
         checkpoint_reason = getattr(task_state, "desktop_checkpoint_reason", "")
-        checkpoint_target = getattr(task_state, "desktop_checkpoint_target", "")
         checkpoint_args = getattr(task_state, "desktop_checkpoint_resume_args", {})
 
         if checkpoint_pending:
@@ -336,7 +418,15 @@ class ToolRuntime:
                     args["checkpoint_required"] = False
                 else:
                     args.setdefault("checkpoint_required", True)
-            elif tool_name in {"desktop_focus_window", "desktop_capture_screenshot", "desktop_get_active_window", "desktop_list_windows"}:
+            elif tool_name in {
+                "desktop_focus_window",
+                "desktop_inspect_window_state",
+                "desktop_recover_window",
+                "desktop_wait_for_window_ready",
+                "desktop_capture_screenshot",
+                "desktop_get_active_window",
+                "desktop_list_windows",
+            }:
                 if checkpoint_target:
                     args.setdefault("target_window", checkpoint_target)
 

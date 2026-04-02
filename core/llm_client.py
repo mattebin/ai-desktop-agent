@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import re
+from pathlib import Path
 
 import requests
 
@@ -77,6 +80,62 @@ def _extract_first_section_item(final_context: str, heading: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _desktop_vision_requested(vision: dict | None) -> bool:
+    return bool(isinstance(vision, dict) and vision.get("needs_direct_image", False) and isinstance(vision.get("images", []), list))
+
+
+def _image_data_url(path_text: str) -> str:
+    path = Path(str(path_text or "").strip())
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        payload = path.read_bytes()
+    except Exception:
+        return ""
+    if not payload:
+        return ""
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _content_with_desktop_vision(text: str, desktop_vision: dict | None):
+    if not _desktop_vision_requested(desktop_vision):
+        return text
+
+    images = []
+    image_lines = []
+    for index, item in enumerate(list(desktop_vision.get("images", []))[:2]):
+        if not isinstance(item, dict):
+            continue
+        data_url = _image_data_url(item.get("artifact_path", ""))
+        if not data_url:
+            continue
+        role = str(item.get("role", "")).strip() or f"image {index + 1}"
+        detail = str(item.get("summary", "") or item.get("active_window_title", "")).strip()
+        image_lines.append(f"- Attached desktop image {index + 1} ({role}): {detail or 'selected screenshot evidence'}")
+        images.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                    "detail": "low",
+                },
+            }
+        )
+
+    if not images:
+        return text
+
+    guidance = str(desktop_vision.get("summary", "")).strip()
+    combined_text = str(text or "").strip()
+    if guidance:
+        combined_text += ("\n\n" if combined_text else "") + f"Desktop vision guidance:\n{guidance}"
+    if image_lines:
+        combined_text += ("\n\n" if combined_text else "") + "Bounded attached desktop image evidence:\n" + "\n".join(image_lines)
+    return [{"type": "text", "text": combined_text}, *images]
 
 
 def _extract_outcome_state(final_context: str) -> str:
@@ -548,7 +607,7 @@ class HostedLLMClient:
             "source": "config/settings.yaml",
         }
 
-    def _call(self, messages, tools=None):
+    def _call(self, messages, tools=None, *, timeout_seconds=None):
         payload = {
             "model": self.model,
             "messages": messages,
@@ -563,17 +622,30 @@ class HostedLLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        has_images = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "image_url" for part in message.get("content", []))
+            for message in messages
+            if isinstance(message, dict)
+        )
+
+        timeout = 120 if has_images else 60
+        try:
+            if timeout_seconds is not None:
+                timeout = max(5, float(timeout_seconds))
+        except (TypeError, ValueError):
+            timeout = 120 if has_images else 60
 
         r = requests.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60,
+            timeout=timeout,
         )
         r.raise_for_status()
         return r.json()
 
-    def plan_next_action(self, goal, observation, tools):
+    def plan_next_action(self, goal, observation, tools, *, desktop_vision=None):
         messages = [
             {
                 "role": "developer",
@@ -595,16 +667,28 @@ class HostedLLMClient:
                     "Use apply_approved_edits only when the user has explicitly approved exact edits and the tool input already contains approval_status=approved plus concrete edit instructions. Never infer approval or auto-apply proposed edits. "
                     "Use the browser_* tools only for browser pages or web-app tasks; keep them separate from desktop control. "
                     "Use the desktop_* tools only for bounded native Windows desktop inspection or one-step interaction. "
-                    "For desktop work, inspect first: prefer desktop_list_windows, desktop_get_active_window, or desktop_capture_screenshot before acting. "
-                    "Use desktop_focus_window to activate the intended window before any desktop click or type if the target window is not already active. "
+                    "For desktop work, inspect first: use desktop_list_windows or desktop_get_active_window for quick window state, desktop_inspect_window_state when the target may be minimized, hidden, loading, wrong-foreground, or visually unstable, and desktop_capture_screenshot for bounded screenshot evidence. "
+                    "Use desktop_focus_window for normal bounded focus, desktop_recover_window when the target needs restore/show/refocus recovery, and desktop_wait_for_window_ready when the window exists but still looks loading, not ready, or visually unstable. "
                     "desktop_capture_screenshot only captures bounded state; it does not interpret pixels or do OCR. "
-                    "desktop_click_point and desktop_type_text are approval-gated in this pass. Only pass approval_status=approved when the current goal explicitly says the paused desktop action is now approved. Never invent approval_status=approved on your own. "
-                    "If the user wants a real desktop click or type action that is not yet approved, you must still plan the corresponding desktop_click_point or desktop_type_text call without approval_status=approved so the tool can create the structured paused checkpoint. Do not replace that with a prose-only approval request. "
+                    "Use the Selected desktop evidence, Checkpoint desktop evidence, Selected desktop scene, and Checkpoint desktop scene lines in the observation as the authoritative compact grounding for desktop reasoning; do not ignore them or invent a second desktop state narrative. "
+                    "When bounded desktop image evidence is attached, treat it as the authoritative direct visual grounding for the selected desktop window or checkpoint. "
+                    "If a desktop scene line says the scene is loading, blocked, prompt-like, dialog-like, or changed, respect that compact interpretation before planning more desktop actions. "
+                    "Use attached images only when compact summaries are not enough, and do not ask for another identical screenshot if the attached image already answers the desktop question. "
+                    "If the selected desktop evidence assessment says the current evidence is sufficient for a read-only desktop answer, answer from that evidence instead of collecting another identical observation. "
+                    "If the desktop evidence assessment says refresh is needed before a desktop action, collect one fresh desktop observation or screenshot before planning the paused desktop action. Do not loop on repeated refreshes. "
+                    "When a paused desktop approval exists, ground the approval explanation in the linked checkpoint desktop evidence summary and assessment. "
+                    "Use desktop_move_mouse, desktop_hover_point, desktop_click_mouse, and desktop_scroll for bounded mouse control when exact coordinates or a bounded relative target are already established from prior inspected desktop evidence. "
+                    "Use desktop_press_key for one safe key combo, desktop_press_key_sequence for a short bounded chain of safe combos, desktop_type_text for bounded field text entry, desktop_list_processes and desktop_inspect_process for local process diagnostics, desktop_start_process and desktop_stop_process only for bounded owned processes, and desktop_run_command only for one bounded local command with timeout. "
+                    "desktop_click_point, desktop_move_mouse, desktop_hover_point, desktop_click_mouse, desktop_scroll, desktop_press_key, desktop_press_key_sequence, desktop_type_text, desktop_start_process, desktop_stop_process, and desktop_run_command are approval-gated in this pass. Only pass approval_status=approved when the current goal explicitly says the paused desktop action is now approved. Never invent approval_status=approved on your own. "
+                    "If the user wants a real desktop mouse action, bounded key action, desktop type action, process action, or bounded command execution that is not yet approved, you must still plan the corresponding desktop_* tool call without approval_status=approved so the tool can create the structured paused checkpoint. Do not replace that with a prose-only approval request. "
                     "After the safe inspect/focus steps succeed, prefer the actual paused desktop tool call over finishing early when the goal explicitly asks for one bounded click or one bounded text entry. "
                     "Never invent desktop coordinates. Only use exact coordinates provided by the user or already established in prior observed desktop state. "
+                    "desktop_press_key is only for safe navigation keys and a small allowlist of Ctrl-based shortcuts in the currently active window. Do not use it for unrestricted hotkeys, Windows/system keys, or global shortcuts. "
+                    "desktop_press_key_sequence is only for short bounded combinations from that same safe allowlist. Do not turn it into freeform macro playback. "
                     "desktop_type_text is only for bounded text into the currently focused desktop field in the active window. Do not use it for passwords, secrets, or long freeform text. "
+                    "desktop_start_process, desktop_stop_process, and desktop_run_command are for bounded local control and diagnostics only. Do not treat them as unrestricted system management or a general shell agent. "
                     "If the user already gave the exact non-sensitive field label and text to type, you may rely on that user-provided field_label once the intended window is focused; do not demand screenshot or OCR proof of the field label before creating the paused desktop_type_text checkpoint. "
-                    "Keep desktop control to one bounded action at a time. No hotkeys, drag-and-drop, repeated clicking loops, autonomous desktop navigation, or generalized mouse/keyboard control. "
+                    "Keep desktop control to one bounded action at a time. No hotkeys outside the safe allowlist, drag-and-drop, repeated clicking loops, autonomous desktop navigation, or generalized mouse/keyboard control. "
                     "If the requested desktop target window is missing, say that clearly instead of guessing. "
                     "If no browser page is currently open, use browser_open_page first. Do not call browser_inspect_page, browser_click, browser_type, browser_extract_text, or browser_follow_link before a page is open. "
                     "Once a page is open, use browser_inspect_page for page-level understanding before clicking or typing when the structure is unknown. "
@@ -624,7 +708,7 @@ class HostedLLMClient:
                     "Browser tools support limited recovery with max_retries, allow_reinspect, and allow_reload. Keep retries bounded, and after repeated failures prefer browser_inspect_page or a different locator instead of repeating the exact same action blindly. "
                     "Read only the top one or two relevant files first, and avoid low-signal files like tests or cache/build output unless the goal points there. "
                     "Use browser_open_page, browser_inspect_page, browser_click, browser_type, browser_extract_text, and browser_follow_link for bounded browser-only work. "
-                    "Use desktop_list_windows, desktop_get_active_window, desktop_focus_window, and desktop_capture_screenshot for bounded desktop inspection, and use desktop_click_point or desktop_type_text only after explicit approval when a single real desktop action is required. "
+                    "Use desktop_list_windows, desktop_get_active_window, desktop_inspect_window_state, desktop_focus_window, desktop_recover_window, desktop_wait_for_window_ready, and desktop_capture_screenshot for bounded desktop inspection and recovery, and use desktop_move_mouse, desktop_hover_point, desktop_click_mouse, desktop_click_point, desktop_scroll, desktop_press_key, desktop_press_key_sequence, desktop_type_text, desktop_start_process, desktop_stop_process, or desktop_run_command only after explicit approval when a single real bounded control action is required. "
                     "Use list_files to inspect folders, search_files to find likely targets, compare_files to compare two candidate files, suggest_commands for non-executing PowerShell suggestions, plan_patch for non-executing change plans, draft_proposed_edits for non-executing reviewable edit drafts, build_review_bundle for approval-ready review packaging, apply_approved_edits for explicit approved file writes with backups, read_file only for relevant files, "
                     "and run_shell only for safe read-only inspection when execution is explicitly necessary. "
                     "Respect the Operator mode, Task phase, Waiting for, Next human action, and Action policy lines in the observation. "
@@ -638,7 +722,10 @@ class HostedLLMClient:
             },
             {
                 "role": "user",
-                "content": f"Goal:\n{goal}\n\nObservation:\n{observation}",
+                "content": _content_with_desktop_vision(
+                    f"Goal:\n{goal}\n\nObservation:\n{observation}",
+                    desktop_vision,
+                ),
             },
         ]
 
@@ -669,7 +756,7 @@ class HostedLLMClient:
 
         return {"tool": name, "args": args}
 
-    def reply_in_chat(self, user_message, *, session_context="", mode="chat"):
+    def reply_in_chat(self, user_message, *, session_context="", mode="chat", desktop_vision=None):
         messages = [
             {
                 "role": "developer",
@@ -687,6 +774,8 @@ class HostedLLMClient:
                     "If the prior task was stopped, explicitly say it was stopped or halted before completion, and say whether any meaningful work had already happened. "
                     "If the user asks what the most important next step is after finished or interrupted work, give one primary recommendation grounded in the provided context instead of a long list. "
                     "If approval is required, make that explicit and brief, and tell the user exactly what decision is blocking progress. "
+                    "If a desktop approval or desktop investigation context includes compact evidence summary lines or scene lines, use that evidence compactly instead of vague desktop narration. "
+                    "When bounded desktop image evidence is attached, use it as the direct visual grounding for the current desktop reply instead of speculating from text alone. "
                     "If the mode is final_report, answer from the completed work as one authoritative reply rather than a stream of status updates. "
                     "Do not claim you started, applied, approved, clicked, typed, or changed anything unless the provided context explicitly says it already happened. "
                     "Keep the response calm and conversation-first. Avoid headings unless they clearly help."
@@ -694,17 +783,20 @@ class HostedLLMClient:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Reply mode: {mode}\n\n"
-                    f"Session Context:\n{session_context}\n\n"
-                    f"Latest User Message:\n{user_message}"
+                "content": _content_with_desktop_vision(
+                    (
+                        f"Reply mode: {mode}\n\n"
+                        f"Session Context:\n{session_context}\n\n"
+                        f"Latest User Message:\n{user_message}"
+                    ),
+                    desktop_vision,
                 ),
             },
         ]
         data = self._call(messages)
         return data["choices"][0]["message"]["content"].strip()
 
-    def finalize(self, goal, steps, observation="", final_context=""):
+    def finalize(self, goal, steps, observation="", final_context="", *, desktop_vision=None, timeout_seconds=None):
         messages = [
             {
                 "role": "developer",
@@ -734,20 +826,26 @@ class HostedLLMClient:
                     "Never describe drafted edits or planned changes as completed or applied. "
                     "Never imply blocked or paused browser actions succeeded; state clearly what was observed, clicked, typed, followed, paused pending approval, resumed after approval, or blocked pending approval. "
                     "Never imply paused or rejected desktop actions succeeded; state clearly what windows were inspected, which window was focused, whether a screenshot was captured, and whether a desktop click or type action was approved, executed, blocked, or rejected. "
+                    "When compact desktop evidence summaries, desktop evidence assessment lines, or desktop scene lines are present, use them to ground desktop-related conclusions and approval explanations in one or two calm sentences instead of vague desktop prose. "
+                    "When bounded desktop image evidence is attached, use it as the direct visual grounding for desktop conclusions, changed-state interpretation, and approval explanations instead of pretending the summaries alone proved everything. "
+                    "If desktop evidence was sufficient, say what evidence you relied on in compact form when that materially improves trust. If desktop evidence was partial, stale, or missing, say that clearly without implying the desktop state is fully confirmed. "
                     "When browser task-library or workflow state is present, summarize it cleanly instead of dumping internal labels. "
                     "Use markdown sparingly and only when it improves scanability."
                 ),
             },
             {
                 "role": "user",
-                "content": (
-                    f"Goal:\n{goal}\n\n"
-                    f"Final Context:\n{final_context}\n\n"
-                    f"Observation:\n{observation}\n\n"
-                    f"Steps:\n{json.dumps(steps, indent=2, ensure_ascii=False)}"
+                "content": _content_with_desktop_vision(
+                    (
+                        f"Goal:\n{goal}\n\n"
+                        f"Final Context:\n{final_context}\n\n"
+                        f"Observation:\n{observation}\n\n"
+                        f"Steps:\n{json.dumps(steps, indent=2, ensure_ascii=False)}"
+                    ),
+                    desktop_vision,
                 ),
             },
         ]
-        data = self._call(messages)
+        data = self._call(messages, timeout_seconds=timeout_seconds)
         message = data["choices"][0]["message"]["content"].strip()
         return _ensure_core_final_sections(message, goal, final_context)

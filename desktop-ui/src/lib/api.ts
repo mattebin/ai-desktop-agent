@@ -13,6 +13,55 @@ export type PendingApproval = {
   reason?: string;
   summary?: string;
   step?: string;
+  tool?: string;
+  target?: string;
+  evidence_summary?: string;
+  evidence_preview?: EvidenceSummary;
+};
+
+export type EvidenceSummary = {
+  evidence_id?: string;
+  timestamp?: string;
+  source_action?: string;
+  evidence_kind?: string;
+  reason?: string;
+  summary?: string;
+  active_window_title?: string;
+  active_window_class_name?: string;
+  active_window_process?: string;
+  target_window_title?: string;
+  window_count?: number;
+  monitor_count?: number;
+  screen_size?: string;
+  window_summary?: string;
+  screen_summary?: string;
+  has_screenshot?: boolean;
+  has_artifact?: boolean;
+  screenshot_scope?: string;
+  screenshot_backend?: string;
+  screenshot_path?: string;
+  bundle_path?: string;
+  ui_evidence_present?: boolean;
+  ui_control_count?: number;
+  observation_token?: string;
+  is_partial?: boolean;
+  recency_seconds?: number;
+  backend?: string;
+  selection_reason?: string;
+};
+
+export type EvidenceArtifact = {
+  evidence_id?: string;
+  artifact_available?: boolean;
+  artifact_type?: string;
+  artifact_path?: string;
+  artifact_name?: string;
+  availability_state?: string;
+  reason?: string;
+  can_preview?: boolean;
+  content_path?: string;
+  bundle_path?: string;
+  summary?: string;
 };
 
 export type SessionMessage = {
@@ -83,6 +132,23 @@ export type BrowserState = {
   last_successful_action?: string;
 };
 
+export type DesktopState = {
+  active_window_title?: string;
+  active_window_process?: string;
+  last_action?: string;
+  last_target_window?: string;
+  screenshot_path?: string;
+  evidence_id?: string;
+  evidence_summary?: string;
+  evidence_bundle_path?: string;
+  checkpoint_pending?: boolean;
+  checkpoint_tool?: string;
+  checkpoint_reason?: string;
+  checkpoint_evidence_id?: string;
+  selected_evidence?: EvidenceSummary;
+  checkpoint_evidence?: EvidenceSummary;
+};
+
 export type RuntimeConfig = {
   active_model?: string;
   reasoning_effort?: string;
@@ -120,6 +186,7 @@ export type StatusPayload = {
   latest_alert?: AlertItem;
   latest_run?: RunEntry;
   runtime?: RuntimeConfig;
+  desktop?: DesktopState;
 };
 
 export type AlertItem = {
@@ -237,6 +304,24 @@ export type EnsureLocalApiResult = {
   managedByDesktop: boolean;
   runtimeStatus?: DesktopRuntimeStatus;
   logPath?: string;
+  backendLogPath?: string;
+};
+
+export type DesktopEvidencePayload = {
+  recent?: Array<Record<string, unknown>>;
+  recent_summaries?: EvidenceSummary[];
+  status?: {
+    root?: string;
+    count?: number;
+    latest?: Record<string, unknown>;
+    latest_summary?: EvidenceSummary;
+    available?: boolean;
+    reason?: string;
+  };
+};
+
+export type DesktopEvidenceArtifactPayload = {
+  artifact?: EvidenceArtifact;
 };
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -288,8 +373,34 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit, que
   return payload.data as T;
 }
 
+function normalizeInvokeError(error: unknown): string {
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+  return "Tauri bootstrap failed.";
+}
+
+async function waitForLocalOperator(baseUrl: string, timeoutMs = 20000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    try {
+      await request<Record<string, unknown>>(baseUrl, "/health");
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "The local operator is not reachable yet.";
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    }
+  }
+  throw new Error(lastError || `Failed to fetch ${buildUrl(baseUrl, "/health")}`);
+}
+
 export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
   let tauriError = "";
+  let bootResult: EnsureLocalApiResult | null = null;
   try {
     const result = await invoke<{
       baseUrl?: string;
@@ -297,20 +408,30 @@ export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
       managedByDesktop?: boolean;
       runtimeStatus?: DesktopRuntimeStatus;
       logPath?: string;
+      backendLogPath?: string;
     }>("ensure_local_api");
-    return {
+    bootResult = {
       baseUrl: normalizeBaseUrl(result.baseUrl || DEFAULT_API_BASE_URL),
       started: Boolean(result.started),
       managedByDesktop: Boolean(result.managedByDesktop),
       runtimeStatus: result.runtimeStatus,
       logPath: result.logPath,
+      backendLogPath: result.backendLogPath,
     };
+    await waitForLocalOperator(bootResult.baseUrl);
+    return bootResult;
   } catch (error) {
-    tauriError = error instanceof Error ? error.message : "Tauri bootstrap failed.";
+    tauriError = normalizeInvokeError(error);
+    if (bootResult?.baseUrl) {
+      const logNote = [bootResult.logPath ? `Runtime log: ${bootResult.logPath}.` : "", bootResult.backendLogPath ? `Backend log: ${bootResult.backendLogPath}.` : ""]
+        .filter(Boolean)
+        .join(" ");
+      throw new Error(`Local operator startup failed for ${bootResult.baseUrl}. ${tauriError}${logNote ? ` ${logNote}` : ""}`.trim());
+    }
   }
 
   try {
-    await request<Record<string, unknown>>(DEFAULT_API_BASE_URL, "/health");
+    await waitForLocalOperator(DEFAULT_API_BASE_URL, 6000);
     return {
       baseUrl: normalizeBaseUrl(DEFAULT_API_BASE_URL),
       started: false,
@@ -319,7 +440,7 @@ export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
   } catch (error) {
     const httpError = error instanceof Error ? error.message : "HTTP fallback failed.";
     if (tauriError) {
-      throw new Error(`Unable to reach the local operator. ${tauriError} ${httpError}`.trim());
+      throw new Error(`Unable to reach the local operator. Desktop bootstrap: ${tauriError} HTTP fallback: ${httpError}`.trim());
     }
     throw error;
   }
@@ -377,6 +498,18 @@ export async function getAlerts(baseUrl: string, sessionId = "", limit = 8): Pro
     limit,
     session_id: sessionId || undefined,
   });
+}
+
+export async function getDesktopEvidence(baseUrl: string, limit = 8): Promise<DesktopEvidencePayload> {
+  return request<DesktopEvidencePayload>(baseUrl, "/desktop/evidence", undefined, { limit });
+}
+
+export async function getDesktopEvidenceArtifact(baseUrl: string, evidenceId: string): Promise<DesktopEvidenceArtifactPayload> {
+  return request<DesktopEvidenceArtifactPayload>(baseUrl, `/desktop/evidence/${encodeURIComponent(evidenceId)}/artifact`);
+}
+
+export function getDesktopEvidenceArtifactContentUrl(baseUrl: string, evidenceId: string): string {
+  return buildUrl(baseUrl, `/desktop/evidence/${encodeURIComponent(evidenceId)}/artifact/content`);
 }
 
 export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: RunEntry[] }> {
