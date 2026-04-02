@@ -1,6 +1,50 @@
 # AI Desktop Operator
 
-A local Windows 11 chat-first AI operator project focused on becoming a real controllable operator, not just a chatbot with tools.
+Local chat-first AI desktop operator for Windows that analyzes, plans, and executes tasks with controlled actions.
+
+## What this is
+
+This project is not a chatbot and not a collection of scripts.
+
+It is a structured local operator system that:
+- observes the desktop, apps, and browser
+- interprets what is happening
+- plans multi-step actions
+- executes them in a controlled and observable way
+- requires approval for sensitive actions
+
+## Key features
+
+- local API as the main control surface
+- chat-first desktop UI
+- evidence-based desktop reasoning
+- scene interpretation and workflow awareness
+- approval-gated desktop and browser actions
+- bounded desktop control primitives
+- local-first architecture with controlled runtime behavior
+
+## Why it’s different
+
+Most automation systems rely on fragile scripts, blind execution, or broad unsafe control.
+
+This system is built around:
+- explicit state and task lifecycle
+- evidence selection and approval grounding
+- recovery and readiness checks
+- bounded action scope
+- controllable local execution
+
+## Tech stack
+
+- Python for core logic
+- Playwright for browser automation
+- Tauri + React for desktop UI
+- local API control layer
+- optional local infrastructure backends for scheduling, file watching, window metadata, and screenshot capture
+
+## Project status
+
+Actively developed. Core architecture is in place, with current work focused on reliability, grounded desktop control, and better end-to-end operator usefulness.
 
 ## Current status
 
@@ -168,7 +212,7 @@ The bounded desktop recovery layer now supports:
 - bounded restore/show/focus recovery
 - bounded readiness and visual-stability checks
 
-See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.
+See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.  
 See [docs/DESKTOP_EVIDENCE_ARCHITECTURE.md](docs/DESKTOP_EVIDENCE_ARCHITECTURE.md) for the current semi-final subsystem shape.
 
 Recent integration work also wired those recovery tools into the real desktop loop and added a focused `desktop_recovery_grounding` live scenario for minimized, wrong-foreground, loading, and unstable states. The main remaining live validation limitation is fully withdrawn or tray-like hidden windows, which are still reported clearly as not visibly present instead of being force-recovered.
@@ -208,8 +252,10 @@ Highest current priorities:
 - `main` = stable baseline
 - feature branches = current implementation work
 
+## Links
+
+- Repository: https://github.com/mattebin/ai-desktop-agent
+
 ## Notes
 
-- do not commit build artifacts
-- keep `.gitignore` clean
-- use commits and branches for each meaningful pass
+This repository is shared publicly for demonstration and portfolio purposes.
