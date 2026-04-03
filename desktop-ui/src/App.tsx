@@ -1,4 +1,5 @@
-import React, { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
+import React, { createContext, startTransition, useContext, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -16,7 +17,7 @@ import {
   ensureLocalApi,
   getAlerts,
   getDesktopEvidenceArtifact,
-  getDesktopEvidenceArtifactContentUrl,
+  isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
   getQueueState,
   getRecentRuns,
@@ -28,6 +29,7 @@ import {
   listSessions,
   openSessionEventStream,
   rejectPending,
+  resolveDesktopEvidenceArtifactPreviewUrl,
   RunFocus,
   RunEntry,
   sendSessionMessage,
@@ -69,6 +71,8 @@ type ArtifactViewerState = {
   sourceLabel: string;
   heading: string;
   artifact: EvidenceArtifact | null;
+  previewUrl: string;
+  imageStatus: "idle" | "loading" | "ready" | "error";
   error: string;
 };
 
@@ -307,11 +311,43 @@ function normalizeMessages(messages: SessionMessage[]): SessionMessage[] {
   return ordered;
 }
 
+function mergeMessages(current: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
+  if (!incoming.length) {
+    return normalizeMessages(current);
+  }
+  if (!current.length) {
+    return normalizeMessages(incoming);
+  }
+  return normalizeMessages([...incoming, ...current]);
+}
+
 function upsertSession(sessions: SessionSummary[], session: SessionSummary): SessionSummary[] {
   const next = sessions.filter((item) => item.session_id !== session.session_id);
   next.push(session);
   next.sort((left, right) => (right.updated_at || "").localeCompare(left.updated_at || ""));
   return next;
+}
+
+function shouldRefreshControlDataFromFrame(frame?: StreamFramePayload | null): boolean {
+  if (!frame) {
+    return false;
+  }
+  const changed = new Set(
+    Array.isArray(frame.changed)
+      ? frame.changed
+          .map((item) => String(item || "").trim().toLowerCase())
+          .filter(Boolean)
+      : [],
+  );
+  if (!changed.size) {
+    return Boolean(frame.alerts?.length);
+  }
+  for (const key of ["task", "task_progress", "pending_approval", "desktop", "alerts"]) {
+    if (changed.has(key)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function formatTime(value?: string): string {
@@ -580,6 +616,18 @@ function SectionTitle({
   );
 }
 
+const CompactMenuContext = createContext<(() => void) | null>(null);
+
+function OverlayPortal({ children }: { children: React.ReactNode }) {
+  const [container, setContainer] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setContainer(document.body);
+  }, []);
+
+  return container ? createPortal(children, container) : null;
+}
+
 function CompactMenu({
   label,
   icon,
@@ -589,14 +637,94 @@ function CompactMenu({
   icon: Parameters<typeof UiIcon>[0]["name"];
   children: React.ReactNode;
 }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, minWidth: 198 });
+
+  function closeMenu() {
+    setOpen(false);
+  }
+
+  function updatePosition() {
+    const trigger = triggerRef.current;
+    if (!trigger) {
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    const minWidth = Math.max(Math.round(rect.width), 198);
+    const maxLeft = Math.max(12, window.innerWidth - minWidth - 12);
+    const left = Math.max(12, Math.min(Math.round(rect.right - minWidth), maxLeft));
+    const top = Math.round(rect.bottom + 8);
+    setPosition({ top, left, minWidth });
+  }
+
+  useLayoutEffect(() => {
+    if (!open) {
+      return;
+    }
+    updatePosition();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (target && (triggerRef.current?.contains(target) || popoverRef.current?.contains(target))) {
+        return;
+      }
+      closeMenu();
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    }
+    function handleWindowChange() {
+      closeMenu();
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleWindowChange);
+    window.addEventListener("scroll", handleWindowChange, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleWindowChange);
+      window.removeEventListener("scroll", handleWindowChange, true);
+    };
+  }, [open]);
+
   return (
-    <details className="compact-menu">
-      <summary className="ghost-button compact-menu-trigger">
-        <UiIcon name={icon} />
-        <span>{label}</span>
-      </summary>
-      <div className="compact-menu-popover">{children}</div>
-    </details>
+    <CompactMenuContext.Provider value={closeMenu}>
+      <div className={clsx("compact-menu", open && "is-open")}>
+        <button
+          aria-expanded={open}
+          className="ghost-button compact-menu-trigger"
+          onClick={() => setOpen((current) => !current)}
+          ref={triggerRef}
+          type="button"
+        >
+          <UiIcon name={icon} />
+          <span>{label}</span>
+        </button>
+        {open ? (
+          <OverlayPortal>
+            <div className="compact-menu-popover-layer">
+              <div
+                className="compact-menu-popover"
+                ref={popoverRef}
+                style={{ top: `${position.top}px`, left: `${position.left}px`, minWidth: `${position.minWidth}px` }}
+              >
+                {children}
+              </div>
+            </div>
+          </OverlayPortal>
+        ) : null}
+      </div>
+    </CompactMenuContext.Provider>
   );
 }
 
@@ -609,16 +737,14 @@ function CompactMenuButton({
   children: React.ReactNode;
   onClick: () => void;
 }) {
+  const closeMenu = useContext(CompactMenuContext);
   return (
     <button
       className="compact-menu-item"
       type="button"
-      onClick={(event) => {
+      onClick={() => {
         onClick();
-        const details = event.currentTarget.closest("details");
-        if (details instanceof HTMLDetailsElement) {
-          details.open = false;
-        }
+        closeMenu?.();
       }}
     >
       <UiIcon name={icon} />
@@ -1024,7 +1150,10 @@ function mergeSessionDetail(current: SessionDetail | null, session: SessionSumma
   if (!session?.session_id) {
     return current;
   }
-  if (!current || current.session_id !== session.session_id) {
+  if (!current) {
+    return session as SessionDetail;
+  }
+  if (current.session_id !== session.session_id) {
     return current;
   }
   return { ...current, ...session };
@@ -1080,6 +1209,8 @@ export default function App() {
     sourceLabel: "",
     heading: "",
     artifact: null,
+    previewUrl: "",
+    imageStatus: "idle",
     error: "",
   });
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
@@ -1100,8 +1231,11 @@ export default function App() {
   const lastTranscriptSignatureRef = useRef("");
   const lastStatusFingerprintRef = useRef("");
   const lastSessionFingerprintRef = useRef("");
+  const sessionDetailRef = useRef<SessionDetail | null>(null);
+  const messagesRef = useRef<SessionMessage[]>([]);
   const runFocusLockedRef = useRef(false);
   const runFocusSessionRef = useRef("");
+  const conversationLoadVersionRef = useRef(0);
   const pendingStreamFrameRef = useRef<PendingStreamFrame>({
     messages: [],
     activity: [],
@@ -1129,6 +1263,14 @@ export default function App() {
   useEffect(() => {
     detailsOpenRef.current = detailsOpen;
   }, [detailsOpen]);
+
+  useEffect(() => {
+    sessionDetailRef.current = sessionDetail;
+  }, [sessionDetail]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     const focus = (status?.run_focus || sessionDetail?.operator?.run_focus || {}) as RunFocus;
@@ -1243,7 +1385,12 @@ export default function App() {
     return resolved;
   }
 
-  async function loadConversation(sessionId: string) {
+  async function loadConversation(
+    sessionId: string,
+    options: {
+      preserveVisibleState?: boolean;
+    } = {},
+  ) {
     if (!apiBaseUrl || !sessionId) {
       setSessionDetail(null);
       setMessages([]);
@@ -1251,6 +1398,10 @@ export default function App() {
       setAlerts([]);
       return;
     }
+    const requestVersion = conversationLoadVersionRef.current + 1;
+    conversationLoadVersionRef.current = requestVersion;
+    const preserveVisibleState =
+      Boolean(options.preserveVisibleState) || sessionDetailRef.current?.session_id === sessionId;
     setLoadingConversation(true);
     try {
       const [detailPayload, messagesPayload, statusPayload, alertsPayload] = await Promise.all([
@@ -1259,13 +1410,23 @@ export default function App() {
         getStatus(apiBaseUrl, sessionId),
         getAlerts(apiBaseUrl, sessionId, 8),
       ]);
-      setSessionDetail(detailPayload.session);
-      setMessages(normalizeMessages(messagesPayload.messages || messagesPayload.items || detailPayload.session.messages || []));
+      if (conversationLoadVersionRef.current !== requestVersion || selectedSessionRef.current !== sessionId) {
+        return;
+      }
+      const fetchedMessages = normalizeMessages(messagesPayload.messages || messagesPayload.items || detailPayload.session.messages || []);
+      setSessionDetail((current) =>
+        current?.session_id === sessionId && preserveVisibleState ? { ...current, ...detailPayload.session } : detailPayload.session,
+      );
+      setMessages((current) =>
+        preserveVisibleState && selectedSessionRef.current === sessionId ? mergeMessages(current, fetchedMessages) : fetchedMessages,
+      );
       setStatus(statusPayload);
       setAlerts(alertsPayload.items || []);
       setSessions((current) => upsertSession(current, detailPayload.session));
     } finally {
-      setLoadingConversation(false);
+      if (conversationLoadVersionRef.current === requestVersion) {
+        setLoadingConversation(false);
+      }
     }
   }
 
@@ -1302,7 +1463,7 @@ export default function App() {
       setActivity((current) => [...pending.activity, ...current].slice(0, 30));
     }
     if (pending.messages.length) {
-      setMessages((current) => normalizeMessages([...current, ...pending.messages]));
+      setMessages((current) => mergeMessages(current, pending.messages));
     }
     if (pending.session?.session_id) {
       const sessionFingerprint = fingerprintValue(pending.session);
@@ -1355,7 +1516,13 @@ export default function App() {
     }, 70);
   }
 
-  function scheduleConversationRefresh(sessionId = selectedSessionRef.current) {
+  function scheduleConversationRefresh(
+    sessionId = selectedSessionRef.current,
+    options: {
+      includeConversation?: boolean;
+      includeControls?: boolean;
+    } = {},
+  ) {
     if (!sessionId) {
       return;
     }
@@ -1364,12 +1531,14 @@ export default function App() {
     }
     refreshTimerRef.current = window.setTimeout(() => {
       void refreshSidebar(sessionId);
-      void loadConversation(sessionId);
-      if (detailsOpenRef.current) {
+      if (options.includeConversation) {
+        void loadConversation(sessionId, { preserveVisibleState: true });
+      }
+      if (options.includeControls || detailsOpenRef.current) {
         void refreshControlData(sessionId);
       }
       refreshTimerRef.current = null;
-    }, 180);
+    }, options.includeConversation ? 180 : 120);
   }
 
   useEffect(() => {
@@ -1417,7 +1586,7 @@ export default function App() {
           return;
         }
         if (resolvedSession) {
-          await loadConversation(resolvedSession);
+          await loadConversation(resolvedSession, { preserveVisibleState: true });
         } else {
           const [operatorStatus, operatorAlerts] = await Promise.all([getStatus(apiBaseUrl), getAlerts(apiBaseUrl, "", 8)]);
           if (!alive) {
@@ -1445,7 +1614,12 @@ export default function App() {
     if (!apiBaseUrl || !selectedSessionId || bootState !== "ready") {
       return;
     }
-    void loadConversation(selectedSessionId);
+    const currentSessionId = sessionDetailRef.current?.session_id || "";
+    const hasVisibleState = currentSessionId === selectedSessionId && messagesRef.current.length > 0;
+    if (hasVisibleState) {
+      return;
+    }
+    void loadConversation(selectedSessionId, { preserveVisibleState: true });
   }, [apiBaseUrl, selectedSessionId, bootState]);
 
   useEffect(() => {
@@ -1534,7 +1708,7 @@ export default function App() {
             snapshot: syncData.snapshot,
             alerts: syncData.alerts,
             activity: activityUpdate,
-            shouldRefreshControls: Boolean(syncData.snapshot || syncData.alerts?.length),
+            shouldRefreshControls: shouldRefreshControlDataFromFrame(syncData),
           });
           return;
         }
@@ -1566,7 +1740,7 @@ export default function App() {
         }
 
         if (payload.event === "stream.reset") {
-          scheduleConversationRefresh(sessionId);
+          scheduleConversationRefresh(sessionId, { includeConversation: true });
         }
       } catch (_error) {
         setStreamState("reconnecting");
@@ -1622,6 +1796,7 @@ export default function App() {
         ? checkpointTargetProposalContext
         : selectedTargetProposalContext;
   const title = sessionDetail?.title || "New conversation";
+  const showConversationSkeleton = loadingConversation && !messages.length;
   const emptyState = !messages.length && !loadingConversation;
   const composerHint =
     sending
@@ -1694,7 +1869,7 @@ export default function App() {
         if (currentDraftKey === NEW_SESSION_DRAFT_KEY) {
           clearDraft("");
         }
-        scheduleConversationRefresh(nextSessionId);
+        scheduleConversationRefresh(nextSessionId, { includeControls: detailsOpenRef.current });
       } else {
         await refreshSidebar();
       }
@@ -1719,7 +1894,7 @@ export default function App() {
       if (result.status) {
         setStatus(result.status);
       }
-      scheduleConversationRefresh(selectedSessionId);
+      scheduleConversationRefresh(selectedSessionId, { includeControls: detailsOpenRef.current });
     } finally {
       setApproving("");
     }
@@ -1736,10 +1911,14 @@ export default function App() {
       sourceLabel,
       heading: evidenceSummaryText(preview),
       artifact: null,
+      previewUrl: "",
+      imageStatus: "loading",
       error: "",
     });
     try {
       const payload = await getDesktopEvidenceArtifact(apiBaseUrl, preview.evidence_id);
+      const previewUrl = resolveDesktopEvidenceArtifactPreviewUrl(apiBaseUrl, payload.artifact || null);
+      const previewImage = Boolean(previewUrl) && isDesktopEvidenceArtifactImage(payload.artifact || null);
       setArtifactViewer({
         open: true,
         loading: false,
@@ -1747,6 +1926,8 @@ export default function App() {
         sourceLabel,
         heading: evidenceSummaryText(preview),
         artifact: payload.artifact || null,
+        previewUrl: previewImage ? previewUrl : "",
+        imageStatus: previewImage ? "loading" : "idle",
         error: "",
       });
     } catch (error) {
@@ -1757,6 +1938,8 @@ export default function App() {
         sourceLabel,
         heading: evidenceSummaryText(preview),
         artifact: null,
+        previewUrl: "",
+        imageStatus: "error",
         error: error instanceof Error ? error.message : "Unable to load the retained artifact.",
       });
     }
@@ -1770,6 +1953,8 @@ export default function App() {
       sourceLabel: "",
       heading: "",
       artifact: null,
+      previewUrl: "",
+      imageStatus: "idle",
       error: "",
     });
   }
@@ -1781,7 +1966,7 @@ export default function App() {
     }
     const resolved = await refreshSidebar(selectedSessionId);
     if (resolved) {
-      await loadConversation(resolved);
+      await loadConversation(resolved, { preserveVisibleState: true });
     }
     if (detailsOpen) {
       await refreshControlData(resolved);
@@ -1923,7 +2108,7 @@ export default function App() {
                 </div>
               </div>
             </div>
-          ) : loadingConversation ? (
+          ) : showConversationSkeleton ? (
             <SkeletonTranscript />
           ) : emptyState ? (
             <div className="empty-state">
@@ -2270,54 +2455,79 @@ export default function App() {
       ) : null}
 
       {artifactViewer.open ? (
-        <div className="artifact-viewer">
-          <div className="artifact-viewer-backdrop" onClick={closeArtifactViewer} />
-          <section className="artifact-viewer-panel">
-            <header className="artifact-viewer-header">
-              <div>
-                <div className="eyebrow">{artifactViewer.sourceLabel || "Desktop evidence"}</div>
-                <h3>Evidence artifact</h3>
-                <p className="secondary-copy">{plainTextPreview(artifactViewer.heading || artifactViewer.artifact?.summary || "Desktop evidence artifact", 180)}</p>
+        <OverlayPortal>
+          <div className="artifact-viewer">
+            <div className="artifact-viewer-backdrop" onClick={closeArtifactViewer} />
+            <section className="artifact-viewer-panel">
+              <header className="artifact-viewer-header">
+                <div>
+                  <div className="eyebrow">{artifactViewer.sourceLabel || "Desktop evidence"}</div>
+                  <h3>Evidence artifact</h3>
+                  <p className="secondary-copy">{plainTextPreview(artifactViewer.heading || artifactViewer.artifact?.summary || "Desktop evidence artifact", 180)}</p>
+                </div>
+                <button className="ghost-button" onClick={closeArtifactViewer} type="button">
+                  Close
+                </button>
+              </header>
+
+              <div className="artifact-viewer-body">
+                {artifactViewer.loading ? (
+                  <div className="artifact-viewer-empty">
+                    <div className="spinner" />
+                    <p>Loading retained evidence...</p>
+                  </div>
+                ) : artifactViewer.error ? (
+                  <div className="artifact-viewer-empty artifact-viewer-empty-error">
+                    <h4>Unable to load the artifact</h4>
+                    <p>{artifactViewer.error}</p>
+                  </div>
+                ) : artifactViewer.previewUrl ? (
+                  <div className="artifact-preview-shell">
+                    {artifactViewer.imageStatus !== "ready" ? (
+                      <div className="artifact-preview-loading">
+                        <div className="spinner" />
+                        <p>Rendering retained screenshot...</p>
+                      </div>
+                    ) : null}
+                    <img
+                      alt={artifactViewer.heading || artifactViewer.artifact?.summary || "Desktop evidence artifact"}
+                      className="artifact-preview-image"
+                      onError={() =>
+                        setArtifactViewer((current) =>
+                          current.open
+                            ? {
+                                ...current,
+                                previewUrl: "",
+                                imageStatus: "error",
+                                error:
+                                  current.error || "The retained artifact metadata loaded, but the screenshot image itself could not be rendered.",
+                              }
+                            : current,
+                        )
+                      }
+                      onLoad={() =>
+                        setArtifactViewer((current) => (current.open ? { ...current, imageStatus: "ready" } : current))
+                      }
+                      src={artifactViewer.previewUrl}
+                    />
+                  </div>
+                ) : (
+                  <div className="artifact-viewer-empty">
+                    <h4>{artifactViewer.artifact?.artifact_available ? "Preview unavailable" : "Artifact unavailable"}</h4>
+                    <p>{artifactViewer.error || artifactStateMessage(artifactViewer.artifact)}</p>
+                  </div>
+                )}
               </div>
-              <button className="ghost-button" onClick={closeArtifactViewer} type="button">
-                Close
-              </button>
-            </header>
 
-            <div className="artifact-viewer-body">
-              {artifactViewer.loading ? (
-                <div className="artifact-viewer-empty">
-                  <div className="spinner" />
-                  <p>Loading retained evidence...</p>
-                </div>
-              ) : artifactViewer.error ? (
-                <div className="artifact-viewer-empty artifact-viewer-empty-error">
-                  <h4>Unable to load the artifact</h4>
-                  <p>{artifactViewer.error}</p>
-                </div>
-              ) : artifactViewer.artifact?.artifact_available && artifactViewer.artifact?.can_preview && artifactViewer.artifact?.evidence_id ? (
-                <div className="artifact-preview-shell">
-                  <img
-                    alt={artifactViewer.heading || artifactViewer.artifact.summary || "Desktop evidence artifact"}
-                    className="artifact-preview-image"
-                    src={getDesktopEvidenceArtifactContentUrl(apiBaseUrl, artifactViewer.artifact.evidence_id)}
-                  />
-                </div>
-              ) : (
-                <div className="artifact-viewer-empty">
-                  <h4>Artifact unavailable</h4>
-                  <p>{artifactStateMessage(artifactViewer.artifact)}</p>
-                </div>
-              )}
-            </div>
-
-            <footer className="artifact-viewer-footer">
-              {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
-              {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
-              {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
-            </footer>
-          </section>
-        </div>
+              <footer className="artifact-viewer-footer">
+                {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
+                {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
+                {artifactViewer.artifact?.artifact_type ? <span className="evidence-chip">{artifactViewer.artifact.artifact_type}</span> : null}
+                {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
+              </footer>
+            </section>
+          </div>
+        </OverlayPortal>
       ) : null}
     </div>
   );

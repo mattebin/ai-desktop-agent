@@ -60,7 +60,8 @@ _DESKTOP_PROPOSAL_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_press_key_sequence",
     "desktop_type_text",
 }
-_DESKTOP_ACTION_PACING_SECONDS = 0.18
+_DESKTOP_ACTION_PACING_SECONDS = 0.08
+_DESKTOP_ACTION_PACING_WINDOW_SECONDS = 0.6
 FINALIZE_MESSAGE_TIMEOUT_SECONDS = 30
 
 
@@ -613,13 +614,7 @@ def _execute_desktop_tool_step(
         return args, guarded_result
 
     if tool_name in _DESKTOP_MUTATING_TOOLS:
-        _emit_progress(
-            progress_callback,
-            "tool_step_attempted",
-            detail=f"Pacing bounded desktop action before execution: {tool_name}.",
-            tool_name=tool_name,
-        )
-        time.sleep(_DESKTOP_ACTION_PACING_SECONDS)
+        _maybe_pace_desktop_action(task_state, tool_name)
 
     _emit_progress(
         progress_callback,
@@ -1140,6 +1135,23 @@ def _maybe_finalize_desktop_action_guard(llm, task_state, result: dict, *, sessi
         session_store=session_store,
         progress_callback=progress_callback,
     )
+
+
+def _maybe_pace_desktop_action(task_state, tool_name: str):
+    now = time.monotonic()
+    last_attempt = float(getattr(task_state, "_desktop_last_mutation_attempt_at", 0.0) or 0.0)
+    last_tool = str(getattr(task_state, "_desktop_last_mutation_tool", "")).strip()
+    setattr(task_state, "_desktop_last_mutation_attempt_at", now)
+    setattr(task_state, "_desktop_last_mutation_tool", tool_name)
+    if last_attempt <= 0:
+        return
+    delta = now - last_attempt
+    if delta >= _DESKTOP_ACTION_PACING_WINDOW_SECONDS:
+        return
+    if last_tool and last_tool != tool_name:
+        time.sleep(min(_DESKTOP_ACTION_PACING_SECONDS * 0.5, 0.05))
+        return
+    time.sleep(_DESKTOP_ACTION_PACING_SECONDS)
 
 
 def _is_redundant_desktop_observation(task_state, tool_name, planner_goal: str) -> bool:

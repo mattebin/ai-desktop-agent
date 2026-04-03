@@ -245,6 +245,9 @@ Current guardrails:
 - identical frame payloads are deduplicated
 - non-critical frame emissions are throttled lightly so the UI sees one coherent update frame instead of several near-identical churn events
 - the frontend uses those frames to merge session/status updates incrementally and preserve transcript scroll position unless a real new message arrives
+- background conversation resync now follows a stale-while-refresh model, so the visible transcript stays mounted during execution instead of dropping back to a loading skeleton on routine refreshes
+- compact menus and artifact modals render through a top-layer portal instead of relying on local stacking contexts inside the chat layout
+- retained screenshot artifacts resolve their preview path from evidence metadata first, then fall back to the canonical artifact content route, so image evidence stays renderable without introducing a parallel asset system
 
 - `completed`
 - `approval_needed`

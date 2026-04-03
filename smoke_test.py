@@ -3662,8 +3662,16 @@ if "evidence-preview" not in (desktop_ui_root / "src" / "styles.css").read_text(
     raise SystemExit("Desktop UI styles are missing the expected compact desktop evidence presentation classes.")
 if "getDesktopEvidenceArtifact" not in desktop_api_source or "getDesktopEvidenceArtifactContentUrl" not in desktop_api_source:
     raise SystemExit("Desktop UI API client is missing the expected desktop evidence artifact helpers.")
+if "resolveDesktopEvidenceArtifactPreviewUrl" not in desktop_api_source or "isDesktopEvidenceArtifactImage" not in desktop_api_source:
+    raise SystemExit("Desktop UI API client is missing the expected artifact preview resolution helpers.")
 if "Evidence artifact" not in desktop_app_source or "View artifact" not in desktop_app_source or "artifact-viewer" not in desktop_app_source:
     raise SystemExit("Desktop UI App.tsx is missing the expected desktop evidence artifact viewer wiring.")
+if "showConversationSkeleton" not in desktop_app_source or "preserveVisibleState" not in desktop_app_source or "mergeMessages(current, fetchedMessages)" not in desktop_app_source:
+    raise SystemExit("Desktop UI App.tsx is missing the expected stable transcript resync behavior.")
+if "OverlayPortal" not in desktop_app_source or "compact-menu-popover-layer" not in desktop_styles_source:
+    raise SystemExit("Desktop UI is missing the expected top-layer menu/modal overlay handling.")
+if "previewUrl" not in desktop_app_source or "imageStatus" not in desktop_app_source:
+    raise SystemExit("Desktop UI artifact viewer is missing the expected renderable image preview state.")
 if "artifact-viewer" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8") or "artifact-preview-image" not in (desktop_ui_root / "src" / "styles.css").read_text(encoding="utf-8"):
     raise SystemExit("Desktop UI styles are missing the expected desktop evidence artifact viewer classes.")
 print("[OK] desktop ui scaffold")

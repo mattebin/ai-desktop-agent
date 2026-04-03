@@ -1084,7 +1084,7 @@ a {
 .details-drawer {
   position: fixed;
   inset: 0;
-  z-index: 30;
+  z-index: 300;
   display: grid;
   justify-items: end;
 }
@@ -1132,7 +1132,7 @@ a {
 .artifact-viewer {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 360;
   display: grid;
   place-items: center;
   padding: 20px;
@@ -1188,11 +1188,25 @@ a {
 .artifact-preview-shell {
   display: flex;
   justify-content: center;
+  align-items: center;
   min-height: 280px;
   padding: 12px;
   border-radius: 22px;
   background: var(--surface-soft);
   border: 1px solid var(--border-soft);
+  position: relative;
+}
+
+.artifact-preview-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--muted);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(15, 23, 42, 0.06));
+  border-radius: 22px;
 }
 
 .artifact-preview-image {
@@ -1225,15 +1239,6 @@ a {
 
 .compact-menu {
   position: relative;
-  z-index: 140;
-}
-
-.compact-menu summary {
-  list-style: none;
-}
-
-.compact-menu summary::-webkit-details-marker {
-  display: none;
 }
 
 .compact-menu-trigger {
@@ -1242,23 +1247,29 @@ a {
   padding-inline: 11px;
 }
 
-.compact-menu[open] .compact-menu-trigger {
+.compact-menu.is-open .compact-menu-trigger {
   background: var(--button-ghost-hover);
 }
 
+.compact-menu-popover-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  pointer-events: none;
+}
+
 .compact-menu-popover {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
+  position: fixed;
   min-width: 198px;
   padding: 8px;
   border-radius: 16px;
   background: var(--panel-strong);
   border: 1px solid var(--panel-border);
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
-  z-index: 220;
+  z-index: 321;
   display: grid;
   gap: 4px;
+  pointer-events: auto;
 }
 
 .compact-menu-item {

@@ -571,6 +571,30 @@ export function getDesktopEvidenceArtifactContentUrl(baseUrl: string, evidenceId
   return buildUrl(baseUrl, `/desktop/evidence/${encodeURIComponent(evidenceId)}/artifact/content`);
 }
 
+export function isDesktopEvidenceArtifactImage(artifact: EvidenceArtifact | null | undefined): boolean {
+  if (!artifact?.artifact_available) {
+    return false;
+  }
+  const artifactType = String(artifact.artifact_type || "").trim().toLowerCase();
+  if (artifactType.startsWith("image/")) {
+    return true;
+  }
+  const fallbackName = String(artifact.artifact_name || artifact.artifact_path || "").trim().toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"].some((extension) => fallbackName.endsWith(extension));
+}
+
+export function resolveDesktopEvidenceArtifactPreviewUrl(baseUrl: string, artifact: EvidenceArtifact | null | undefined): string {
+  const contentPath = String(artifact?.content_path || "").trim();
+  if (contentPath) {
+    return buildUrl(baseUrl, contentPath);
+  }
+  const evidenceId = String(artifact?.evidence_id || "").trim();
+  if (!evidenceId) {
+    return "";
+  }
+  return getDesktopEvidenceArtifactContentUrl(baseUrl, evidenceId);
+}
+
 export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: RunEntry[] }> {
   return request<{ items?: RunEntry[] }>(baseUrl, "/runs/recent", undefined, {
     limit,
