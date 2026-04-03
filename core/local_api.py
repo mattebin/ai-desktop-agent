@@ -24,7 +24,9 @@ from core.local_api_events import (
     DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
     LocalApiEventStream,
 )
+from core.command_registry import list_slash_commands
 from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
+from core.skill_registry import list_skill_catalog
 
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -774,6 +776,14 @@ class LocalOperatorApiServer:
                 if path == "/status":
                     session_id, state_scope_id = self._session_filters(parsed=parsed)
                     self._respond_ok(_status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)))
+                    return
+
+                if path == "/commands":
+                    self._respond_ok({"items": list_slash_commands()})
+                    return
+
+                if path == "/skills":
+                    self._respond_ok({"items": list_skill_catalog()})
                     return
 
                 if path == "/snapshot":

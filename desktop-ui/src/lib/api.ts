@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SlashCommand } from "./slashCommands";
 
 export const DEFAULT_API_BASE_URL = "http://127.0.0.1:8765";
 
@@ -213,6 +214,23 @@ export type RuntimeConfig = {
   reasoning_effort_applies_to_tool_calls?: boolean;
   base_url?: string;
   settings_path?: string;
+  settings_sources?: string[];
+  source?: string;
+};
+
+export type SkillSummary = {
+  slug?: string;
+  title?: string;
+  description?: string;
+  purpose?: string;
+  whenToUse?: string[];
+  path?: string;
+  relativePath?: string;
+  commandName?: string;
+  aliases?: string[];
+  promptText?: string;
+  argumentHint?: string;
+  tags?: string[];
   source?: string;
 };
 
@@ -383,6 +401,14 @@ export type DesktopEvidenceArtifactPayload = {
   artifact?: EvidenceArtifact;
 };
 
+export type SlashCommandCatalogPayload = {
+  items?: SlashCommand[];
+};
+
+export type SkillCatalogPayload = {
+  items?: SkillSummary[];
+};
+
 function normalizeBaseUrl(baseUrl: string): string {
   return String(baseUrl || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
 }
@@ -550,6 +576,14 @@ export async function sendSessionMessage(baseUrl: string, sessionId: string, mes
 
 export async function getStatus(baseUrl: string, sessionId = ""): Promise<StatusPayload> {
   return request<StatusPayload>(baseUrl, "/status", undefined, sessionId ? { session_id: sessionId } : undefined);
+}
+
+export async function getSlashCommands(baseUrl: string): Promise<SlashCommandCatalogPayload> {
+  return request<SlashCommandCatalogPayload>(baseUrl, "/commands");
+}
+
+export async function getSkillCatalog(baseUrl: string): Promise<SkillCatalogPayload> {
+  return request<SkillCatalogPayload>(baseUrl, "/skills");
 }
 
 export async function getAlerts(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: AlertItem[] }> {

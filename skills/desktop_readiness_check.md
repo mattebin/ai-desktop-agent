@@ -1,3 +1,16 @@
+---
+title: Desktop Readiness Check
+command: readiness-check
+aliases:
+  - readiness
+description: Check whether a desktop target is visually ready before acting.
+prompt: Use the repo-local skill in `skills/desktop_readiness_check.md` to judge whether the target window is ready before acting. Return a compact readiness assessment, the evidence used, and whether a bounded wait/recheck is needed.
+tags:
+  - desktop
+  - readiness
+  - inspection
+---
+
 # Desktop Readiness Check
 
 ## Purpose

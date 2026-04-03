@@ -595,6 +595,8 @@ class HostedLLMClient:
         self.reasoning_effort = runtime["reasoning_effort"]
         self.reasoning_effort_applies_to_tool_calls = False
         self.settings_path = runtime["settings_path"]
+        self.settings_sources = runtime.get("settings_sources", [self.settings_path])
+        self.source = runtime.get("source", "config/settings.yaml")
 
     def get_runtime_config(self) -> dict[str, object]:
         return {
@@ -604,7 +606,8 @@ class HostedLLMClient:
             "reasoning_effort_applies_to_tool_calls": self.reasoning_effort_applies_to_tool_calls,
             "base_url": self.base_url,
             "settings_path": self.settings_path,
-            "source": "config/settings.yaml",
+            "settings_sources": self.settings_sources,
+            "source": self.source,
         }
 
     def _call(self, messages, tools=None, *, timeout_seconds=None):

@@ -870,6 +870,92 @@ a {
   cursor: default;
 }
 
+.composer-command-menu {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 232px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 18px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.composer-command-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.composer-command-item:hover,
+.composer-command-item.is-selected {
+  transform: translateY(-1px);
+  border-color: rgba(15, 108, 189, 0.2);
+  background: var(--surface-selected);
+}
+
+.composer-command-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.composer-command-name,
+.composer-command-kind,
+.composer-command-empty {
+  font-size: 0.8rem;
+}
+
+.composer-command-name {
+  font-family: var(--font-mono);
+  font-weight: 650;
+}
+
+.composer-command-kind {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--neutral-soft);
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.composer-command-kind.is-local {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.composer-command-kind.is-prompt {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.composer-command-kind.is-skill {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.composer-command-description,
+.composer-command-empty {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.composer-command-empty {
+  padding: 11px 12px;
+}
+
 .jump-to-latest {
   position: absolute;
   right: 18px;

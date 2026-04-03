@@ -17,6 +17,8 @@ import {
   ensureLocalApi,
   getAlerts,
   getDesktopEvidenceArtifact,
+  getSkillCatalog,
+  getSlashCommands,
   isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
   getQueueState,
@@ -36,6 +38,7 @@ import {
   SessionDetail,
   SessionMessage,
   SessionSummary,
+  SkillSummary,
   StatusPayload,
   StreamEvent,
   type PendingApproval,
@@ -43,6 +46,19 @@ import {
   type ScheduledPayload,
   type WatchPayload,
 } from "./lib/api";
+import {
+  type LocalSlashCommand,
+  type PromptSlashCommand,
+  type SlashCommand,
+  type SlashCommandSuggestion,
+  SLASH_COMMANDS,
+  applySlashCommandSuggestion,
+  findSlashCommand,
+  getSlashCommandSuggestions,
+  parseSlashCommandInput,
+  resolvePromptSlashCommand,
+  slashCommandHelpText,
+} from "./lib/slashCommands";
 
 type ActivityTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -1362,6 +1378,9 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(SLASH_COMMANDS);
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
     open: false,
@@ -1381,6 +1400,10 @@ export default function App() {
   const deferredQuery = useDeferredValue(query);
   const draftKey = getDraftKey(selectedSessionId);
   const draft = draftsBySession[draftKey] || "";
+  const parsedSlashCommand = parseSlashCommandInput(draft);
+  const commandSuggestions = getSlashCommandSuggestions(draft, slashCommands);
+  const activeCommandSuggestion =
+    commandSuggestions[Math.min(selectedCommandIndex, Math.max(commandSuggestions.length - 1, 0))] || null;
   const selectedSessionRef = useRef("");
   const detailsOpenRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
@@ -1469,6 +1492,10 @@ export default function App() {
   }, [draft, selectedSessionId]);
 
   useEffect(() => {
+    setSelectedCommandIndex(0);
+  }, [draft]);
+
+  useEffect(() => {
     return () => {
       if (refreshTimerRef.current) {
         window.clearTimeout(refreshTimerRef.current);
@@ -1494,6 +1521,25 @@ export default function App() {
 
   function clearDraft(sessionId = selectedSessionRef.current) {
     updateDraft("", sessionId);
+  }
+
+  function addLocalActivity(label: string, detail: string, tone: ActivityTone = "info") {
+    const entry: ActivityEntry = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      label,
+      detail,
+      tone,
+      timestamp: new Date().toISOString(),
+    };
+    setActivity((current) => [entry, ...current].slice(0, 30));
+  }
+
+  function applyCommandSuggestion(suggestion: SlashCommandSuggestion | null) {
+    if (!suggestion) {
+      return;
+    }
+    updateDraft(applySlashCommandSuggestion(draft, suggestion.command), selectedSessionId);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   function scrollTranscriptToLatest(behavior: ScrollBehavior = "smooth") {
@@ -1612,6 +1658,20 @@ export default function App() {
       recentRuns: runs.items || [],
       desktopEvidence: desktopEvidence.recent_summaries || [],
     });
+  }
+
+  async function refreshCommandCatalog(baseUrl = apiBaseUrl) {
+    if (!baseUrl) {
+      return;
+    }
+    try {
+      const [commandCatalog, skillCatalog] = await Promise.all([getSlashCommands(baseUrl), getSkillCatalog(baseUrl)]);
+      setSlashCommands(commandCatalog.items?.length ? commandCatalog.items : SLASH_COMMANDS);
+      setAvailableSkills(skillCatalog.items || []);
+    } catch (_error) {
+      setSlashCommands(SLASH_COMMANDS);
+      setAvailableSkills([]);
+    }
   }
 
   function flushPendingStreamFrame() {
@@ -1767,6 +1827,10 @@ export default function App() {
           }
           setStatus(operatorStatus);
           setAlerts(operatorAlerts.items || []);
+        }
+        await refreshCommandCatalog(apiBaseUrl);
+        if (!alive) {
+          return;
         }
         setBootState("ready");
       } catch (error) {
@@ -1974,15 +2038,25 @@ export default function App() {
   const title = sessionDetail?.title || "New conversation";
   const showConversationSkeleton = loadingConversation && !messages.length;
   const emptyState = !messages.length && !loadingConversation;
+  const slashCommandHint = activeCommandSuggestion
+    ? `/${activeCommandSuggestion.command.name}${
+        activeCommandSuggestion.command.argumentHint ? ` ${activeCommandSuggestion.command.argumentHint}` : ""
+      } - ${activeCommandSuggestion.command.description}`
+    : "Use slash commands for quick operator actions and canned prompts.";
+  const commandMenuVisible = Boolean(parsedSlashCommand);
   const composerHint =
     sending
       ? "Sending your message to the operator..."
+      : parsedSlashCommand
+        ? `Tab to autocomplete. Enter to run. ${slashCommandHint}`
       : pendingApproval?.kind
         ? "Approval is waiting on the right rail. You can still add context here."
         : "Enter to send. Shift+Enter for a newline.";
   const composerPlaceholder =
     bootState !== "ready"
       ? "Connecting to the operator..."
+      : parsedSlashCommand
+        ? "Run a slash command like /new, /refresh, or /architecture..."
       : pendingApproval?.kind
         ? "Add context or resolve the approval..."
         : "Message the operator...";
@@ -2012,8 +2086,8 @@ export default function App() {
     }
   }
 
-  async function handleSendMessage() {
-    const content = draft.trim();
+  async function sendMessageContent(rawContent: string) {
+    const content = rawContent.trim();
     if (!content || !apiBaseUrl || sending) {
       return;
     }
@@ -2056,6 +2130,159 @@ export default function App() {
     } finally {
       setSending(false);
     }
+  }
+
+  async function executeLocalSlashCommand(command: LocalSlashCommand, args: string) {
+    const normalizedArgs = args.trim().toLowerCase();
+
+    if (command.action === "help") {
+      clearDraft(selectedSessionId);
+      addLocalActivity(
+        "Slash commands",
+        slashCommandHelpText(slashCommands),
+        "info",
+      );
+      return;
+    }
+
+    if (command.action === "show-skills") {
+      clearDraft(selectedSessionId);
+      const detail = availableSkills.length
+        ? availableSkills
+            .map((skill) => {
+              const name = String(skill.commandName || skill.slug || skill.title || "skill").trim();
+              const description = String(skill.description || skill.purpose || "Repo-local skill").trim();
+              return `/${name} - ${description}`;
+            })
+            .join("\n")
+        : "No repo-local skills are available right now.";
+      addLocalActivity("Available skills", detail, "info");
+      return;
+    }
+
+    if (command.action === "show-runtime") {
+      clearDraft(selectedSessionId);
+      const runtime = status?.runtime || null;
+      const model = String(runtime?.active_model || "unknown").trim();
+      const effort = String(runtime?.reasoning_effort || "default").trim();
+      const sources = Array.isArray(runtime?.settings_sources) && runtime?.settings_sources.length
+        ? runtime.settings_sources.join("\n")
+        : String(runtime?.source || "config/settings.yaml").trim();
+      addLocalActivity(
+        "Runtime config",
+        `Model: ${model}\nReasoning effort: ${effort}\nSources:\n${sources}`,
+        "info",
+      );
+      return;
+    }
+
+    if (command.action === "new-chat") {
+      clearDraft(selectedSessionId);
+      await handleNewChat();
+      addLocalActivity("Command executed", "Started a new conversation.", "success");
+      return;
+    }
+
+    if (command.action === "refresh") {
+      clearDraft(selectedSessionId);
+      await handleRefresh();
+      addLocalActivity("Command executed", "Refreshed the operator view.", "success");
+      return;
+    }
+
+    if (command.action === "toggle-details") {
+      let nextState = !detailsOpenRef.current;
+      if (normalizedArgs === "show") {
+        nextState = true;
+      } else if (normalizedArgs === "hide") {
+        nextState = false;
+      }
+      clearDraft(selectedSessionId);
+      setDetailsOpen(nextState);
+      addLocalActivity(
+        "Command executed",
+        nextState ? "Opened the operator details rail." : "Collapsed the operator details rail.",
+        "success",
+      );
+      return;
+    }
+
+    if (command.action === "toggle-theme") {
+      let nextTheme: ThemeMode = themeMode === "light" ? "dark" : "light";
+      if (normalizedArgs === "light" || normalizedArgs === "dark") {
+        nextTheme = normalizedArgs;
+      }
+      clearDraft(selectedSessionId);
+      setThemeMode(nextTheme);
+      addLocalActivity("Command executed", `Switched the UI theme to ${nextTheme}.`, "success");
+      return;
+    }
+
+    if (!pendingApproval?.kind) {
+      addLocalActivity(
+        "Command unavailable",
+        `/${command.name} needs a pending approval, but nothing is blocked right now.`,
+        "warning",
+      );
+      return;
+    }
+
+    clearDraft(selectedSessionId);
+    if (command.action === "approve") {
+      await handleApproval("approve");
+      addLocalActivity("Command executed", "Approved the pending step.", "success");
+      return;
+    }
+    if (command.action === "reject") {
+      await handleApproval("reject");
+      addLocalActivity("Command executed", "Rejected the pending step.", "warning");
+    }
+  }
+
+  async function tryHandleSlashCommand() {
+    if (!parsedSlashCommand) {
+      return false;
+    }
+
+    if (!parsedSlashCommand.query && !parsedSlashCommand.args) {
+      addLocalActivity("Slash commands", slashCommandHelpText(slashCommands), "info");
+      return true;
+    }
+
+    const exactCommand = findSlashCommand(parsedSlashCommand.query, slashCommands);
+    const selectedCommand = exactCommand || activeCommandSuggestion?.command || null;
+    if (!selectedCommand) {
+      addLocalActivity(
+        "Unknown command",
+        parsedSlashCommand.query
+          ? `No slash command matches /${parsedSlashCommand.query}.`
+          : "Type a command name after /. For example: /new or /architecture.",
+        "warning",
+      );
+      return true;
+    }
+
+    if (selectedCommand.type === "prompt") {
+      const promptText = resolvePromptSlashCommand(selectedCommand as PromptSlashCommand, parsedSlashCommand.args);
+      if (!promptText) {
+        addLocalActivity("Command unavailable", `/${selectedCommand.name} is missing prompt text.`, "warning");
+        return true;
+      }
+      clearDraft(selectedSessionId);
+      await sendMessageContent(promptText);
+      addLocalActivity("Command executed", `Sent the ${selectedCommand.name} prompt.`, "success");
+      return true;
+    }
+
+    await executeLocalSlashCommand(selectedCommand, parsedSlashCommand.args);
+    return true;
+  }
+
+  async function handleSendMessage() {
+    if (await tryHandleSlashCommand()) {
+      return;
+    }
+    await sendMessageContent(draft);
   }
 
   async function handleApproval(action: "approve" | "reject") {
@@ -2147,6 +2374,7 @@ export default function App() {
       return;
     }
     const resolved = await refreshSidebar(selectedSessionId);
+    await refreshCommandCatalog();
     if (resolved) {
       await loadConversation(resolved, { preserveVisibleState: true });
     }
@@ -2342,6 +2570,21 @@ export default function App() {
             onChange={(event) => updateDraft(event.target.value, selectedSessionId)}
             placeholder={composerPlaceholder}
             onKeyDown={(event) => {
+              if (commandMenuVisible && commandSuggestions.length && event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => (current + 1) % commandSuggestions.length);
+                return;
+              }
+              if (commandMenuVisible && commandSuggestions.length && event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => (current - 1 + commandSuggestions.length) % commandSuggestions.length);
+                return;
+              }
+              if (commandMenuVisible && activeCommandSuggestion && event.key === "Tab") {
+                event.preventDefault();
+                applyCommandSuggestion(activeCommandSuggestion);
+                return;
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 void handleSendMessage();
@@ -2349,6 +2592,49 @@ export default function App() {
             }}
             rows={1}
           />
+          {commandMenuVisible ? (
+            <div aria-label="Slash commands" className="composer-command-menu" role="listbox">
+              {commandSuggestions.length ? (
+                commandSuggestions.map((suggestion, index) => (
+                  <button
+                    key={`${suggestion.command.name}:${suggestion.command.type}`}
+                    aria-selected={index === selectedCommandIndex}
+                    className={clsx("composer-command-item", index === selectedCommandIndex && "is-selected")}
+                    onClick={() => applyCommandSuggestion(suggestion)}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setSelectedCommandIndex(index)}
+                    type="button"
+                  >
+                    <span className="composer-command-meta">
+                      <span className="composer-command-name">
+                        /{suggestion.command.name}
+                        {suggestion.command.argumentHint ? ` ${suggestion.command.argumentHint}` : ""}
+                      </span>
+                      <span
+                        className={clsx(
+                          "composer-command-kind",
+                          suggestion.command.source === "repo_skill" ? "is-skill" : `is-${suggestion.command.type}`,
+                        )}
+                      >
+                        {suggestion.command.source === "repo_skill"
+                          ? "Skill"
+                          : suggestion.command.type === "local"
+                            ? "Local"
+                            : "Prompt"}
+                      </span>
+                    </span>
+                    <span className="composer-command-description">{suggestion.command.description}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="composer-command-empty">
+                  {parsedSlashCommand?.query
+                    ? `No slash command matches /${parsedSlashCommand.query}.`
+                    : "Type a slash command like /new, /refresh, or /architecture."}
+                </div>
+              )}
+            </div>
+          ) : null}
           <div className="composer-footer">
             <span className="composer-hint">{composerHint}</span>
             <button className="send-button" onClick={() => void handleSendMessage()} disabled={bootState !== "ready" || sending || !draft.trim()}>

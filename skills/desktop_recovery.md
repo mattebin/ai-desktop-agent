@@ -1,3 +1,15 @@
+---
+title: Desktop Recovery
+command: desktop-recovery
+aliases:
+  - recovery
+description: Recover a desktop task when the target window is present but in the wrong state.
+prompt: Use the repo-local skill in `skills/desktop_recovery.md` to plan one bounded recovery strategy for the current desktop failure. Return the failure mode, chosen recovery, whether it succeeded, and any readiness caveats.
+tags:
+  - desktop
+  - recovery
+---
+
 # Desktop Recovery
 
 ## Purpose
