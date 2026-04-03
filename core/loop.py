@@ -60,8 +60,8 @@ _DESKTOP_PROPOSAL_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_press_key_sequence",
     "desktop_type_text",
 }
-_DESKTOP_ACTION_PACING_SECONDS = 0.08
-_DESKTOP_ACTION_PACING_WINDOW_SECONDS = 0.6
+_DESKTOP_ACTION_PACING_SECONDS = 0.05
+_DESKTOP_ACTION_PACING_WINDOW_SECONDS = 0.35
 FINALIZE_MESSAGE_TIMEOUT_SECONDS = 30
 
 
@@ -506,8 +506,8 @@ def _desktop_target_seed_args(task_state, planner_goal: str) -> dict:
     seed_args = {
         "limit": 20,
         "ui_limit": 8,
-        "wait_seconds": 2.2,
-        "poll_interval_seconds": 0.16,
+        "wait_seconds": 1.6,
+        "poll_interval_seconds": 0.12,
         "stability_samples": 3,
         "stability_interval_ms": 120,
         "max_attempts": 2,

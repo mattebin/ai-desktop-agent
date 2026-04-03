@@ -298,10 +298,8 @@ const markdownComponents: Components = {
 function normalizeMessages(messages: SessionMessage[]): SessionMessage[] {
   const seen = new Set<string>();
   const ordered: SessionMessage[] = [];
-  messages.forEach((message, index) => {
-    const key =
-      message.message_id ||
-      `${message.role || "assistant"}:${message.kind || "message"}:${message.created_at || index}:${message.content || ""}`;
+  messages.forEach((message) => {
+    const key = messageStableKey(message);
     if (seen.has(key)) {
       return;
     }
@@ -311,19 +309,110 @@ function normalizeMessages(messages: SessionMessage[]): SessionMessage[] {
   return ordered;
 }
 
+function replaceMessagesPreservingIdentity(current: SessionMessage[], nextMessages: SessionMessage[]): SessionMessage[] {
+  const normalized = normalizeMessages(nextMessages);
+  if (!current.length) {
+    logMessageMutation("replace", { reason: "initial", count: normalized.length });
+    return normalized;
+  }
+  const currentByKey = new Map(current.map((message) => [messageStableKey(message), message] as const));
+  const next = normalized.map((message) => {
+    const existing = currentByKey.get(messageStableKey(message));
+    return existing && messagesEquivalent(existing, message) ? existing : message;
+  });
+  if (current.length === next.length && current.every((message, index) => message === next[index])) {
+    return current;
+  }
+  const reused = next.filter((message) => currentByKey.get(messageStableKey(message)) === message).length;
+  logMessageMutation("replace", {
+    reason: "authoritative_sync",
+    currentCount: current.length,
+    nextCount: next.length,
+    reused,
+  });
+  return next;
+}
+
 function mergeMessages(current: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
-  if (!incoming.length) {
-    return normalizeMessages(current);
+  const normalizedIncoming = normalizeMessages(incoming);
+  if (!normalizedIncoming.length) {
+    return current;
   }
   if (!current.length) {
-    return normalizeMessages(incoming);
+    logMessageMutation("merge", { reason: "seed", count: normalizedIncoming.length });
+    return normalizedIncoming;
   }
-  return normalizeMessages([...incoming, ...current]);
+  const indexByKey = new Map(current.map((message, index) => [messageStableKey(message), index] as const));
+  const next = current.slice();
+  let added = 0;
+  let updated = 0;
+  for (const message of normalizedIncoming) {
+    const key = messageStableKey(message);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, next.length);
+      next.push(message);
+      added += 1;
+      continue;
+    }
+    const existing = next[existingIndex];
+    if (!messagesEquivalent(existing, message)) {
+      next[existingIndex] = message;
+      updated += 1;
+    }
+  }
+  if (!added && !updated) {
+    return current;
+  }
+  logMessageMutation("merge", {
+    reason: "incremental_frame",
+    currentCount: current.length,
+    nextCount: next.length,
+    added,
+    updated,
+  });
+  return next;
+}
+
+function reconcileSessionList(current: SessionSummary[], nextSessions: SessionSummary[]): SessionSummary[] {
+  if (!current.length) {
+    return nextSessions;
+  }
+  const currentById = new Map(current.map((session) => [session.session_id, session] as const));
+  let changed = current.length !== nextSessions.length;
+  const next = nextSessions.map((session) => {
+    const existing = currentById.get(session.session_id);
+    if (!existing) {
+      changed = true;
+      return session;
+    }
+    const merged = { ...existing, ...session };
+    if (fingerprintValue(existing) === fingerprintValue(merged)) {
+      return existing;
+    }
+    changed = true;
+    return merged;
+  });
+  if (!changed && current.every((session, index) => session === next[index])) {
+    return current;
+  }
+  return next;
 }
 
 function upsertSession(sessions: SessionSummary[], session: SessionSummary): SessionSummary[] {
-  const next = sessions.filter((item) => item.session_id !== session.session_id);
-  next.push(session);
+  const index = sessions.findIndex((item) => item.session_id === session.session_id);
+  if (index < 0) {
+    const next = [...sessions, session];
+    next.sort((left, right) => (right.updated_at || "").localeCompare(left.updated_at || ""));
+    return next;
+  }
+  const existing = sessions[index];
+  const merged = { ...existing, ...session };
+  if (fingerprintValue(existing) === fingerprintValue(merged)) {
+    return sessions;
+  }
+  const next = sessions.slice();
+  next[index] = merged;
   next.sort((left, right) => (right.updated_at || "").localeCompare(left.updated_at || ""));
   return next;
 }
@@ -348,6 +437,21 @@ function shouldRefreshControlDataFromFrame(frame?: StreamFramePayload | null): b
     }
   }
   return false;
+}
+
+function isCriticalSnapshotUpdate(snapshot?: StatusPayload | null): boolean {
+  if (!snapshot) {
+    return false;
+  }
+  const phase = String(snapshot.run_phase || "").trim().toLowerCase();
+  const status = String(snapshot.status || "").trim().toLowerCase();
+  if (phase === "awaiting_approval" || phase === "post_execution") {
+    return true;
+  }
+  if (["paused", "completed", "blocked", "failed", "incomplete"].includes(status)) {
+    return true;
+  }
+  return Boolean(snapshot.pending_approval?.kind);
 }
 
 function formatTime(value?: string): string {
@@ -1083,6 +1187,14 @@ function MessageContent({ message }: { message: SessionMessage }) {
 }
 
 function MessageBubble({ message }: { message: SessionMessage }) {
+  if (isRenderDebugEnabled()) {
+    console.debug("[ai-operator][message-render]", {
+      key: messageStableKey(message),
+      kind: message.kind || "message",
+      status: message.status || "",
+      messageId: message.message_id || "",
+    });
+  }
   const displayKind = messageDisplayKind(message);
   const normalizedKind = (message.kind || "").toLowerCase();
   const badge =
@@ -1136,6 +1248,7 @@ type PendingStreamFrame = {
   messages: SessionMessage[];
   activity: ActivityEntry[];
   shouldRefreshControls: boolean;
+  critical: boolean;
 };
 
 function fingerprintValue(value: unknown): string {
@@ -1144,6 +1257,53 @@ function fingerprintValue(value: unknown): string {
   } catch (_error) {
     return "";
   }
+}
+
+function isRenderDebugEnabled(): boolean {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem("ai-operator:debug-renders") === "1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function messageStableKey(message: SessionMessage): string {
+  const messageId = String(message.message_id || "").trim();
+  if (messageId) {
+    return `id:${messageId}`;
+  }
+  const role = String(message.role || "assistant").trim();
+  const kind = String(message.kind || "message").trim();
+  const createdAt = String(message.created_at || "").trim();
+  const taskId = String(message.task_id || "").trim();
+  const runId = String(message.run_id || "").trim();
+  if (createdAt || taskId || runId) {
+    return `meta:${role}:${kind}:${createdAt}:${taskId}:${runId}`;
+  }
+  return `body:${role}:${kind}:${String(message.content || "").trim()}`;
+}
+
+function messagesEquivalent(left: SessionMessage, right: SessionMessage): boolean {
+  return (
+    left.message_id === right.message_id &&
+    left.created_at === right.created_at &&
+    left.role === right.role &&
+    left.kind === right.kind &&
+    left.content === right.content &&
+    left.task_id === right.task_id &&
+    left.run_id === right.run_id &&
+    left.status === right.status
+  );
+}
+
+function logMessageMutation(mode: "replace" | "merge", detail: Record<string, unknown>) {
+  if (!isRenderDebugEnabled()) {
+    return;
+  }
+  console.debug(`[ai-operator][messages:${mode}]`, detail);
 }
 
 function mergeSessionDetail(current: SessionDetail | null, session: SessionSummary | SessionDetail): SessionDetail | null {
@@ -1156,7 +1316,8 @@ function mergeSessionDetail(current: SessionDetail | null, session: SessionSumma
   if (current.session_id !== session.session_id) {
     return current;
   }
-  return { ...current, ...session };
+  const merged = { ...current, ...session };
+  return fingerprintValue(merged) === fingerprintValue(current) ? current : merged;
 }
 
 function SkeletonTranscript() {
@@ -1240,6 +1401,7 @@ export default function App() {
     messages: [],
     activity: [],
     shouldRefreshControls: false,
+    critical: false,
   });
   const streamFlushTimerRef = useRef<number | null>(null);
 
@@ -1360,7 +1522,7 @@ export default function App() {
     }
     const payload = await listSessions(apiBaseUrl, 32);
     const nextSessions = payload.sessions || payload.items || [];
-    setSessions(nextSessions);
+    setSessions((current) => reconcileSessionList(current, nextSessions));
     const lockedSessionId =
       !preferredSessionId && runFocusLockedRef.current
         ? runFocusSessionRef.current || selectedSessionRef.current
@@ -1415,10 +1577,12 @@ export default function App() {
       }
       const fetchedMessages = normalizeMessages(messagesPayload.messages || messagesPayload.items || detailPayload.session.messages || []);
       setSessionDetail((current) =>
-        current?.session_id === sessionId && preserveVisibleState ? { ...current, ...detailPayload.session } : detailPayload.session,
+        current?.session_id === sessionId && preserveVisibleState ? mergeSessionDetail(current, detailPayload.session) : detailPayload.session,
       );
       setMessages((current) =>
-        preserveVisibleState && selectedSessionRef.current === sessionId ? mergeMessages(current, fetchedMessages) : fetchedMessages,
+        preserveVisibleState && selectedSessionRef.current === sessionId
+          ? replaceMessagesPreservingIdentity(current, fetchedMessages)
+          : replaceMessagesPreservingIdentity([], fetchedMessages),
       );
       setStatus(statusPayload);
       setAlerts(alertsPayload.items || []);
@@ -1457,6 +1621,7 @@ export default function App() {
       messages: [],
       activity: [],
       shouldRefreshControls: false,
+      critical: false,
     };
 
     if (pending.activity.length) {
@@ -1508,12 +1673,20 @@ export default function App() {
     if (update.shouldRefreshControls) {
       pending.shouldRefreshControls = true;
     }
+    if (update.critical) {
+      pending.critical = true;
+    }
+    const delayMs = pending.critical ? 18 : 42;
     if (streamFlushTimerRef.current) {
-      return;
+      if (!pending.critical) {
+        return;
+      }
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
     }
     streamFlushTimerRef.current = window.setTimeout(() => {
       startTransition(() => flushPendingStreamFrame());
-    }, 70);
+    }, delayMs);
   }
 
   function scheduleConversationRefresh(
@@ -1691,6 +1864,7 @@ export default function App() {
             queueStreamFrame({
               messages: [nextMessage],
               activity: activityUpdate,
+              critical: true,
             });
             return;
           }
@@ -1709,6 +1883,7 @@ export default function App() {
             alerts: syncData.alerts,
             activity: activityUpdate,
             shouldRefreshControls: shouldRefreshControlDataFromFrame(syncData),
+            critical: Boolean(syncData.critical) || isCriticalSnapshotUpdate(syncData.snapshot),
           });
           return;
         }
@@ -1719,6 +1894,7 @@ export default function App() {
             queueStreamFrame({
               session,
               activity: activityUpdate,
+              critical: session.session_id === selectedSessionRef.current,
             });
             return;
           }
@@ -1730,7 +1906,7 @@ export default function App() {
             setAlerts((current) => [alert, ...current.filter((item) => item.alert_id !== alert.alert_id)].slice(0, 8));
           }
           if (activityUpdate.length) {
-            queueStreamFrame({ activity: activityUpdate });
+            queueStreamFrame({ activity: activityUpdate, critical: true });
           }
           return;
         }
@@ -1825,7 +2001,7 @@ export default function App() {
       }
       setSessions((current) => upsertSession(current, nextSession));
       setSessionDetail(nextSession);
-      setMessages(normalizeMessages(nextSession.messages || []));
+      setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
       startTransition(() => setSelectedSessionId(nextSession.session_id));
       clearDraft(nextSession.session_id);
       setActivity([]);
@@ -1858,9 +2034,12 @@ export default function App() {
         result = await sendSessionMessage(apiBaseUrl, nextSessionId, content);
       }
       if (result?.session) {
-        setSessionDetail(result.session);
-        setMessages(normalizeMessages(result.session.messages || []));
-        setSessions((current) => upsertSession(current, result.session as SessionSummary));
+        const nextSession = result.session;
+        setSessionDetail((current) =>
+          current?.session_id === nextSession.session_id ? mergeSessionDetail(current, nextSession as SessionDetail) : nextSession,
+        );
+        setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
+        setSessions((current) => upsertSession(current, nextSession as SessionSummary));
       }
       if (nextSessionId && nextSessionId !== selectedSessionId) {
         startTransition(() => setSelectedSessionId(nextSessionId));
@@ -1887,9 +2066,12 @@ export default function App() {
     try {
       const result = action === "approve" ? await approvePending(apiBaseUrl, selectedSessionId) : await rejectPending(apiBaseUrl, selectedSessionId);
       if (result.session) {
-        setSessionDetail(result.session);
-        setMessages(normalizeMessages(result.session.messages || []));
-        setSessions((current) => upsertSession(current, result.session as SessionSummary));
+        const nextSession = result.session;
+        setSessionDetail((current) =>
+          current?.session_id === nextSession.session_id ? mergeSessionDetail(current, nextSession as SessionDetail) : nextSession,
+        );
+        setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
+        setSessions((current) => upsertSession(current, nextSession as SessionSummary));
       }
       if (result.status) {
         setStatus(result.status);
@@ -2137,9 +2319,9 @@ export default function App() {
             </div>
           ) : (
             <div className="transcript" onScroll={handleTranscriptScroll} ref={transcriptRef}>
-              {messages.map((message, index) => (
+              {messages.map((message) => (
                 <MemoMessageBubble
-                  key={message.message_id || `${message.created_at || index}:${message.role || "assistant"}:${message.kind || "message"}`}
+                  key={messageStableKey(message)}
                   message={message}
                 />
               ))}
