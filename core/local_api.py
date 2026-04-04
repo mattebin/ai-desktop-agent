@@ -24,9 +24,10 @@ from core.local_api_events import (
     DEFAULT_LOCAL_EVENT_REPLAY_SIZE,
     LocalApiEventStream,
 )
-from core.command_registry import list_slash_commands
+from core.command_registry import execute_slash_command, list_slash_commands
 from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 from core.skill_registry import list_skill_catalog
+from core.startup_profiler import StartupProfiler
 
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -526,14 +527,18 @@ class LocalOperatorApiServer:
         port: int | None = None,
         settings: Dict[str, Any] | None = None,
     ):
+        self.startup_profiler = StartupProfiler("local_api")
         self.settings = settings if isinstance(settings, dict) else {}
+        self.startup_profiler.mark("settings_ready")
         self.controller = controller or OperatorController(agent=Agent(settings=self.settings), settings=self.settings)
+        self.startup_profiler.mark("controller_ready")
         self.chat_manager = ChatSessionManager(
             controller=self.controller,
             path=self.settings.get("chat_session_state_path", DEFAULT_CHAT_SESSION_STATE_PATH),
             max_sessions=_coerce_int(self.settings.get("max_chat_sessions", DEFAULT_MAX_CHAT_SESSIONS), DEFAULT_MAX_CHAT_SESSIONS, minimum=1, maximum=100),
             max_messages=_coerce_int(self.settings.get("max_chat_messages_per_session", DEFAULT_MAX_CHAT_MESSAGES), DEFAULT_MAX_CHAT_MESSAGES, minimum=8, maximum=120),
         )
+        self.startup_profiler.mark("chat_manager_ready")
         self.event_stream = LocalApiEventStream(
             controller=self.controller,
             chat_manager=self.chat_manager,
@@ -543,11 +548,14 @@ class LocalOperatorApiServer:
             channel_retention_seconds=float(self.settings.get("local_api_event_channel_retention_seconds", DEFAULT_LOCAL_EVENT_CHANNEL_RETENTION_SECONDS) or DEFAULT_LOCAL_EVENT_CHANNEL_RETENTION_SECONDS),
             max_channels=int(self.settings.get("local_api_event_max_channels", DEFAULT_LOCAL_EVENT_MAX_CHANNELS) or DEFAULT_LOCAL_EVENT_MAX_CHANNELS),
         )
+        self.startup_profiler.mark("event_stream_ready")
         self.host = _coerce_host(host)
         self.port = int(DEFAULT_LOCAL_API_PORT if port is None else port)
         self._server = ThreadingHTTPServer((self.host, self.port), self._build_handler())
         self._server.daemon_threads = True
         self.port = int(self._server.server_address[1])
+        self.startup_profiler.mark("http_server_ready", f"{self.host}:{self.port}")
+        self.startup_profiler.emit()
 
     def _build_handler(self):
         server_ref = self
@@ -782,6 +790,10 @@ class LocalOperatorApiServer:
                     self._respond_ok({"items": list_slash_commands()})
                     return
 
+                if path == "/tools":
+                    self._respond_ok({"items": server_ref.controller.get_tool_catalog()})
+                    return
+
                 if path == "/skills":
                     self._respond_ok({"items": list_skill_catalog()})
                     return
@@ -967,6 +979,59 @@ class LocalOperatorApiServer:
                         self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)), "session": session_update.get("session", {})})
                     else:
                         self._respond_error(400, result.get("message", "Unable to reject pending action."))
+                    return
+
+                if path == "/commands/execute":
+                    session_id, state_scope_id = self._session_filters(body=body)
+                    command_input = str(body.get("input", body.get("command", ""))).strip()
+                    execution = execute_slash_command(
+                        command_input,
+                        controller=server_ref.controller,
+                        session_id=session_id,
+                        state_scope_id=state_scope_id,
+                    )
+                    if execution.get("kind") == "operator_request":
+                        action = str(execution.get("action", "")).strip()
+                        before_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                        if action == "approve":
+                            result = server_ref.controller.approve_pending(session_id=session_id, state_scope_id=state_scope_id)
+                            session_update = server_ref.chat_manager.record_approval_action(
+                                True,
+                                result,
+                                session_id=session_id,
+                                before_snapshot=before_snapshot,
+                            )
+                            execution = {
+                                "kind": "operator_action",
+                                "action": action,
+                                "title": "Command executed" if result.get("ok") else "Command unavailable",
+                                "detail": "Approved the pending step." if result.get("ok") else result.get("message", "Unable to approve the pending step."),
+                                "tone": "success" if result.get("ok") else "warning",
+                                "clear_draft": True,
+                                "result": result,
+                                "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)),
+                                "session": session_update.get("session", {}),
+                            }
+                        elif action == "reject":
+                            result = server_ref.controller.reject_pending(session_id=session_id, state_scope_id=state_scope_id)
+                            session_update = server_ref.chat_manager.record_approval_action(
+                                False,
+                                result,
+                                session_id=session_id,
+                                before_snapshot=before_snapshot,
+                            )
+                            execution = {
+                                "kind": "operator_action",
+                                "action": action,
+                                "title": "Command executed" if result.get("ok") else "Command unavailable",
+                                "detail": "Rejected the pending step." if result.get("ok") else result.get("message", "Unable to reject the pending step."),
+                                "tone": "warning",
+                                "clear_draft": True,
+                                "result": result,
+                                "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)),
+                                "session": session_update.get("session", {}),
+                            }
+                    self._respond_ok({"execution": execution})
                     return
 
                 if path == "/shutdown":

@@ -6,9 +6,11 @@ from core.agent import Agent
 from core.config import load_settings
 from core.local_api import DEFAULT_LOCAL_API_HOST, DEFAULT_LOCAL_API_PORT, serve_local_api
 from core.safety import start_emergency_stop_listener
+from core.startup_profiler import StartupProfiler
 
 
 def main():
+    profiler = StartupProfiler("main")
     parser = argparse.ArgumentParser(description="Run the safe local operator.")
     parser.add_argument("--api", action="store_true", help="Launch the local API server.")
     parser.add_argument("--api-host", default="", help="Override the local API host.")
@@ -16,24 +18,33 @@ def main():
     parser.add_argument("--ui", action="store_true", help="Launch the local control UI.")
     parser.add_argument("--goal", default="", help="Run a goal directly without prompting.")
     args = parser.parse_args()
+    profiler.mark("argv_parsed")
 
     settings = load_settings()
+    profiler.mark("settings_loaded")
 
     if args.api:
         host = str(args.api_host).strip() or str(settings.get("local_api_host", DEFAULT_LOCAL_API_HOST)).strip() or DEFAULT_LOCAL_API_HOST
         port = int(args.api_port if args.api_port >= 0 else settings.get("local_api_port", DEFAULT_LOCAL_API_PORT) or DEFAULT_LOCAL_API_PORT)
+        profiler.mark("api_boot", f"{host}:{port}")
+        profiler.emit()
         serve_local_api(host=host, port=port, settings=settings)
         return
 
     start_emergency_stop_listener()
+    profiler.mark("safety_ready")
 
     if args.ui:
         from control_ui import launch_control_ui
 
+        profiler.mark("control_ui_boot")
+        profiler.emit()
         launch_control_ui(settings=settings)
         return
 
     agent = Agent()
+    profiler.mark("agent_ready")
+    profiler.emit()
     goal = str(args.goal).strip() or input("Enter goal: ").strip()
     result = agent.run_task(goal)
 

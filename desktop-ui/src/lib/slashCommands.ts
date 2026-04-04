@@ -32,6 +32,7 @@ export type LocalSlashCommand = {
     | "reject"
     | "show-runtime"
     | "show-skills"
+    | "show-tools"
     | "toggle-details"
     | "toggle-theme";
 };
@@ -130,6 +131,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "runtime",
     description: "Show the active runtime model, effort, and merged config sources.",
     action: "show-runtime",
+    category: "catalog",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "tools",
+    description: "Show the registered tools and their approval policy levels.",
+    action: "show-tools",
     category: "catalog",
     source: "built_in",
   },

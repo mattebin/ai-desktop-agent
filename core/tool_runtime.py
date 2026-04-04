@@ -8,6 +8,7 @@ from core.browser_tasks import (
     infer_browser_task_name,
     infer_browser_task_step,
 )
+from core.tool_policy import build_tool_policy_snapshot, classify_tool_risk
 
 
 ToolFunc = Callable[[Dict[str, Any]], Dict[str, Any]]
@@ -141,10 +142,37 @@ class ToolRuntime:
             self.tool_map[tool.name] = tool
 
     def planner_tools(self) -> list[Dict[str, Any]]:
-        return [tool.to_planner_dict() for tool in self.tools]
+        planner_tools: list[Dict[str, Any]] = []
+        for tool in self.tools:
+            tool_dict = tool.to_planner_dict()
+            policy = classify_tool_risk(tool.name)
+            planner_note = str(policy.get("planner_note", "")).strip()
+            if planner_note:
+                tool_dict["description"] = f"{tool_dict['description']} Policy: {planner_note}"
+            planner_tools.append(tool_dict)
+        return planner_tools
 
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self.tool_map
+
+    def tool_risk(self, tool_name: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return classify_tool_risk(tool_name, args=args)
+
+    def tool_policy_snapshot(self) -> Dict[str, Any]:
+        return build_tool_policy_snapshot(tool.name for tool in self.tools)
+
+    def tool_catalog(self) -> list[Dict[str, Any]]:
+        items: list[Dict[str, Any]] = []
+        for tool in self.tools:
+            items.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": dict(tool.input_schema),
+                    "policy": self.tool_risk(tool.name),
+                }
+            )
+        return items
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return self.tool_map[tool_name].func(args)

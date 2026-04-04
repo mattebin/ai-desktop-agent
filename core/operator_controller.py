@@ -81,6 +81,9 @@ class OperatorController:
     def get_runtime_config(self) -> Dict[str, Any]:
         return self.manager.agent.get_runtime_config()
 
+    def get_tool_catalog(self) -> list[Dict[str, Any]]:
+        return self.manager.agent.tools.tool_catalog()
+
     def get_queue_state(self) -> Dict[str, Any]:
         return self.get_snapshot().get("queue", {})
 

@@ -216,6 +216,41 @@ export type RuntimeConfig = {
   settings_path?: string;
   settings_sources?: string[];
   source?: string;
+  settings_version?: string;
+  settings_loaded_at?: string;
+  settings_reload_count?: number;
+  settings_hot_reload?: {
+    enabled?: boolean;
+    scope?: string;
+    notes?: string[];
+  };
+  tool_policy?: {
+    summary?: string;
+    read_only_tools?: string[];
+    conditional_approval_tools?: string[];
+    explicit_approval_tools?: string[];
+    shell_hazard_tools?: string[];
+    file_mutation_tools?: string[];
+    notes?: string[];
+  };
+};
+
+export type ToolPolicySummary = {
+  tool?: string;
+  area?: string;
+  risk_level?: string;
+  approval_mode?: string;
+  mutation_target?: string;
+  summary?: string;
+  planner_note?: string;
+  shell_hazard?: string;
+};
+
+export type ToolSummary = {
+  name?: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  policy?: ToolPolicySummary;
 };
 
 export type SkillSummary = {
@@ -263,6 +298,7 @@ export type StatusPayload = {
   latest_alert?: AlertItem;
   latest_run?: RunEntry;
   runtime?: RuntimeConfig;
+  infrastructure?: Record<string, unknown>;
   desktop?: DesktopState;
 };
 
@@ -407,6 +443,34 @@ export type SlashCommandCatalogPayload = {
 
 export type SkillCatalogPayload = {
   items?: SkillSummary[];
+};
+
+export type ToolCatalogPayload = {
+  items?: ToolSummary[];
+};
+
+export type CommandExecutionResult = {
+  kind?: string;
+  title?: string;
+  detail?: string;
+  tone?: string;
+  clear_draft?: boolean;
+  prompt_text?: string;
+  success_message?: string;
+  action?: string;
+  args?: string;
+  result?: {
+    ok?: boolean;
+    message?: string;
+    status?: string;
+    resumed?: boolean;
+  };
+  status?: StatusPayload;
+  session?: SessionDetail;
+};
+
+export type CommandExecutionPayload = {
+  execution?: CommandExecutionResult;
 };
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -584,6 +648,17 @@ export async function getSlashCommands(baseUrl: string): Promise<SlashCommandCat
 
 export async function getSkillCatalog(baseUrl: string): Promise<SkillCatalogPayload> {
   return request<SkillCatalogPayload>(baseUrl, "/skills");
+}
+
+export async function getToolCatalog(baseUrl: string): Promise<ToolCatalogPayload> {
+  return request<ToolCatalogPayload>(baseUrl, "/tools");
+}
+
+export async function executeSlashCommand(baseUrl: string, input: string, sessionId = ""): Promise<CommandExecutionPayload> {
+  return request<CommandExecutionPayload>(baseUrl, "/commands/execute", {
+    method: "POST",
+    body: JSON.stringify(sessionId ? { input, session_id: sessionId } : { input }),
+  });
 }
 
 export async function getAlerts(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: AlertItem[] }> {

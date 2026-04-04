@@ -590,13 +590,25 @@ class HostedLLMClient:
         self.api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        self.base_url = runtime["base_url"]
-        self.model = runtime["active_model"]
-        self.reasoning_effort = runtime["reasoning_effort"]
+        self._apply_runtime(runtime)
+
+    def _apply_runtime(self, runtime: dict[str, object]):
+        self.base_url = str(runtime.get("base_url", "")).strip()
+        self.model = str(runtime.get("active_model", "")).strip()
+        self.reasoning_effort = str(runtime.get("reasoning_effort", "")).strip()
         self.reasoning_effort_applies_to_tool_calls = False
-        self.settings_path = runtime["settings_path"]
+        self.settings_path = str(runtime.get("settings_path", "")).strip()
         self.settings_sources = runtime.get("settings_sources", [self.settings_path])
         self.source = runtime.get("source", "config/settings.yaml")
+        self.settings_version = str(runtime.get("settings_version", "")).strip()
+        self.settings_loaded_at = str(runtime.get("settings_loaded_at", "")).strip()
+        self.settings_reload_count = int(runtime.get("settings_reload_count", 0) or 0)
+
+    def reload_settings(self, settings: dict[str, object] | None = None) -> dict[str, object]:
+        safe_settings = settings if isinstance(settings, dict) else load_settings()
+        runtime = get_runtime_model_config(safe_settings)
+        self._apply_runtime(runtime)
+        return runtime
 
     def get_runtime_config(self) -> dict[str, object]:
         return {
@@ -608,9 +620,13 @@ class HostedLLMClient:
             "settings_path": self.settings_path,
             "settings_sources": self.settings_sources,
             "source": self.source,
+            "settings_version": self.settings_version,
+            "settings_loaded_at": self.settings_loaded_at,
+            "settings_reload_count": self.settings_reload_count,
         }
 
     def _call(self, messages, tools=None, *, timeout_seconds=None):
+        self.reload_settings()
         payload = {
             "model": self.model,
             "messages": messages,

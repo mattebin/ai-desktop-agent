@@ -15,10 +15,12 @@ import {
   EvidenceArtifact,
   EvidenceSummary,
   ensureLocalApi,
+  executeSlashCommand,
   getAlerts,
   getDesktopEvidenceArtifact,
   getSkillCatalog,
   getSlashCommands,
+  getToolCatalog,
   isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
   getQueueState,
@@ -41,6 +43,7 @@ import {
   SkillSummary,
   StatusPayload,
   StreamEvent,
+  ToolSummary,
   type PendingApproval,
   type QueuePayload,
   type ScheduledPayload,
@@ -48,17 +51,14 @@ import {
 } from "./lib/api";
 import {
   type LocalSlashCommand,
-  type PromptSlashCommand,
   type SlashCommand,
   type SlashCommandSuggestion,
   SLASH_COMMANDS,
   applySlashCommandSuggestion,
-  findSlashCommand,
   getSlashCommandSuggestions,
   parseSlashCommandInput,
-  resolvePromptSlashCommand,
-  slashCommandHelpText,
 } from "./lib/slashCommands";
+import { buildSlashCommandPlan } from "./lib/commandRouter";
 
 type ActivityTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -127,6 +127,8 @@ const STREAM_EVENTS = [
   "approval.approved",
   "approval.rejected",
   "browser.workflow",
+  "runtime.updated",
+  "infrastructure.updated",
   "alert",
 ];
 
@@ -144,6 +146,22 @@ function plainTextPreview(value: string | undefined, limit = 180): string {
     .replace(/\s+/g, " ")
     .trim();
   return trimText(text, limit);
+}
+
+function formatToolCatalogDetail(tools: ToolSummary[] = []): string {
+  if (!tools.length) {
+    return "No tools are registered right now.";
+  }
+  return tools
+    .map((tool) => {
+      const name = String(tool.name || "tool").trim();
+      const policy = tool.policy || {};
+      const risk = String(policy.risk_level || "unknown").trim();
+      const approval = String(policy.approval_mode || "unknown").trim();
+      const summary = String(policy.summary || tool.description || "Registered tool").trim();
+      return `${name} [${risk}/${approval}] - ${summary}`;
+    })
+    .join("\n");
 }
 
 function getInitialDrafts(): Record<string, string> {
@@ -446,6 +464,9 @@ function shouldRefreshControlDataFromFrame(frame?: StreamFramePayload | null): b
   );
   if (!changed.size) {
     return Boolean(frame.alerts?.length);
+  }
+  if (changed.has("runtime") || changed.has("infrastructure")) {
+    return true;
   }
   for (const key of ["task", "task_progress", "pending_approval", "desktop", "alerts"]) {
     if (changed.has(key)) {
@@ -1148,6 +1169,29 @@ function timelineFromEvent(event: StreamEvent<Record<string, unknown>>): Activit
           ),
           220,
         ),
+        tone: "info",
+        timestamp: now,
+      };
+    case "runtime.updated":
+      return {
+        id: event.event_id || `${event.event}:${now}`,
+        label: "Runtime updated",
+        detail: plainTextPreview(
+          String(
+            (data.runtime as { active_model?: string; settings_version?: string } | undefined)?.active_model ||
+              (data.runtime as { settings_version?: string } | undefined)?.settings_version ||
+              "Runtime configuration changed.",
+          ),
+          220,
+        ),
+        tone: "info",
+        timestamp: now,
+      };
+    case "infrastructure.updated":
+      return {
+        id: event.event_id || `${event.event}:${now}`,
+        label: "Infrastructure updated",
+        detail: plainTextPreview("Backend infrastructure state changed.", 220),
         tone: "info",
         timestamp: now,
       };
@@ -2135,56 +2179,13 @@ export default function App() {
   async function executeLocalSlashCommand(command: LocalSlashCommand, args: string) {
     const normalizedArgs = args.trim().toLowerCase();
 
-    if (command.action === "help") {
-      clearDraft(selectedSessionId);
-      addLocalActivity(
-        "Slash commands",
-        slashCommandHelpText(slashCommands),
-        "info",
-      );
-      return;
-    }
-
-    if (command.action === "show-skills") {
-      clearDraft(selectedSessionId);
-      const detail = availableSkills.length
-        ? availableSkills
-            .map((skill) => {
-              const name = String(skill.commandName || skill.slug || skill.title || "skill").trim();
-              const description = String(skill.description || skill.purpose || "Repo-local skill").trim();
-              return `/${name} - ${description}`;
-            })
-            .join("\n")
-        : "No repo-local skills are available right now.";
-      addLocalActivity("Available skills", detail, "info");
-      return;
-    }
-
-    if (command.action === "show-runtime") {
-      clearDraft(selectedSessionId);
-      const runtime = status?.runtime || null;
-      const model = String(runtime?.active_model || "unknown").trim();
-      const effort = String(runtime?.reasoning_effort || "default").trim();
-      const sources = Array.isArray(runtime?.settings_sources) && runtime?.settings_sources.length
-        ? runtime.settings_sources.join("\n")
-        : String(runtime?.source || "config/settings.yaml").trim();
-      addLocalActivity(
-        "Runtime config",
-        `Model: ${model}\nReasoning effort: ${effort}\nSources:\n${sources}`,
-        "info",
-      );
-      return;
-    }
-
     if (command.action === "new-chat") {
-      clearDraft(selectedSessionId);
       await handleNewChat();
       addLocalActivity("Command executed", "Started a new conversation.", "success");
       return;
     }
 
     if (command.action === "refresh") {
-      clearDraft(selectedSessionId);
       await handleRefresh();
       addLocalActivity("Command executed", "Refreshed the operator view.", "success");
       return;
@@ -2197,7 +2198,6 @@ export default function App() {
       } else if (normalizedArgs === "hide") {
         nextState = false;
       }
-      clearDraft(selectedSessionId);
       setDetailsOpen(nextState);
       addLocalActivity(
         "Command executed",
@@ -2212,22 +2212,21 @@ export default function App() {
       if (normalizedArgs === "light" || normalizedArgs === "dark") {
         nextTheme = normalizedArgs;
       }
-      clearDraft(selectedSessionId);
       setThemeMode(nextTheme);
       addLocalActivity("Command executed", `Switched the UI theme to ${nextTheme}.`, "success");
       return;
     }
 
-    if (!pendingApproval?.kind) {
-      addLocalActivity(
-        "Command unavailable",
-        `/${command.name} needs a pending approval, but nothing is blocked right now.`,
-        "warning",
-      );
+    if (command.action === "show-tools") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "The tool catalog needs the local API to be connected.", "warning");
+        return;
+      }
+      const toolCatalog = await getToolCatalog(apiBaseUrl);
+      addLocalActivity("Registered tools", formatToolCatalogDetail(toolCatalog.items || []), "info");
       return;
     }
 
-    clearDraft(selectedSessionId);
     if (command.action === "approve") {
       await handleApproval("approve");
       addLocalActivity("Command executed", "Approved the pending step.", "success");
@@ -2236,45 +2235,123 @@ export default function App() {
     if (command.action === "reject") {
       await handleApproval("reject");
       addLocalActivity("Command executed", "Rejected the pending step.", "warning");
+      return;
     }
+
+    addLocalActivity("Command unavailable", `/${command.name} is not executable from the local UI router.`, "warning");
   }
 
-  async function tryHandleSlashCommand() {
-    if (!parsedSlashCommand) {
+  async function handleClientCommandAction(action: string, args: string) {
+    const command = slashCommands.find(
+      (item) => item.type === "local" && String(item.action || "").trim() === String(action || "").trim(),
+    ) as LocalSlashCommand | undefined;
+    if (!command) {
+      addLocalActivity("Command unavailable", `The client action ${action || "unknown"} is not registered in the UI.`, "warning");
+      return;
+    }
+    await executeLocalSlashCommand(command, args);
+  }
+
+  async function tryHandleBackendSlashCommand() {
+    if (!parsedSlashCommand || !apiBaseUrl) {
       return false;
     }
 
-    if (!parsedSlashCommand.query && !parsedSlashCommand.args) {
-      addLocalActivity("Slash commands", slashCommandHelpText(slashCommands), "info");
-      return true;
-    }
+    try {
+      const payload = await executeSlashCommand(apiBaseUrl, draft, selectedSessionId);
+      const execution = payload.execution || {};
+      const kind = String(execution.kind || "").trim();
+      if (!kind || kind === "none") {
+        return false;
+      }
 
-    const exactCommand = findSlashCommand(parsedSlashCommand.query, slashCommands);
-    const selectedCommand = exactCommand || activeCommandSuggestion?.command || null;
-    if (!selectedCommand) {
-      addLocalActivity(
-        "Unknown command",
-        parsedSlashCommand.query
-          ? `No slash command matches /${parsedSlashCommand.query}.`
-          : "Type a command name after /. For example: /new or /architecture.",
-        "warning",
-      );
-      return true;
-    }
+      if (execution.clear_draft) {
+        clearDraft(selectedSessionId);
+      }
 
-    if (selectedCommand.type === "prompt") {
-      const promptText = resolvePromptSlashCommand(selectedCommand as PromptSlashCommand, parsedSlashCommand.args);
-      if (!promptText) {
-        addLocalActivity("Command unavailable", `/${selectedCommand.name} is missing prompt text.`, "warning");
+      if (kind === "activity") {
+        addLocalActivity(
+          String(execution.title || "Slash command").trim() || "Slash command",
+          String(execution.detail || "").trim() || "Command completed.",
+          (String(execution.tone || "info").trim() as ActivityTone) || "info",
+        );
         return true;
       }
-      clearDraft(selectedSessionId);
-      await sendMessageContent(promptText);
-      addLocalActivity("Command executed", `Sent the ${selectedCommand.name} prompt.`, "success");
+
+      if (kind === "prompt") {
+        const promptText = String(execution.prompt_text || "").trim();
+        if (!promptText) {
+          return false;
+        }
+        await sendMessageContent(promptText);
+        addLocalActivity(
+          "Command executed",
+          String(execution.success_message || "Sent the prompt command.").trim(),
+          "success",
+        );
+        return true;
+      }
+
+      if (kind === "client_action") {
+        await handleClientCommandAction(String(execution.action || "").trim(), String(execution.args || "").trim());
+        return true;
+      }
+
+      if (kind === "operator_action") {
+        if (execution.status) {
+          setStatus(execution.status);
+        }
+        if (execution.session?.session_id) {
+          setSessions((current) => upsertSession(current, execution.session as SessionSummary));
+        }
+        addLocalActivity(
+          String(execution.title || "Command executed").trim() || "Command executed",
+          String(execution.detail || "The operator handled the requested action.").trim(),
+          (String(execution.tone || "info").trim() as ActivityTone) || "info",
+        );
+        scheduleConversationRefresh(selectedSessionId, { includeConversation: true, includeControls: detailsOpenRef.current });
+        return true;
+      }
+    } catch (_error) {
+      return false;
+    }
+    return false;
+  }
+
+  async function tryHandleSlashCommand() {
+    if (await tryHandleBackendSlashCommand()) {
       return true;
     }
 
-    await executeLocalSlashCommand(selectedCommand, parsedSlashCommand.args);
+    const plan = buildSlashCommandPlan({
+      input: draft,
+      commands: slashCommands,
+      activeSuggestion: activeCommandSuggestion?.command || null,
+      skills: availableSkills,
+      runtime: status?.runtime || null,
+      pendingApprovalKind: pendingApproval?.kind || "",
+    });
+
+    if (plan.kind === "none") {
+      return false;
+    }
+
+    if (plan.clearDraft) {
+      clearDraft(selectedSessionId);
+    }
+
+    if (plan.kind === "activity") {
+      addLocalActivity(plan.title, plan.detail, plan.tone);
+      return true;
+    }
+
+    if (plan.kind === "prompt") {
+      await sendMessageContent(plan.promptText);
+      addLocalActivity("Command executed", plan.successMessage, "success");
+      return true;
+    }
+
+    await executeLocalSlashCommand(plan.command, plan.args);
     return true;
   }
 
