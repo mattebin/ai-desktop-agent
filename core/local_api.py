@@ -25,6 +25,7 @@ from core.local_api_events import (
     LocalApiEventStream,
 )
 from core.command_registry import execute_slash_command, list_slash_commands
+from core.extension_registry import list_extension_catalog
 from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 from core.skill_registry import list_skill_catalog
 from core.startup_profiler import StartupProfiler
@@ -796,6 +797,10 @@ class LocalOperatorApiServer:
 
                 if path == "/skills":
                     self._respond_ok({"items": list_skill_catalog()})
+                    return
+
+                if path == "/extensions":
+                    self._respond_ok({"items": list_extension_catalog()})
                     return
 
                 if path == "/snapshot":

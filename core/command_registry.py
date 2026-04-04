@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from core.extension_registry import list_extension_catalog, list_extension_commands
 from core.skill_registry import list_skill_catalog
 
 
@@ -86,6 +87,15 @@ def _builtin_commands() -> List[Dict[str, Any]]:
         },
         {
             "type": "local",
+            "name": "extensions",
+            "aliases": ["plugins"],
+            "description": "Show the local extension manifests and the commands they add.",
+            "action": "show-extensions",
+            "category": "catalog",
+            "source": "built_in",
+        },
+        {
+            "type": "local",
             "name": "help",
             "aliases": ["commands"],
             "description": "Show a quick summary of the available slash commands.",
@@ -144,6 +154,12 @@ def list_slash_commands() -> List[Dict[str, Any]]:
                 "relativePath": str(skill.get("relativePath", "")).strip(),
             }
         )
+        existing_names.add(command_name.lower())
+    for extension_command in list_extension_commands():
+        command_name = str(extension_command.get("name", "")).strip()
+        if not command_name or command_name.lower() in existing_names:
+            continue
+        commands.append(dict(extension_command))
         existing_names.add(command_name.lower())
     return commands
 
@@ -214,6 +230,28 @@ def _format_skill_catalog_detail() -> str:
         f"{str(skill.get('description', '') or skill.get('purpose', '') or 'Repo-local skill').strip()}"
         for skill in skills
     )
+
+
+def _format_extension_catalog_detail() -> str:
+    extensions = list_extension_catalog()
+    if not extensions:
+        return "No local extension manifests are loaded right now."
+    lines: List[str] = []
+    for extension in extensions:
+        title = str(extension.get("title", "") or extension.get("slug", "extension")).strip()
+        description = _trim_text(extension.get("description", ""), limit=120)
+        commands = list(extension.get("commands", []))
+        command_list = ", ".join(
+            f"/{str(command.get('name', '')).strip()}"
+            for command in commands[:6]
+            if str(command.get("name", "")).strip()
+        )
+        if command_list:
+            lines.append(f"{title} - {description or 'Local extension manifest.'}")
+            lines.append(f"Commands: {command_list}")
+        else:
+            lines.append(f"{title} - {description or 'Local extension manifest.'}")
+    return "\n".join(lines)
 
 
 def _format_runtime_detail(controller: Any) -> str:
@@ -324,6 +362,14 @@ def execute_slash_command(
             "kind": "activity",
             "title": "Available skills",
             "detail": _format_skill_catalog_detail(),
+            "tone": "info",
+            "clear_draft": True,
+        }
+    if action == "show-extensions":
+        return {
+            "kind": "activity",
+            "title": "Local extensions",
+            "detail": _format_extension_catalog_detail(),
             "tone": "info",
             "clear_draft": True,
         }

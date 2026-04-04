@@ -1074,6 +1074,8 @@ class ChatSessionManager:
                     "pending_approval": snapshot.get("pending_approval", {}),
                     "browser": snapshot.get("browser", {}),
                     "desktop": snapshot.get("desktop", {}),
+                    "runtime": snapshot.get("runtime", {}),
+                    "infrastructure": snapshot.get("infrastructure", {}),
                     "behavior": snapshot.get("behavior", {}),
                     "human_control": snapshot.get("human_control", {}),
                     "task_control": snapshot.get("task_control", {}),

@@ -15,7 +15,9 @@ import {
   EvidenceArtifact,
   EvidenceSummary,
   ensureLocalApi,
+  ExtensionSummary,
   executeSlashCommand,
+  getExtensionCatalog,
   getAlerts,
   getDesktopEvidenceArtifact,
   getSkillCatalog,
@@ -76,6 +78,8 @@ type ControlSnapshot = {
   watches: WatchPayload | null;
   recentRuns: RunEntry[];
   desktopEvidence: EvidenceSummary[];
+  tools: ToolSummary[];
+  extensions: ExtensionSummary[];
 };
 
 type ThemeMode = "light" | "dark";
@@ -1380,6 +1384,55 @@ function mergeSessionDetail(current: SessionDetail | null, session: SessionSumma
   return fingerprintValue(merged) === fingerprintValue(current) ? current : merged;
 }
 
+function mergeStatusPayload(current: StatusPayload | null, update: StatusPayload | null | undefined): StatusPayload | null {
+  if (!update) {
+    return current;
+  }
+  if (!current) {
+    return update;
+  }
+  const merged: StatusPayload = {
+    ...current,
+    ...update,
+    runtime: update.runtime ? { ...(current.runtime || {}), ...update.runtime } : current.runtime,
+    infrastructure: update.infrastructure
+      ? { ...(current.infrastructure || {}), ...update.infrastructure }
+      : current.infrastructure,
+  };
+  return fingerprintValue(merged) === fingerprintValue(current) ? current : merged;
+}
+
+function backendServiceStatus(service: unknown): string {
+  const value = (service || {}) as { active?: string; reason?: string; message?: string };
+  return String(value.active || value.reason || value.message || "unknown").trim() || "unknown";
+}
+
+function backendServiceTone(service: unknown): ActivityTone {
+  const value = (service || {}) as { available?: boolean; active?: string; reason?: string };
+  const active = String(value.active || "").trim().toLowerCase();
+  const reason = String(value.reason || "").trim().toLowerCase();
+  if (value.available === false || active === "unavailable" || active === "disabled") {
+    return "warning";
+  }
+  if (reason.includes("error") || reason.includes("failed")) {
+    return "error";
+  }
+  return "info";
+}
+
+function backendServiceDetail(service: unknown): string {
+  const value = (service || {}) as { message?: string; reason?: string };
+  return plainTextPreview(String(value.message || value.reason || "Backend service state is available."), 140);
+}
+
+function extensionCommandPreview(extension: ExtensionSummary): string {
+  return (extension.commands || [])
+    .map((command) => `/${String(command.name || "").trim()}`)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(", ");
+}
+
 function SkeletonTranscript() {
   return (
     <div className="transcript transcript-loading">
@@ -1417,6 +1470,8 @@ export default function App() {
     watches: null,
     recentRuns: [],
     desktopEvidence: [],
+    tools: [],
+    extensions: [],
   });
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -1425,6 +1480,7 @@ export default function App() {
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(SLASH_COMMANDS);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
+  const [availableExtensions, setAvailableExtensions] = useState<ExtensionSummary[]>([]);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
     open: false,
@@ -1688,19 +1744,24 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
-    const [queue, scheduled, watches, runs, desktopEvidence] = await Promise.all([
+    const [queue, scheduled, watches, runs, desktopEvidence, toolCatalog, extensionCatalog] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
       getRecentRuns(apiBaseUrl, sessionId, 10),
       getDesktopEvidence(apiBaseUrl, 6),
+      getToolCatalog(apiBaseUrl),
+      getExtensionCatalog(apiBaseUrl),
     ]);
+    setAvailableExtensions(extensionCatalog.items || []);
     setControlData({
       queue,
       scheduled,
       watches,
       recentRuns: runs.items || [],
       desktopEvidence: desktopEvidence.recent_summaries || [],
+      tools: toolCatalog.items || [],
+      extensions: extensionCatalog.items || [],
     });
   }
 
@@ -1709,12 +1770,18 @@ export default function App() {
       return;
     }
     try {
-      const [commandCatalog, skillCatalog] = await Promise.all([getSlashCommands(baseUrl), getSkillCatalog(baseUrl)]);
+      const [commandCatalog, skillCatalog, extensionCatalog] = await Promise.all([
+        getSlashCommands(baseUrl),
+        getSkillCatalog(baseUrl),
+        getExtensionCatalog(baseUrl),
+      ]);
       setSlashCommands(commandCatalog.items?.length ? commandCatalog.items : SLASH_COMMANDS);
       setAvailableSkills(skillCatalog.items || []);
+      setAvailableExtensions(extensionCatalog.items || []);
     } catch (_error) {
       setSlashCommands(SLASH_COMMANDS);
       setAvailableSkills([]);
+      setAvailableExtensions([]);
     }
   }
 
@@ -1746,7 +1813,7 @@ export default function App() {
       const snapshotFingerprint = fingerprintValue(pending.snapshot);
       if (snapshotFingerprint !== lastStatusFingerprintRef.current) {
         lastStatusFingerprintRef.current = snapshotFingerprint;
-        setStatus(pending.snapshot);
+        setStatus((current) => mergeStatusPayload(current, pending.snapshot));
       }
     }
     if (pending.alerts) {
@@ -2008,6 +2075,26 @@ export default function App() {
           }
         }
 
+        if (payload.event === "runtime.updated") {
+          queueStreamFrame({
+            snapshot: { runtime: (payload.data.runtime || {}) as StatusPayload["runtime"] },
+            activity: activityUpdate,
+            shouldRefreshControls: true,
+            critical: true,
+          });
+          return;
+        }
+
+        if (payload.event === "infrastructure.updated") {
+          queueStreamFrame({
+            snapshot: { infrastructure: (payload.data.infrastructure || {}) as StatusPayload["infrastructure"] },
+            activity: activityUpdate,
+            shouldRefreshControls: true,
+            critical: true,
+          });
+          return;
+        }
+
         if (payload.event === "alert") {
           const alert = (payload.data.alert || {}) as AlertItem;
           if (alert.alert_id || alert.message) {
@@ -2068,6 +2155,20 @@ export default function App() {
   const checkpointDesktopEvidence = status?.desktop?.checkpoint_evidence || null;
   const selectedTargetProposalContext = status?.desktop?.selected_target_proposals || null;
   const checkpointTargetProposalContext = status?.desktop?.checkpoint_target_proposals || null;
+  const runtimePolicy = status?.runtime?.tool_policy || null;
+  const infrastructure = (status?.infrastructure || {}) as Record<string, unknown>;
+  const infrastructureServices = [
+    { key: "scheduler", label: "Scheduler", service: infrastructure.scheduler },
+    { key: "file_watch", label: "File watch", service: infrastructure.file_watch },
+    { key: "desktop_capture", label: "Desktop capture", service: infrastructure.desktop_capture },
+    { key: "desktop", label: "Desktop backends", service: infrastructure.desktop },
+  ].filter((item) => item.service);
+  const highlightedTools = [...controlData.tools].sort((left, right) => {
+    const order = ["high", "medium", "low", "unknown"];
+    const leftRisk = String(left.policy?.risk_level || "unknown").toLowerCase();
+    const rightRisk = String(right.policy?.risk_level || "unknown").toLowerCase();
+    return order.indexOf(leftRisk) - order.indexOf(rightRisk);
+  });
   const pendingApprovalEvidence = pendingApproval?.evidence_preview || checkpointDesktopEvidence || null;
   const distinctCheckpointEvidence =
     checkpointDesktopEvidence?.evidence_id && checkpointDesktopEvidence.evidence_id === selectedDesktopEvidence?.evidence_id
@@ -2227,6 +2328,21 @@ export default function App() {
       return;
     }
 
+    if (command.action === "show-extensions") {
+      const detail = availableExtensions.length
+        ? availableExtensions
+            .map((extension) => {
+              const title = String(extension.title || extension.slug || "extension").trim();
+              const description = String(extension.description || "Local extension manifest.").trim();
+              const commands = extensionCommandPreview(extension);
+              return commands ? `${title} - ${description}\nCommands: ${commands}` : `${title} - ${description}`;
+            })
+            .join("\n")
+        : "No local extension manifests are loaded right now.";
+      addLocalActivity("Local extensions", detail, "info");
+      return;
+    }
+
     if (command.action === "approve") {
       await handleApproval("approve");
       addLocalActivity("Command executed", "Approved the pending step.", "success");
@@ -2328,6 +2444,7 @@ export default function App() {
       commands: slashCommands,
       activeSuggestion: activeCommandSuggestion?.command || null,
       skills: availableSkills,
+      extensions: availableExtensions,
       runtime: status?.runtime || null,
       pendingApprovalKind: pendingApproval?.kind || "",
     });
@@ -2690,11 +2807,17 @@ export default function App() {
                       <span
                         className={clsx(
                           "composer-command-kind",
-                          suggestion.command.source === "repo_skill" ? "is-skill" : `is-${suggestion.command.type}`,
+                          suggestion.command.source === "repo_skill"
+                            ? "is-skill"
+                            : suggestion.command.source === "local_extension"
+                              ? "is-prompt"
+                              : `is-${suggestion.command.type}`,
                         )}
                       >
                         {suggestion.command.source === "repo_skill"
                           ? "Skill"
+                          : suggestion.command.source === "local_extension"
+                            ? "Extension"
                           : suggestion.command.type === "local"
                             ? "Local"
                             : "Prompt"}
@@ -2992,6 +3115,105 @@ export default function App() {
                     </article>
                   ))}
                   {!(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No active watches.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Runtime</h4>
+                  <span className="muted-label">{status?.runtime?.settings_reload_count || 1}</span>
+                </div>
+                <div className="mini-list">
+                  <article className="mini-list-item tone-info">
+                    <div className="mini-list-title">
+                      {plainTextPreview(status?.runtime?.active_model || "Unknown model", 40)}
+                      <span className="mini-list-time">{plainTextPreview(status?.runtime?.reasoning_effort || "default", 20)}</span>
+                    </div>
+                    <div className="mini-list-detail">
+                      {plainTextPreview(
+                        `Version ${status?.runtime?.settings_version || "unknown"}${
+                          status?.runtime?.settings_hot_reload?.enabled ? " | hot reload enabled" : ""
+                        }`,
+                        160,
+                      )}
+                    </div>
+                  </article>
+                  {runtimePolicy?.summary ? (
+                    <article className="mini-list-item tone-neutral">
+                      <div className="mini-list-title">Policy summary</div>
+                      <div className="mini-list-detail">{plainTextPreview(runtimePolicy.summary, 160)}</div>
+                      <div className="evidence-preview-meta">
+                        {(runtimePolicy.explicit_approval_tools || []).slice(0, 3).map((tool) => (
+                          <span key={`explicit:${tool}`} className="evidence-chip">
+                            {plainTextPreview(tool, 24)}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  ) : null}
+                  {!status?.runtime ? <p className="secondary-copy">Runtime metadata is not available yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Infrastructure</h4>
+                  <span className="muted-label">{infrastructureServices.length}</span>
+                </div>
+                <div className="mini-list">
+                  {infrastructureServices.map((item) => (
+                    <article key={item.key} className={clsx("mini-list-item", `tone-${backendServiceTone(item.service)}`)}>
+                      <div className="mini-list-title">{item.label}</div>
+                      <div className="mini-list-detail">{backendServiceDetail(item.service)}</div>
+                      <div className="evidence-preview-meta">
+                        <span className="evidence-chip evidence-chip-soft">{plainTextPreview(backendServiceStatus(item.service), 28)}</span>
+                      </div>
+                    </article>
+                  ))}
+                  {!infrastructureServices.length ? <p className="secondary-copy">Infrastructure details are not available yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Tool catalog</h4>
+                  <span className="muted-label">{controlData.tools.length}</span>
+                </div>
+                <div className="mini-list">
+                  {highlightedTools.slice(0, 8).map((tool) => (
+                    <article key={tool.name || tool.description} className={clsx("mini-list-item", `tone-${statusTone(tool.policy?.risk_level)}`)}>
+                      <div className="mini-list-title">
+                        {plainTextPreview(tool.name || "tool", 40)}
+                        <span className="mini-list-time">{plainTextPreview(tool.policy?.approval_mode || "unknown", 20)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(tool.policy?.summary || tool.description || "Registered tool", 150)}</div>
+                    </article>
+                  ))}
+                  {!controlData.tools.length ? <p className="secondary-copy">No tool catalog is loaded yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Extensions</h4>
+                  <span className="muted-label">{controlData.extensions.length}</span>
+                </div>
+                <div className="mini-list">
+                  {controlData.extensions.map((extension) => (
+                    <article key={extension.slug || extension.relativePath || extension.title} className="mini-list-item tone-info">
+                      <div className="mini-list-title">
+                        {plainTextPreview(extension.title || extension.slug || "extension", 44)}
+                        <span className="mini-list-time">{extension.commandCount || (extension.commands || []).length || 0}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(extension.description || "Local extension manifest.", 150)}</div>
+                      {extensionCommandPreview(extension) ? (
+                        <div className="evidence-preview-meta">
+                          <span className="evidence-chip evidence-chip-soft">{plainTextPreview(extensionCommandPreview(extension), 72)}</span>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                  {!controlData.extensions.length ? <p className="secondary-copy">No local extensions are loaded.</p> : null}
                 </div>
               </section>
             </div>

@@ -253,6 +253,31 @@ export type ToolSummary = {
   policy?: ToolPolicySummary;
 };
 
+export type ExtensionCommandSummary = {
+  type?: string;
+  name?: string;
+  description?: string;
+  aliases?: string[];
+  argumentHint?: string;
+  category?: string;
+  source?: string;
+  promptText?: string;
+  action?: string;
+  extensionSlug?: string;
+  relativePath?: string;
+};
+
+export type ExtensionSummary = {
+  slug?: string;
+  title?: string;
+  description?: string;
+  path?: string;
+  relativePath?: string;
+  source?: string;
+  commandCount?: number;
+  commands?: ExtensionCommandSummary[];
+};
+
 export type SkillSummary = {
   slug?: string;
   title?: string;
@@ -447,6 +472,10 @@ export type SkillCatalogPayload = {
 
 export type ToolCatalogPayload = {
   items?: ToolSummary[];
+};
+
+export type ExtensionCatalogPayload = {
+  items?: ExtensionSummary[];
 };
 
 export type CommandExecutionResult = {
@@ -652,6 +681,10 @@ export async function getSkillCatalog(baseUrl: string): Promise<SkillCatalogPayl
 
 export async function getToolCatalog(baseUrl: string): Promise<ToolCatalogPayload> {
   return request<ToolCatalogPayload>(baseUrl, "/tools");
+}
+
+export async function getExtensionCatalog(baseUrl: string): Promise<ExtensionCatalogPayload> {
+  return request<ExtensionCatalogPayload>(baseUrl, "/extensions");
 }
 
 export async function executeSlashCommand(baseUrl: string, input: string, sessionId = ""): Promise<CommandExecutionPayload> {

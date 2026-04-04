@@ -30,6 +30,7 @@ export type LocalSlashCommand = {
     | "new-chat"
     | "refresh"
     | "reject"
+    | "show-extensions"
     | "show-runtime"
     | "show-skills"
     | "show-tools"
@@ -139,6 +140,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "tools",
     description: "Show the registered tools and their approval policy levels.",
     action: "show-tools",
+    category: "catalog",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "extensions",
+    aliases: ["plugins"],
+    description: "Show the local extension manifests and the commands they add.",
+    action: "show-extensions",
     category: "catalog",
     source: "built_in",
   },

@@ -1,4 +1,4 @@
-import type { RuntimeConfig, SkillSummary } from "./api";
+import type { ExtensionSummary, RuntimeConfig, SkillSummary } from "./api";
 import {
   type LocalSlashCommand,
   type PromptSlashCommand,
@@ -16,6 +16,7 @@ type SlashCommandPlannerOptions = {
   commands: SlashCommand[];
   activeSuggestion?: SlashCommand | null;
   skills?: SkillSummary[];
+  extensions?: ExtensionSummary[];
   runtime?: RuntimeConfig | null;
   pendingApprovalKind?: string;
 };
@@ -86,6 +87,24 @@ export function formatRuntimeCatalogDetail(runtime?: RuntimeConfig | null): stri
   lines.push("Sources:");
   lines.push(sources || "config/settings.yaml");
   return lines.join("\n");
+}
+
+export function formatExtensionCatalogDetail(extensions: ExtensionSummary[] = []): string {
+  if (!extensions.length) {
+    return "No local extension manifests are loaded right now.";
+  }
+  return extensions
+    .map((extension) => {
+      const title = String(extension.title || extension.slug || "extension").trim();
+      const description = String(extension.description || "Local extension manifest.").trim();
+      const commands = (extension.commands || [])
+        .map((command) => `/${String(command.name || "").trim()}`)
+        .filter(Boolean)
+        .slice(0, 6)
+        .join(", ");
+      return commands ? `${title} - ${description}\nCommands: ${commands}` : `${title} - ${description}`;
+    })
+    .join("\n");
 }
 
 export function buildSlashCommandPlan(options: SlashCommandPlannerOptions): SlashCommandPlan {
@@ -163,6 +182,16 @@ export function buildSlashCommandPlan(options: SlashCommandPlannerOptions): Slas
       kind: "activity",
       title: "Runtime config",
       detail: formatRuntimeCatalogDetail(options.runtime || null),
+      tone: "info",
+      clearDraft: true,
+    };
+  }
+
+  if (selectedCommand.action === "show-extensions") {
+    return {
+      kind: "activity",
+      title: "Local extensions",
+      detail: formatExtensionCatalogDetail(options.extensions || []),
       tone: "info",
       clearDraft: true,
     };
