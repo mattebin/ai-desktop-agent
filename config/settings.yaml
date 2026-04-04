@@ -41,3 +41,14 @@ local_api_event_max_channels: 24
 chat_session_state_path: "data/chat_sessions.json"
 max_chat_sessions: 16
 max_chat_messages_per_session: 40
+
+gmail:
+  enabled: false
+  client_secrets_path: "config/gmail-client-secret.json"
+  token_path: "data/gmail_token.json"
+  draft_state_path: "data/email_drafts.json"
+  scopes:
+    - "https://www.googleapis.com/auth/gmail.modify"
+  watch_enabled: false
+  watch_query: "label:inbox newer_than:7d"
+  poll_seconds: 60

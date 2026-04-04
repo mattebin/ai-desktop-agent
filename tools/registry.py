@@ -30,6 +30,14 @@ from tools.desktop import (
     DESKTOP_TYPE_TEXT_TOOL,
     DESKTOP_WAIT_FOR_WINDOW_READY_TOOL,
 )
+from tools.email import (
+    EMAIL_CONNECT_GMAIL_TOOL,
+    EMAIL_LIST_THREADS_TOOL,
+    EMAIL_PREPARE_FORWARD_DRAFT_TOOL,
+    EMAIL_PREPARE_REPLY_DRAFT_TOOL,
+    EMAIL_READ_THREAD_TOOL,
+    EMAIL_SEND_DRAFT_TOOL,
+)
 from tools.files import APPLY_APPROVED_EDITS_TOOL, COMPARE_FILES_TOOL, INSPECT_PROJECT_TOOL, LIST_FILES_TOOL, READ_FILE_TOOL, SEARCH_FILES_TOOL
 from tools.shell import DRAFT_PROPOSED_EDITS_TOOL, PLAN_PATCH_TOOL, REVIEW_BUNDLE_TOOL, RUN_SHELL_TOOL, SUGGEST_COMMANDS_TOOL
 
@@ -80,6 +88,17 @@ def get_project_inspection_tools():
     ]
 
 
+def get_email_tools():
+    return [
+        EMAIL_CONNECT_GMAIL_TOOL,
+        EMAIL_LIST_THREADS_TOOL,
+        EMAIL_READ_THREAD_TOOL,
+        EMAIL_PREPARE_REPLY_DRAFT_TOOL,
+        EMAIL_PREPARE_FORWARD_DRAFT_TOOL,
+        EMAIL_SEND_DRAFT_TOOL,
+    ]
+
+
 def get_planning_tools():
     return [
         APPLY_APPROVED_EDITS_TOOL,
@@ -95,6 +114,7 @@ def get_tools():
     inspection_tools = get_project_inspection_tools()
     return [
         inspection_tools[0],
+        *get_email_tools(),
         *get_browser_tools(),
         *get_desktop_tools(),
         *inspection_tools[1:],

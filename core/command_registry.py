@@ -96,6 +96,41 @@ def _builtin_commands() -> List[Dict[str, Any]]:
         },
         {
             "type": "local",
+            "name": "gmail-connect",
+            "aliases": ["email-connect"],
+            "description": "Run the Gmail OAuth connect flow using the configured Desktop client secret.",
+            "action": "connect-gmail",
+            "category": "email",
+            "source": "built_in",
+        },
+        {
+            "type": "local",
+            "name": "email-status",
+            "aliases": ["gmail-status"],
+            "description": "Show the Gmail provider status, token state, and draft counts.",
+            "action": "show-email-status",
+            "category": "email",
+            "source": "built_in",
+        },
+        {
+            "type": "local",
+            "name": "inbox",
+            "description": "Show recent Gmail inbox threads from the connected account.",
+            "action": "show-inbox",
+            "category": "email",
+            "source": "built_in",
+        },
+        {
+            "type": "local",
+            "name": "drafts",
+            "aliases": ["email-drafts"],
+            "description": "Show prepared Gmail drafts waiting for review or already sent.",
+            "action": "show-email-drafts",
+            "category": "email",
+            "source": "built_in",
+        },
+        {
+            "type": "local",
             "name": "help",
             "aliases": ["commands"],
             "description": "Show a quick summary of the available slash commands.",
@@ -298,6 +333,72 @@ def _format_tool_catalog_detail(controller: Any) -> str:
     return "\n".join(lines)
 
 
+def _format_email_status_detail(controller: Any) -> str:
+    status = controller.get_email_status() if controller is not None else {}
+    lines = [
+        f"Provider: {str(status.get('provider', 'gmail')).strip() or 'gmail'}",
+        f"Enabled: {'yes' if bool(status.get('enabled', False)) else 'no'}",
+        f"Configured: {'yes' if bool(status.get('configured', False)) else 'no'}",
+        f"Authenticated: {'yes' if bool(status.get('authenticated', False)) else 'no'}",
+        f"Token present: {'yes' if bool(status.get('token_present', False)) else 'no'}",
+    ]
+    if status.get("profile_email"):
+        lines.append(f"Connected as: {str(status.get('profile_email', '')).strip()}")
+    if status.get("dependency_error"):
+        lines.append(f"Dependency: {str(status.get('dependency_error', '')).strip()}")
+    if status.get("restricted_scope_notice"):
+        lines.append(str(status.get("restricted_scope_notice", "")).strip())
+    draft_counts = status.get("draft_counts", {}) if isinstance(status.get("draft_counts", {}), dict) else {}
+    lines.append(
+        "Drafts: "
+        f"prepared={int(draft_counts.get('prepared', 0) or 0)}, "
+        f"sent={int(draft_counts.get('sent', 0) or 0)}, "
+        f"rejected={int(draft_counts.get('rejected', 0) or 0)}"
+    )
+    lines.append(f"Client secrets: {str(status.get('client_secrets_path', '')).strip() or 'missing'}")
+    lines.append(f"Token path: {str(status.get('token_path', '')).strip() or 'missing'}")
+    return "\n".join(lines)
+
+
+def _format_inbox_detail(controller: Any) -> str:
+    payload = controller.list_email_threads(limit=8, label_ids=["INBOX"]) if controller is not None else {}
+    if not payload.get("ok", False):
+        return str(payload.get("error", "Gmail inbox is unavailable right now.")).strip()
+    items = list(payload.get("items", []))
+    if not items:
+        return "No inbox threads matched the current Gmail query."
+    lines: List[str] = []
+    for item in items[:8]:
+        subject = str(item.get("subject", "")).strip() or "(no subject)"
+        last_from = str(item.get("last_from", "")).strip() or "unknown sender"
+        snippet = _trim_text(item.get("snippet", ""), limit=110)
+        thread_id = str(item.get("thread_id", "")).strip()
+        unread = " unread" if bool(item.get("unread", False)) else ""
+        lines.append(f"{subject} - {last_from}{unread}")
+        if snippet:
+            lines.append(f"Thread {thread_id}: {snippet}")
+    return "\n".join(lines)
+
+
+def _format_email_drafts_detail(controller: Any) -> str:
+    payload = controller.list_email_drafts(limit=12) if controller is not None else {}
+    if not payload.get("ok", False):
+        return str(payload.get("error", "Email drafts are unavailable right now.")).strip()
+    items = list(payload.get("items", []))
+    if not items:
+        return "No Gmail drafts are stored locally right now."
+    lines: List[str] = []
+    for item in items[:12]:
+        draft_id = str(item.get("draft_id", "")).strip()
+        subject = str(item.get("subject", "")).strip() or "(no subject)"
+        status = str(item.get("status", "")).strip() or "unknown"
+        recipients = ", ".join(str(entry).strip() for entry in list(item.get("to", []))[:2] if str(entry).strip())
+        summary = _trim_text(item.get("summary", ""), limit=100)
+        lines.append(f"{subject} [{status}] - {recipients or 'no recipients'}")
+        lines.append(f"Draft {draft_id}: {summary or 'Stored local Gmail draft.'}")
+    return "\n".join(lines)
+
+
 def execute_slash_command(
     input_text: str,
     *,
@@ -386,6 +487,47 @@ def execute_slash_command(
             "kind": "activity",
             "title": "Registered tools",
             "detail": _format_tool_catalog_detail(controller),
+            "tone": "info",
+            "clear_draft": True,
+        }
+    if action == "connect-gmail":
+        result = controller.connect_gmail() if controller is not None else {"ok": False, "error": "Controller unavailable."}
+        if result.get("ok", False):
+            return {
+                "kind": "activity",
+                "title": "Gmail connected",
+                "detail": _format_email_status_detail(controller),
+                "tone": "success",
+                "clear_draft": True,
+            }
+        return {
+            "kind": "activity",
+            "title": "Gmail connect failed",
+            "detail": str(result.get("error", "Unable to connect Gmail.")).strip(),
+            "tone": "warning",
+            "clear_draft": True,
+        }
+    if action == "show-email-status":
+        return {
+            "kind": "activity",
+            "title": "Gmail status",
+            "detail": _format_email_status_detail(controller),
+            "tone": "info",
+            "clear_draft": True,
+        }
+    if action == "show-inbox":
+        return {
+            "kind": "activity",
+            "title": "Inbox",
+            "detail": _format_inbox_detail(controller),
+            "tone": "info",
+            "clear_draft": True,
+        }
+    if action == "show-email-drafts":
+        return {
+            "kind": "activity",
+            "title": "Email drafts",
+            "detail": _format_email_drafts_detail(controller),
             "tone": "info",
             "clear_draft": True,
         }

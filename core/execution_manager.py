@@ -1476,6 +1476,17 @@ class ExecutionManager:
                 return step
         return None
 
+    def _latest_paused_email_send_step(self, state: TaskState):
+        for step in reversed(state.steps):
+            if step.get("tool") != "email_send_draft":
+                continue
+            if step.get("status") != "paused":
+                continue
+            result = step.get("result", {})
+            if isinstance(result, dict) and result.get("approval_required", False):
+                return step
+        return None
+
     def _record_manual_history(
         self,
         state: TaskState,
@@ -2919,6 +2930,61 @@ class ExecutionManager:
                 self._set_last_result(result_payload)
                 self._persist_all_locked()
                 auto_start = self._has_queued_tasks_locked()
+            elif kind == "email_draft":
+                step = self._latest_paused_email_send_step(state)
+                if step is None:
+                    return {"ok": False, "message": "No paused email draft is available to approve."}
+
+                result = step.get("result", {})
+                draft_id = str(result.get("draft_id", "")).strip()
+                send_result = self.agent.send_email_draft(draft_id, approved=True)
+                tool_status = "completed" if send_result.get("ok", False) else "failed"
+                state.add_step(
+                    {
+                        "type": "tool",
+                        "status": tool_status,
+                        "tool": "email_send_draft",
+                        "args": {"draft_id": draft_id, "approval_status": "approved"},
+                        "result": send_result,
+                        "recorded_at": _iso_timestamp(),
+                    }
+                )
+                note = str(send_result.get("message", "")).strip() or "Sent the approved Gmail draft."
+                state.add_note(note)
+                self._refresh_summary(state)
+                state.status = "completed" if send_result.get("ok", False) else "blocked"
+                state.set_task_control(
+                    event="approved",
+                    reason=note,
+                    resume_available=False,
+                )
+                self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                self._set_current_state_locked(state)
+                reply_message = self._render_authoritative_manual_reply_locked(state, note)
+                result_payload = {
+                    "ok": True,
+                    "status": state.status,
+                    "message": reply_message,
+                    "steps": state.steps,
+                }
+                self._record_manual_history(
+                    state,
+                    started_at=started_at,
+                    step_start_index=history_start_index,
+                    result=result_payload,
+                    source="control_action",
+                    session_id=session_id_value,
+                )
+                self._update_task_after_manual_action_locked(
+                    active_task,
+                    status=state.status,
+                    message=result_payload["message"],
+                    run_id=str(result_payload.get("run_id", "")),
+                    state=state,
+                )
+                self._set_last_result(result_payload)
+                self._persist_all_locked()
+                auto_start = self._has_queued_tasks_locked()
             else:
                 return {"ok": False, "message": f"Unsupported approval type: {kind}"}
 
@@ -3101,6 +3167,54 @@ class ExecutionManager:
                 self._set_last_result(result_payload)
                 self._persist_all_locked()
                 auto_start = self._has_queued_tasks_locked()
+            elif kind == "email_draft":
+                step = self._latest_paused_email_send_step(state)
+                if step is None:
+                    return {"ok": False, "message": "No paused email draft is available to reject."}
+
+                result = step.get("result", {})
+                draft_id = str(result.get("draft_id", "")).strip()
+                reject_result = self.agent.reject_email_draft(draft_id, reason="Rejected by operator.")
+                message = str(reject_result.get("message", "")).strip() or "Rejected the prepared Gmail draft."
+                state.add_step(
+                    {
+                        "type": "system",
+                        "status": "rejected",
+                        "message": message,
+                        "tool": "email_send_draft",
+                    }
+                )
+                state.add_note(message)
+                self._refresh_summary(state)
+                state.status = "needs_attention"
+                state.set_task_control(event="rejected", reason=message, resume_available=False)
+                self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                self._set_current_state_locked(state)
+                reply_message = self._render_authoritative_manual_reply_locked(state, message)
+                result_payload = {
+                    "ok": True,
+                    "status": state.status,
+                    "message": reply_message,
+                    "steps": state.steps,
+                }
+                self._record_manual_history(
+                    state,
+                    started_at=started_at,
+                    step_start_index=history_start_index,
+                    result=result_payload,
+                    source="control_action",
+                    session_id=session_id_value,
+                )
+                self._update_task_after_manual_action_locked(
+                    active_task,
+                    status=state.status,
+                    message=result_payload["message"],
+                    run_id=str(result_payload.get("run_id", "")),
+                    state=state,
+                )
+                self._set_last_result(result_payload)
+                self._persist_all_locked()
+                auto_start = self._has_queued_tasks_locked()
             else:
                 return {"ok": False, "message": f"Unsupported approval type: {kind}"}
 
@@ -3251,6 +3365,7 @@ class ExecutionManager:
             },
             "desktop": desktop_status,
             "desktop_capture": self.desktop_capture_service.status_snapshot(),
+            "email": self.agent.get_email_status(),
         }
 
     def _run_phase_snapshot_locked(

@@ -478,6 +478,93 @@ export type ExtensionCatalogPayload = {
   items?: ExtensionSummary[];
 };
 
+export type EmailStatusPayload = {
+  provider?: string;
+  enabled?: boolean;
+  configured?: boolean;
+  authenticated?: boolean;
+  token_present?: boolean;
+  token_valid?: boolean;
+  dependency_available?: boolean;
+  dependency_error?: string;
+  client_secrets_path?: string;
+  token_path?: string;
+  watch_enabled?: boolean;
+  watch_query?: string;
+  poll_seconds?: number;
+  scopes?: string[];
+  restricted_scope_notice?: string;
+  draft_counts?: Record<string, number>;
+};
+
+export type EmailThreadMessage = {
+  message_id?: string;
+  thread_id?: string;
+  subject?: string;
+  from?: string;
+  from_address?: string;
+  to?: string;
+  cc?: string;
+  reply_to?: string;
+  date?: string;
+  snippet?: string;
+  body_text?: string;
+  unread?: boolean;
+  sent_by_self?: boolean;
+};
+
+export type EmailThreadSummary = {
+  thread_id?: string;
+  history_id?: string;
+  message_count?: number;
+  snippet?: string;
+  subject?: string;
+  last_from?: string;
+  last_from_address?: string;
+  last_date?: string;
+  last_message_id?: string;
+  unread?: boolean;
+  messages?: EmailThreadMessage[];
+};
+
+export type EmailThreadsPayload = {
+  ok?: boolean;
+  provider?: string;
+  profile_email?: string;
+  query?: string;
+  label_ids?: string[];
+  items?: EmailThreadSummary[];
+  thread?: EmailThreadSummary;
+};
+
+export type EmailDraftSummary = {
+  draft_id?: string;
+  draft_type?: string;
+  status?: string;
+  provider?: string;
+  thread_id?: string;
+  message_id?: string;
+  to?: string[];
+  cc?: string[];
+  subject?: string;
+  summary?: string;
+  confidence?: string;
+  needs_context?: boolean;
+  questions?: string[];
+  updated_at?: string;
+  created_at?: string;
+};
+
+export type EmailDraftsPayload = {
+  ok?: boolean;
+  items?: EmailDraftSummary[];
+  summary?: EmailDraftSummary;
+  draft?: Record<string, unknown>;
+  message?: string;
+  error?: string;
+  paused?: boolean;
+};
+
 export type CommandExecutionResult = {
   kind?: string;
   title?: string;
@@ -685,6 +772,73 @@ export async function getToolCatalog(baseUrl: string): Promise<ToolCatalogPayloa
 
 export async function getExtensionCatalog(baseUrl: string): Promise<ExtensionCatalogPayload> {
   return request<ExtensionCatalogPayload>(baseUrl, "/extensions");
+}
+
+export async function getEmailStatus(baseUrl: string): Promise<EmailStatusPayload> {
+  return request<EmailStatusPayload>(baseUrl, "/email/status");
+}
+
+export async function connectGmail(baseUrl: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(baseUrl, "/email/connect", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listEmailThreads(
+  baseUrl: string,
+  options: { limit?: number; query?: string; labelIds?: string[] } = {},
+): Promise<EmailThreadsPayload> {
+  return request<EmailThreadsPayload>(baseUrl, "/email/threads", undefined, {
+    limit: options.limit,
+    query: options.query,
+    label_ids: options.labelIds?.join(",") || undefined,
+  });
+}
+
+export async function readEmailThread(baseUrl: string, threadId: string, maxMessages = 8): Promise<EmailThreadsPayload> {
+  return request<EmailThreadsPayload>(baseUrl, `/email/threads/${encodeURIComponent(threadId)}`, undefined, { limit: maxMessages });
+}
+
+export async function listEmailDrafts(baseUrl: string, status = "", limit = 12): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, "/email/drafts", undefined, {
+    status: status || undefined,
+    limit,
+  });
+}
+
+export async function prepareEmailReplyDraft(
+  baseUrl: string,
+  payload: { thread_id: string; guidance?: string; user_context?: string },
+): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, "/email/drafts/reply", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function prepareEmailForwardDraft(
+  baseUrl: string,
+  payload: { thread_id: string; to: string[]; note?: string },
+): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, "/email/drafts/forward", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendEmailDraft(baseUrl: string, draftId: string, approvalStatus = "approved"): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, "/email/drafts/send", {
+    method: "POST",
+    body: JSON.stringify({ draft_id: draftId, approval_status: approvalStatus }),
+  });
+}
+
+export async function rejectEmailDraft(baseUrl: string, draftId: string, reason = "Rejected by operator."): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, "/email/drafts/reject", {
+    method: "POST",
+    body: JSON.stringify({ draft_id: draftId, reason }),
+  });
 }
 
 export async function executeSlashCommand(baseUrl: string, input: string, sessionId = ""): Promise<CommandExecutionPayload> {

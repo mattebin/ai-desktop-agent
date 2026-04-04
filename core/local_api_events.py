@@ -414,6 +414,13 @@ def _compact_infrastructure(infrastructure: Dict[str, Any] | None) -> Dict[str, 
             if isinstance(infrastructure.get("desktop", {}), dict)
             else {}
         ),
+        "email": {
+            "provider": _trim_text(infrastructure.get("email", {}).get("provider", "") if isinstance(infrastructure.get("email", {}), dict) else "", limit=40),
+            "enabled": bool(infrastructure.get("email", {}).get("enabled", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "configured": bool(infrastructure.get("email", {}).get("configured", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "authenticated": bool(infrastructure.get("email", {}).get("authenticated", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "watch_enabled": bool(infrastructure.get("email", {}).get("watch_enabled", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+        },
     }
 
 

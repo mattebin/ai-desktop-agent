@@ -803,6 +803,31 @@ class LocalOperatorApiServer:
                     self._respond_ok({"items": list_extension_catalog()})
                     return
 
+                if path == "/email/status":
+                    self._respond_ok(server_ref.controller.get_email_status())
+                    return
+
+                if path == "/email/threads":
+                    limit = self._query_limit(parsed, default=10, maximum=25)
+                    query_text = _trim_text(parse_qs(parsed.query).get("query", [""])[0], limit=240)
+                    label_text = _trim_text(parse_qs(parsed.query).get("label_ids", ["INBOX"])[0], limit=240)
+                    label_ids = [part.strip() for part in label_text.split(",") if part.strip()]
+                    self._respond_ok(server_ref.controller.list_email_threads(limit=limit, query=query_text, label_ids=label_ids or ["INBOX"]))
+                    return
+
+                if path == "/email/drafts":
+                    limit = self._query_limit(parsed, default=12, maximum=40)
+                    status_text = _trim_text(parse_qs(parsed.query).get("status", [""])[0], limit=40)
+                    self._respond_ok(server_ref.controller.list_email_drafts(status=status_text, limit=limit))
+                    return
+
+                email_segments = self._path_segments(path)
+                if len(email_segments) == 3 and email_segments[0] == "email" and email_segments[1] == "threads":
+                    thread_id = unquote(email_segments[2])
+                    limit = self._query_limit(parsed, default=8, maximum=40)
+                    self._respond_ok(server_ref.controller.read_email_thread(thread_id, max_messages=limit))
+                    return
+
                 if path == "/snapshot":
                     session_id, state_scope_id = self._session_filters(parsed=parsed)
                     self._respond_ok(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id))
@@ -1037,6 +1062,63 @@ class LocalOperatorApiServer:
                                 "session": session_update.get("session", {}),
                             }
                     self._respond_ok({"execution": execution})
+                    return
+
+                if path == "/email/connect":
+                    result = server_ref.controller.connect_gmail()
+                    if result.get("ok", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("error", "Unable to connect Gmail."))
+                    return
+
+                if path == "/email/drafts/reply":
+                    result = server_ref.controller.prepare_email_reply_draft(
+                        thread_id=str(body.get("thread_id", "")).strip(),
+                        guidance=str(body.get("guidance", "")).strip(),
+                        user_context=str(body.get("user_context", "")).strip(),
+                    )
+                    if result.get("ok", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("error", "Unable to prepare the Gmail reply draft."))
+                    return
+
+                if path == "/email/drafts/forward":
+                    recipients = body.get("to", [])
+                    if isinstance(recipients, str):
+                        recipients = [part.strip() for part in recipients.split(",") if part.strip()]
+                    result = server_ref.controller.prepare_email_forward_draft(
+                        thread_id=str(body.get("thread_id", "")).strip(),
+                        to=recipients if isinstance(recipients, list) else [],
+                        note=str(body.get("note", "")).strip(),
+                    )
+                    if result.get("ok", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("error", "Unable to prepare the Gmail forward draft."))
+                    return
+
+                if path == "/email/drafts/send":
+                    result = server_ref.controller.send_email_draft(
+                        str(body.get("draft_id", "")).strip(),
+                        approved=_trim_text(body.get("approval_status", ""), limit=40).lower() == "approved",
+                    )
+                    if result.get("ok", False) or result.get("paused", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("error", "Unable to send the Gmail draft."))
+                    return
+
+                if path == "/email/drafts/reject":
+                    result = server_ref.controller.reject_email_draft(
+                        str(body.get("draft_id", "")).strip(),
+                        reason=str(body.get("reason", "")).strip() or "Rejected by operator.",
+                    )
+                    if result.get("ok", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("error", "Unable to reject the Gmail draft."))
                     return
 
                 if path == "/shutdown":

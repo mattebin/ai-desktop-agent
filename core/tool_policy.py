@@ -25,6 +25,8 @@ READ_ONLY_TOOLS = {
     "desktop_capture_screenshot",
     "desktop_list_processes",
     "desktop_inspect_process",
+    "email_list_threads",
+    "email_read_thread",
 }
 
 CONDITIONAL_APPROVAL_TOOLS = {
@@ -33,6 +35,9 @@ CONDITIONAL_APPROVAL_TOOLS = {
     "browser_type",
     "browser_follow_link",
     "run_shell",
+    "email_connect_gmail",
+    "email_prepare_reply_draft",
+    "email_prepare_forward_draft",
 }
 
 EXPLICIT_APPROVAL_TOOLS = {
@@ -48,6 +53,7 @@ EXPLICIT_APPROVAL_TOOLS = {
     "desktop_start_process",
     "desktop_stop_process",
     "desktop_run_command",
+    "email_send_draft",
 }
 
 FILE_MUTATION_TOOLS = {"apply_approved_edits"}
@@ -95,6 +101,8 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         if name.startswith("browser_")
         else "desktop"
         if name.startswith("desktop_")
+        else "email"
+        if name.startswith("email_")
         else "files"
         if name in FILE_MUTATION_TOOLS or name in READ_ONLY_TOOLS
         else "shell"
@@ -106,6 +114,8 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         mutation_target = (
             "filesystem"
             if name in FILE_MUTATION_TOOLS
+            else "email_remote_state"
+            if name.startswith("email_")
             else "local_process"
             if name in PROCESS_CONTROL_TOOLS
             else "desktop_state"
@@ -115,6 +125,8 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         summary = "Explicit approval is required before executing this bounded mutation."
         if name == "desktop_run_command":
             summary = "Explicit approval is required before running a bounded local command."
+        if name == "email_send_draft":
+            summary = "Explicit approval is required before sending the prepared email draft."
         return {
             "tool": name,
             "area": area,
@@ -130,12 +142,24 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         summary = "This bounded action may proceed automatically, but risky transitions still require approval."
         if name == "run_shell":
             summary = "Use only for safe read-only inspection. Do not execute destructive or mutating shell commands."
+        if name == "email_connect_gmail":
+            summary = "This opens the Google OAuth sign-in flow for Gmail and stores local credentials."
+        if name in {"email_prepare_reply_draft", "email_prepare_forward_draft"}:
+            summary = "This prepares a local email draft for later review without sending anything."
         return {
             "tool": name,
             "area": area,
             "risk_level": "medium",
             "approval_mode": "conditional",
-            "mutation_target": "remote_state" if name.startswith("browser_") else "local_shell",
+            "mutation_target": (
+                "remote_state"
+                if name.startswith("browser_")
+                else "email_auth"
+                if name == "email_connect_gmail"
+                else "local_draft"
+                if name.startswith("email_")
+                else "local_shell"
+            ),
             "summary": summary,
             "planner_note": "Conditional approval: continue only inside the safe policy and pause before risky transitions.",
             "shell_hazard": _shell_hazard((args or {}).get("command", "")) if name in SHELL_HAZARD_TOOLS else "",
@@ -192,7 +216,7 @@ def build_tool_policy_snapshot(tool_names: Iterable[str]) -> Dict[str, Any]:
     return {
         "summary": (
             "Read-only inspection may proceed automatically. Browser transitions and shell work stay conditional. "
-            "Desktop mutations, process control, command execution, and file edits require explicit approval."
+            "Desktop mutations, process control, command execution, file edits, and email sending require explicit approval."
         ),
         "read_only_tools": read_only,
         "conditional_approval_tools": conditional,
