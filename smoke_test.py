@@ -3787,7 +3787,9 @@ first_message_event = {}
 stream_deadline = time.time() + 4.0
 while time.time() < stream_deadline:
     payload = next(stream_one_iter)
-    if payload.get("event") == "session.message" and "Replay marker one" in payload.get("data", {}).get("message", {}).get("content", ""):
+    replay_message = payload.get("data", {}).get("message", {}).get("content", "")
+    replay_latest = payload.get("data", {}).get("session", {}).get("latest_message", {}).get("content", "")
+    if payload.get("event_id") and ("Replay marker one" in replay_message or "Replay marker one" in replay_latest):
         first_message_event = payload
         break
 if not first_message_event.get("event_id"):

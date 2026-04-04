@@ -8,10 +8,14 @@ import {
   AlertItem,
   approvePending,
   BrowserState,
+  connectGmail,
   createSession,
   DesktopTargetProposal,
   DesktopTargetProposalContext,
   DesktopRuntimeStatus,
+  EmailDraftsPayload,
+  EmailStatusPayload,
+  EmailThreadsPayload,
   EvidenceArtifact,
   EvidenceSummary,
   ensureLocalApi,
@@ -22,6 +26,7 @@ import {
   getDesktopEvidenceArtifact,
   getSkillCatalog,
   getSlashCommands,
+  getEmailStatus,
   getToolCatalog,
   isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
@@ -32,6 +37,8 @@ import {
   getSessionMessages,
   getStatus,
   getWatchState,
+  listEmailDrafts,
+  listEmailThreads,
   listSessions,
   openSessionEventStream,
   rejectPending,
@@ -164,6 +171,76 @@ function formatToolCatalogDetail(tools: ToolSummary[] = []): string {
       const approval = String(policy.approval_mode || "unknown").trim();
       const summary = String(policy.summary || tool.description || "Registered tool").trim();
       return `${name} [${risk}/${approval}] - ${summary}`;
+    })
+    .join("\n");
+}
+
+function formatEmailStatusDetail(payload?: EmailStatusPayload | null): string {
+  if (!payload) {
+    return "Email status is not available right now.";
+  }
+  const draftCounts = payload.draft_counts || {};
+  const draftSummary =
+    Object.entries(draftCounts)
+      .filter(([, count]) => Number(count || 0) > 0)
+      .map(([status, count]) => `${status}: ${count}`)
+      .join(", ") || "none";
+  const state = !payload.enabled
+    ? "disabled"
+    : !payload.configured
+      ? "needs setup"
+      : !payload.authenticated
+        ? "needs sign-in"
+        : "connected";
+  const lines = [
+    `Provider: ${String(payload.provider || "gmail").trim() || "gmail"}`,
+    `State: ${state}`,
+    `Account: ${String(payload.profile_email || "Not connected").trim() || "Not connected"}`,
+    `Watch: ${payload.watch_enabled ? "enabled" : "disabled"}`,
+    `Drafts: ${draftSummary}`,
+  ];
+  if (typeof payload.poll_seconds === "number") {
+    lines.push(`Poll interval: ${payload.poll_seconds}s`);
+  }
+  if (payload.last_checked_at) {
+    lines.push(`Checked: ${payload.last_checked_at}`);
+  }
+  return lines.join("\n");
+}
+
+function formatEmailThreadsDetail(payload?: EmailThreadsPayload | null): string {
+  if (payload?.error) {
+    return String(payload.error).trim();
+  }
+  const items = payload?.items || [];
+  if (!items.length) {
+    return "No inbox threads matched the current Gmail query.";
+  }
+  return items
+    .map((thread) => {
+      const subject = String(thread.subject || "No subject").trim();
+      const from = String(thread.last_from || thread.last_from_address || "Unknown sender").trim();
+      const date = String(thread.last_date || "").trim();
+      const unread = thread.unread ? "unread" : "read";
+      return `${subject} - ${from}${date ? ` (${date})` : ""} [${unread}]`;
+    })
+    .join("\n");
+}
+
+function formatEmailDraftsDetail(payload?: EmailDraftsPayload | null): string {
+  if (payload?.error) {
+    return String(payload.error).trim();
+  }
+  const items = payload?.items || [];
+  if (!items.length) {
+    return "No Gmail drafts are stored locally right now.";
+  }
+  return items
+    .map((draft) => {
+      const subject = String(draft.subject || "No subject").trim();
+      const status = String(draft.status || "unknown").trim();
+      const recipients = Array.isArray(draft.to) && draft.to.length ? draft.to.join(", ") : "No recipient";
+      return `${subject} [${status}] - ${recipients}`;
     })
     .join("\n");
 }
@@ -1403,12 +1480,46 @@ function mergeStatusPayload(current: StatusPayload | null, update: StatusPayload
 }
 
 function backendServiceStatus(service: unknown): string {
-  const value = (service || {}) as { active?: string; reason?: string; message?: string };
+  const value = (service || {}) as {
+    active?: string;
+    reason?: string;
+    message?: string;
+    provider?: string;
+    enabled?: boolean;
+    configured?: boolean;
+    authenticated?: boolean;
+  };
+  if (value.provider === "gmail") {
+    if (!value.enabled) {
+      return "disabled";
+    }
+    if (!value.configured) {
+      return "needs setup";
+    }
+    if (!value.authenticated) {
+      return "needs sign-in";
+    }
+    return "connected";
+  }
   return String(value.active || value.reason || value.message || "unknown").trim() || "unknown";
 }
 
 function backendServiceTone(service: unknown): ActivityTone {
-  const value = (service || {}) as { available?: boolean; active?: string; reason?: string };
+  const value = (service || {}) as {
+    available?: boolean;
+    active?: string;
+    reason?: string;
+    provider?: string;
+    enabled?: boolean;
+    configured?: boolean;
+    authenticated?: boolean;
+  };
+  if (value.provider === "gmail") {
+    if (!value.enabled || !value.configured || !value.authenticated) {
+      return "warning";
+    }
+    return "success";
+  }
   const active = String(value.active || "").trim().toLowerCase();
   const reason = String(value.reason || "").trim().toLowerCase();
   if (value.available === false || active === "unavailable" || active === "disabled") {
@@ -1421,7 +1532,23 @@ function backendServiceTone(service: unknown): ActivityTone {
 }
 
 function backendServiceDetail(service: unknown): string {
-  const value = (service || {}) as { message?: string; reason?: string };
+  const value = (service || {}) as {
+    message?: string;
+    reason?: string;
+    provider?: string;
+    profile_email?: string;
+    watch_enabled?: boolean;
+    draft_counts?: Record<string, number>;
+  };
+  if (value.provider === "gmail") {
+    const prepared = Number(value.draft_counts?.prepared || 0);
+    const sent = Number(value.draft_counts?.sent || 0);
+    const account = String(value.profile_email || "No connected account").trim() || "No connected account";
+    return plainTextPreview(
+      `${account} | Watch ${value.watch_enabled ? "enabled" : "disabled"} | Drafts ${prepared} prepared, ${sent} sent`,
+      140,
+    );
+  }
   return plainTextPreview(String(value.message || value.reason || "Backend service state is available."), 140);
 }
 
@@ -2162,6 +2289,7 @@ export default function App() {
     { key: "file_watch", label: "File watch", service: infrastructure.file_watch },
     { key: "desktop_capture", label: "Desktop capture", service: infrastructure.desktop_capture },
     { key: "desktop", label: "Desktop backends", service: infrastructure.desktop },
+    { key: "email", label: "Email", service: infrastructure.email },
   ].filter((item) => item.service);
   const highlightedTools = [...controlData.tools].sort((left, right) => {
     const order = ["high", "medium", "low", "unknown"];
@@ -2325,6 +2453,56 @@ export default function App() {
       }
       const toolCatalog = await getToolCatalog(apiBaseUrl);
       addLocalActivity("Registered tools", formatToolCatalogDetail(toolCatalog.items || []), "info");
+      return;
+    }
+
+    if (command.action === "connect-gmail") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "Gmail connect needs the local API to be connected.", "warning");
+        return;
+      }
+      const result = await connectGmail(apiBaseUrl);
+      const statusPayload = await getEmailStatus(apiBaseUrl).catch(() => null);
+      await handleRefresh();
+      addLocalActivity(
+        "Gmail connection",
+        formatEmailStatusDetail(statusPayload) || String(result.message || "Gmail connect flow completed."),
+        statusPayload?.authenticated ? "success" : "info",
+      );
+      return;
+    }
+
+    if (command.action === "show-email-status") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "Email status needs the local API to be connected.", "warning");
+        return;
+      }
+      const emailStatus = await getEmailStatus(apiBaseUrl);
+      addLocalActivity(
+        "Email status",
+        formatEmailStatusDetail(emailStatus),
+        emailStatus.authenticated ? "success" : emailStatus.enabled ? "info" : "warning",
+      );
+      return;
+    }
+
+    if (command.action === "show-inbox") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "Inbox access needs the local API to be connected.", "warning");
+        return;
+      }
+      const inbox = await listEmailThreads(apiBaseUrl, { limit: 8, labelIds: ["INBOX"] });
+      addLocalActivity("Inbox", formatEmailThreadsDetail(inbox), inbox.error ? "warning" : "info");
+      return;
+    }
+
+    if (command.action === "show-email-drafts") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "Draft access needs the local API to be connected.", "warning");
+        return;
+      }
+      const drafts = await listEmailDrafts(apiBaseUrl, "", 12);
+      addLocalActivity("Email drafts", formatEmailDraftsDetail(drafts), drafts.error ? "warning" : "info");
       return;
     }
 

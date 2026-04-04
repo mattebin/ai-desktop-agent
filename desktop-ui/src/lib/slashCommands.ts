@@ -26,11 +26,15 @@ export type LocalSlashCommand = {
   source?: string;
   action:
     | "approve"
+    | "connect-gmail"
     | "help"
     | "new-chat"
     | "refresh"
     | "reject"
+    | "show-email-drafts"
+    | "show-email-status"
     | "show-extensions"
+    | "show-inbox"
     | "show-runtime"
     | "show-skills"
     | "show-tools"
@@ -117,6 +121,41 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Reject the current blocked step if an approval is waiting.",
     action: "reject",
     category: "approval",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "gmail-connect",
+    aliases: ["email-connect"],
+    description: "Open the Gmail OAuth flow for the connected local operator.",
+    action: "connect-gmail",
+    category: "email",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "email-status",
+    aliases: ["gmail-status"],
+    description: "Show the Gmail provider status, token state, and draft counts.",
+    action: "show-email-status",
+    category: "email",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "inbox",
+    description: "Show recent Gmail inbox threads from the connected account.",
+    action: "show-inbox",
+    category: "email",
+    source: "built_in",
+  },
+  {
+    type: "local",
+    name: "drafts",
+    aliases: ["email-drafts"],
+    description: "Show prepared Gmail drafts waiting for review or already sent.",
+    action: "show-email-drafts",
+    category: "email",
     source: "built_in",
   },
   {

@@ -3357,6 +3357,20 @@ class ExecutionManager:
                     "screenshot": {"active": "unavailable", "reason": "error", "available": False},
                     "ui_evidence": {"active": "unavailable", "reason": "error", "available": False},
                 }
+        email_status = {}
+        get_email_status = getattr(self.agent, "get_email_status", None)
+        if callable(get_email_status):
+            try:
+                email_status = get_email_status() or {}
+            except Exception as exc:
+                email_status = {
+                    "provider": "gmail",
+                    "enabled": False,
+                    "configured": False,
+                    "authenticated": False,
+                    "reason": str(exc or "").strip() or "Email status is unavailable.",
+                }
+
         return {
             "scheduler": self.scheduler_backend.status_snapshot(),
             "file_watch": {
@@ -3365,7 +3379,7 @@ class ExecutionManager:
             },
             "desktop": desktop_status,
             "desktop_capture": self.desktop_capture_service.status_snapshot(),
-            "email": self.agent.get_email_status(),
+            "email": email_status,
         }
 
     def _run_phase_snapshot_locked(

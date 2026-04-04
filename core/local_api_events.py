@@ -950,6 +950,7 @@ class LocalApiEventStream:
                 reset_event: Dict[str, Any] | None = None
                 sync_event: Dict[str, Any] | None = None
                 heartbeat_event: Dict[str, Any] | None = None
+                refresh_needed = False
                 with self._condition:
                     if self._stop_event.is_set():
                         break
@@ -1004,15 +1005,7 @@ class LocalApiEventStream:
                                         expected_channel_id=channel.channel_id,
                                     )
                         if not reset_event and not pending_events:
-                            state = channel.latest_state or self._bootstrap_channel_locked(channel)
-                            woke = self._condition.wait(timeout=self.heartbeat_seconds)
-                            if not woke and not self._stop_event.is_set():
-                                heartbeat_event = self._connection_event(
-                                    "stream.heartbeat",
-                                    session_id=safe_session_id,
-                                    state_scope_id=safe_scope_id,
-                                    data={"status": state.get("snapshot", {}).get("status", "idle")},
-                                )
+                            refresh_needed = True
                 if reset_event is not None:
                     yield reset_event
                 if sync_event is not None:
@@ -1022,6 +1015,49 @@ class LocalApiEventStream:
                         yield event
                 if heartbeat_event is not None:
                     yield heartbeat_event
+                if reset_event is not None or sync_event is not None or pending_events or heartbeat_event is not None:
+                    continue
+
+                refreshed_state: Dict[str, Any] = {}
+                if refresh_needed and not self._stop_event.is_set():
+                    try:
+                        refreshed_state = self._read_state(session_id=safe_session_id, state_scope_id=safe_scope_id)
+                    except Exception:
+                        refreshed_state = {}
+                    with self._condition:
+                        channel = self._channels.get(channel.channel_key)
+                        if channel is not None:
+                            channel.last_access_at = time.monotonic()
+                            if refreshed_state:
+                                self._apply_state_to_channel_locked(channel, refreshed_state)
+                            buffer_items = list(channel.buffer)
+                            pending_events = [
+                                self._public_event_payload(event)
+                                for event in buffer_items
+                                if int(event.get("_sequence", 0)) > last_seen_sequence
+                            ]
+                            if pending_events:
+                                last_seen_sequence = self._event_sequence(
+                                    pending_events[-1].get("event_id", ""),
+                                    expected_channel_id=channel.channel_id,
+                                )
+                            elif time.monotonic() - channel.last_emit_at >= self.heartbeat_seconds:
+                                state = channel.latest_state or refreshed_state
+                                heartbeat_event = self._connection_event(
+                                    "stream.heartbeat",
+                                    session_id=safe_session_id,
+                                    state_scope_id=safe_scope_id,
+                                    data={"status": state.get("snapshot", {}).get("status", "idle")},
+                                )
+                if pending_events:
+                    for event in pending_events:
+                        yield event
+                    continue
+                if heartbeat_event is not None:
+                    yield heartbeat_event
+                    continue
+                if self._stop_event.wait(self.poll_seconds):
+                    break
         finally:
             with self._condition:
                 channel = self._channels.get(self._channel_key(safe_session_id, safe_scope_id))

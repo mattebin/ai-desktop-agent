@@ -233,6 +233,7 @@ export type RuntimeConfig = {
     file_mutation_tools?: string[];
     notes?: string[];
   };
+  email?: EmailStatusPayload;
 };
 
 export type ToolPolicySummary = {
@@ -489,12 +490,14 @@ export type EmailStatusPayload = {
   dependency_error?: string;
   client_secrets_path?: string;
   token_path?: string;
+  profile_email?: string;
   watch_enabled?: boolean;
   watch_query?: string;
   poll_seconds?: number;
   scopes?: string[];
   restricted_scope_notice?: string;
   draft_counts?: Record<string, number>;
+  last_checked_at?: string;
 };
 
 export type EmailThreadMessage = {
@@ -535,6 +538,7 @@ export type EmailThreadsPayload = {
   label_ids?: string[];
   items?: EmailThreadSummary[];
   thread?: EmailThreadSummary;
+  error?: string;
 };
 
 export type EmailDraftSummary = {
