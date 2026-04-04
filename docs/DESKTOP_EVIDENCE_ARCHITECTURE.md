@@ -246,8 +246,11 @@ Current guardrails:
 - non-critical frame emissions are throttled lightly so the UI sees one coherent update frame instead of several near-identical churn events
 - the frontend uses those frames to merge session/status updates incrementally and preserve transcript scroll position unless a real new message arrives
 - background conversation resync now follows a stale-while-refresh model, so the visible transcript stays mounted during execution instead of dropping back to a loading skeleton on routine refreshes
+- transcript messages now use stable deterministic identity keys and preserve object references across incremental merges whenever the underlying message content did not actually change
+- urgent run-phase and final-outcome updates flush through the UI faster than routine background frames so the visible state does not feel like it is catching up late
 - compact menus and artifact modals render through a top-layer portal instead of relying on local stacking contexts inside the chat layout
 - retained screenshot artifacts resolve their preview path from evidence metadata first, then fall back to the canonical artifact content route, so image evidence stays renderable without introducing a parallel asset system
+- in local dev, setting `localStorage["ai-operator:debug-renders"] = "1"` enables lightweight console diagnostics for message renders and transcript array replacement/merge events
 
 - `completed`
 - `approval_needed`

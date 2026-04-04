@@ -26,6 +26,7 @@ Skills should help with:
 
 A skill file should usually include:
 
+- optional YAML frontmatter for command metadata
 - purpose
 - when to use it
 - when not to use it
@@ -57,3 +58,16 @@ Current repo-local desktop skills now also include:
 - `desktop_recovery.md`
 - `window_state_inspection.md`
 - `desktop_readiness_check.md`
+
+## Optional frontmatter
+
+Repo-local skills can now declare lightweight metadata at the top of the file:
+
+- `title`
+- `command`
+- `aliases`
+- `description`
+- `prompt`
+- `tags`
+
+That metadata is used by the local API and desktop UI to surface skill-backed slash commands.

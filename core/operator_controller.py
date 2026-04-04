@@ -81,6 +81,36 @@ class OperatorController:
     def get_runtime_config(self) -> Dict[str, Any]:
         return self.manager.agent.get_runtime_config()
 
+    def get_tool_catalog(self) -> list[Dict[str, Any]]:
+        return self.manager.agent.tools.tool_catalog()
+
+    def get_email_status(self) -> Dict[str, Any]:
+        return self.manager.agent.get_email_status()
+
+    def list_email_threads(self, *, limit: int = 10, query: str = "", label_ids: list[str] | None = None) -> Dict[str, Any]:
+        return self.manager.agent.list_email_threads(limit=limit, query=query, label_ids=label_ids)
+
+    def read_email_thread(self, thread_id: str, *, max_messages: int = 8) -> Dict[str, Any]:
+        return self.manager.agent.read_email_thread(thread_id, max_messages=max_messages)
+
+    def list_email_drafts(self, *, status: str = "", limit: int = 24) -> Dict[str, Any]:
+        return self.manager.agent.list_email_drafts(status=status, limit=limit)
+
+    def prepare_email_reply_draft(self, *, thread_id: str, guidance: str = "", user_context: str = "") -> Dict[str, Any]:
+        return self.manager.agent.prepare_email_reply_draft(thread_id=thread_id, guidance=guidance, user_context=user_context)
+
+    def prepare_email_forward_draft(self, *, thread_id: str, to: list[str] | None = None, note: str = "") -> Dict[str, Any]:
+        return self.manager.agent.prepare_email_forward_draft(thread_id=thread_id, to=to, note=note)
+
+    def send_email_draft(self, draft_id: str, *, approved: bool = False) -> Dict[str, Any]:
+        return self.manager.agent.send_email_draft(draft_id, approved=approved)
+
+    def reject_email_draft(self, draft_id: str, *, reason: str = "Rejected by operator.") -> Dict[str, Any]:
+        return self.manager.agent.reject_email_draft(draft_id, reason=reason)
+
+    def connect_gmail(self) -> Dict[str, Any]:
+        return self.manager.agent.connect_gmail()
+
     def get_queue_state(self) -> Dict[str, Any]:
         return self.get_snapshot().get("queue", {})
 

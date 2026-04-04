@@ -590,11 +590,25 @@ class HostedLLMClient:
         self.api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        self.base_url = runtime["base_url"]
-        self.model = runtime["active_model"]
-        self.reasoning_effort = runtime["reasoning_effort"]
+        self._apply_runtime(runtime)
+
+    def _apply_runtime(self, runtime: dict[str, object]):
+        self.base_url = str(runtime.get("base_url", "")).strip()
+        self.model = str(runtime.get("active_model", "")).strip()
+        self.reasoning_effort = str(runtime.get("reasoning_effort", "")).strip()
         self.reasoning_effort_applies_to_tool_calls = False
-        self.settings_path = runtime["settings_path"]
+        self.settings_path = str(runtime.get("settings_path", "")).strip()
+        self.settings_sources = runtime.get("settings_sources", [self.settings_path])
+        self.source = runtime.get("source", "config/settings.yaml")
+        self.settings_version = str(runtime.get("settings_version", "")).strip()
+        self.settings_loaded_at = str(runtime.get("settings_loaded_at", "")).strip()
+        self.settings_reload_count = int(runtime.get("settings_reload_count", 0) or 0)
+
+    def reload_settings(self, settings: dict[str, object] | None = None) -> dict[str, object]:
+        safe_settings = settings if isinstance(settings, dict) else load_settings()
+        runtime = get_runtime_model_config(safe_settings)
+        self._apply_runtime(runtime)
+        return runtime
 
     def get_runtime_config(self) -> dict[str, object]:
         return {
@@ -604,10 +618,15 @@ class HostedLLMClient:
             "reasoning_effort_applies_to_tool_calls": self.reasoning_effort_applies_to_tool_calls,
             "base_url": self.base_url,
             "settings_path": self.settings_path,
-            "source": "config/settings.yaml",
+            "settings_sources": self.settings_sources,
+            "source": self.source,
+            "settings_version": self.settings_version,
+            "settings_loaded_at": self.settings_loaded_at,
+            "settings_reload_count": self.settings_reload_count,
         }
 
     def _call(self, messages, tools=None, *, timeout_seconds=None):
+        self.reload_settings()
         payload = {
             "model": self.model,
             "messages": messages,
@@ -667,6 +686,9 @@ class HostedLLMClient:
                     "Use apply_approved_edits only when the user has explicitly approved exact edits and the tool input already contains approval_status=approved plus concrete edit instructions. Never infer approval or auto-apply proposed edits. "
                     "Use the browser_* tools only for browser pages or web-app tasks; keep them separate from desktop control. "
                     "Use the desktop_* tools only for bounded native Windows desktop inspection or one-step interaction. "
+                    "Use the email_* tools for Gmail-only inbox work. Use email_connect_gmail once when the user explicitly wants Gmail access and the account is not connected yet. "
+                    "Use email_list_threads and email_read_thread for read-only inbox and thread inspection, email_prepare_reply_draft and email_prepare_forward_draft to prepare frozen local drafts without sending, and email_send_draft only after a draft already exists. "
+                    "email_send_draft is approval-gated: if you call it without approval_status=approved, it will intentionally pause so the operator can review the exact draft and approve or reject it. "
                     "For desktop work, inspect first: use desktop_list_windows or desktop_get_active_window for quick window state, desktop_inspect_window_state when the target may be minimized, hidden, loading, wrong-foreground, or visually unstable, and desktop_capture_screenshot for bounded screenshot evidence. "
                     "Use desktop_focus_window for normal bounded focus, desktop_recover_window when the target needs restore/show/refocus recovery, and desktop_wait_for_window_ready when the window exists but still looks loading, not ready, or visually unstable. "
                     "desktop_capture_screenshot only captures bounded state; it does not interpret pixels or do OCR. "
@@ -710,6 +732,7 @@ class HostedLLMClient:
                     "Read only the top one or two relevant files first, and avoid low-signal files like tests or cache/build output unless the goal points there. "
                     "Use browser_open_page, browser_inspect_page, browser_click, browser_type, browser_extract_text, and browser_follow_link for bounded browser-only work. "
                     "Use desktop_list_windows, desktop_get_active_window, desktop_inspect_window_state, desktop_focus_window, desktop_recover_window, desktop_wait_for_window_ready, and desktop_capture_screenshot for bounded desktop inspection and recovery, and use desktop_move_mouse, desktop_hover_point, desktop_click_mouse, desktop_click_point, desktop_scroll, desktop_press_key, desktop_press_key_sequence, desktop_type_text, desktop_start_process, desktop_stop_process, or desktop_run_command only after explicit approval when a single real bounded control action is required. "
+                    "Use email_connect_gmail for one-time Gmail setup, email_list_threads and email_read_thread for read-only email context, email_prepare_reply_draft and email_prepare_forward_draft for frozen draft creation, and email_send_draft for the final approval-gated send step. "
                     "Use list_files to inspect folders, search_files to find likely targets, compare_files to compare two candidate files, suggest_commands for non-executing PowerShell suggestions, plan_patch for non-executing change plans, draft_proposed_edits for non-executing reviewable edit drafts, build_review_bundle for approval-ready review packaging, apply_approved_edits for explicit approved file writes with backups, read_file only for relevant files, "
                     "and run_shell only for safe read-only inspection when execution is explicitly necessary. "
                     "Respect the Operator mode, Task phase, Waiting for, Next human action, and Action policy lines in the observation. "

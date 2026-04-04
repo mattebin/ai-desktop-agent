@@ -3,7 +3,8 @@
 import time
 from typing import Any, Dict
 
-from core.config import load_settings
+from core.config import get_settings_snapshot, load_settings
+from core.email_service import get_email_service
 from core.llm_client import HostedLLMClient
 from core.loop import run_task_loop
 from core.run_history import DEFAULT_RUN_HISTORY_PATH, RunHistoryStore
@@ -16,7 +17,10 @@ from tools.registry import get_tools
 class Agent:
     def __init__(self, settings: Dict[str, Any] | None = None):
         self.settings = dict(settings) if isinstance(settings, dict) else load_settings()
+        settings_snapshot = get_settings_snapshot()
+        self._settings_version = str(settings_snapshot.get("version", "")).strip()
         self.llm = HostedLLMClient(settings=self.settings)
+        self.email = get_email_service(self.settings)
         self.tools = ToolRuntime(get_tools())
         session_state_path = self.settings.get("session_state_path", DEFAULT_SESSION_STATE_PATH)
         self.session_store = SessionStore(session_state_path)
@@ -24,8 +28,74 @@ class Agent:
         max_runs = int(self.settings.get("max_run_history_entries", 25))
         self.history_store = RunHistoryStore(run_history_path, max_runs=max_runs)
 
+    def refresh_runtime_settings_if_needed(self, *, force: bool = False) -> bool:
+        settings_snapshot = get_settings_snapshot(force=force)
+        next_version = str(settings_snapshot.get("version", "")).strip()
+        if not force and next_version and next_version == self._settings_version:
+            return False
+
+        reloaded_settings = settings_snapshot.get("settings", {})
+        if isinstance(reloaded_settings, dict):
+            self.settings = dict(reloaded_settings)
+        self._settings_version = next_version
+        self.llm.reload_settings(self.settings)
+        self.email.reload_settings(self.settings)
+
+        max_runs = int(self.settings.get("max_run_history_entries", 25) or 25)
+        if getattr(self.history_store, "max_runs", max_runs) != max_runs:
+            self.history_store.max_runs = max_runs
+        return True
+
     def get_runtime_config(self) -> Dict[str, object]:
-        return self.llm.get_runtime_config()
+        self.refresh_runtime_settings_if_needed()
+        runtime = dict(self.llm.get_runtime_config())
+        runtime["settings_hot_reload"] = {
+            "enabled": True,
+            "scope": "config/settings.yaml + config/settings.local.yaml + config/secrets.yaml",
+            "notes": [
+                "Runtime settings are refreshed when config file timestamps change.",
+                "Model, base URL, and reasoning effort can update without restarting the local API.",
+            ],
+        }
+        runtime["tool_policy"] = self.tools.tool_policy_snapshot()
+        runtime["email"] = self.email.status_snapshot()
+        return runtime
+
+    def get_email_status(self) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.status_snapshot()
+
+    def list_email_threads(self, *, limit: int = 10, query: str = "", label_ids: list[str] | None = None) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.list_threads(limit=limit, query=query, label_ids=label_ids)
+
+    def read_email_thread(self, thread_id: str, *, max_messages: int = 8) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.read_thread(thread_id, max_messages=max_messages)
+
+    def list_email_drafts(self, *, status: str = "", limit: int = 24) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.list_drafts(status=status, limit=limit)
+
+    def prepare_email_reply_draft(self, *, thread_id: str, guidance: str = "", user_context: str = "") -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.prepare_reply_draft(thread_id=thread_id, guidance=guidance, user_context=user_context)
+
+    def prepare_email_forward_draft(self, *, thread_id: str, to: list[str] | None = None, note: str = "") -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.prepare_forward_draft(thread_id=thread_id, to=to, note=note)
+
+    def send_email_draft(self, draft_id: str, *, approved: bool = False) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.send_draft(draft_id, approved=approved)
+
+    def reject_email_draft(self, draft_id: str, *, reason: str = "Rejected by operator.") -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.reject_draft(draft_id, reason=reason)
+
+    def connect_gmail(self) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.email.connect_gmail()
 
     def _normalize_state_scope_id(self, state_scope_id: str | None = None) -> str:
         text = str(state_scope_id or "").strip()[:120]
@@ -125,6 +195,7 @@ class Agent:
         control_callback=None,
         progress_callback=None,
     ):
+        self.refresh_runtime_settings_if_needed()
         normalized_scope_id = self._normalize_state_scope_id(getattr(state, "state_scope_id", DEFAULT_STATE_SCOPE_ID))
         state.state_scope_id = normalized_scope_id
         step_start_index = len(state.steps) if history_start_index is None else max(0, int(history_start_index))

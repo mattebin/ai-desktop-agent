@@ -1,3 +1,16 @@
+---
+title: Window State Inspection
+command: window-state
+aliases:
+  - window-check
+description: Inspect the current and target desktop window state before acting.
+prompt: Use the repo-local skill in `skills/window_state_inspection.md` to inspect the current and target desktop window state before any action. Return a compact target summary, active window summary, normalized reason code, and whether the state is sufficient.
+tags:
+  - desktop
+  - windows
+  - inspection
+---
+
 # Window State Inspection
 
 ## Purpose

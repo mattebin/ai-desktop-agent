@@ -1752,6 +1752,18 @@ class TaskState:
             "uncertainties": [],
         }
 
+    def _latest_pending_email_draft(self) -> Dict[str, Any]:
+        for step in reversed(self.steps):
+            if step.get("tool") != "email_send_draft":
+                continue
+            if step.get("status") != "paused":
+                return {}
+            result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+            if not result.get("approval_required", False):
+                continue
+            return result
+        return {}
+
     def _collect_proposed_edits(self, limit: int = 3) -> Dict[str, Any]:
         for step in reversed(self.steps):
             if step.get("tool") != "draft_proposed_edits" or step.get("status") != "completed":
@@ -2556,6 +2568,48 @@ class TaskState:
             )
             return f"Prepared review bundle for {len(target_files)} file(s); approval status {approval_status}; start with {first_paths} [{confidence}]"
 
+        if tool_name == "email_list_threads":
+            if not result.get("ok", False):
+                error = str(result.get("error", "email thread listing failed")).strip()
+                return f"Gmail inbox listing failed: {error}"
+            items = result.get("items", [])
+            if not items:
+                return "Listed Gmail inbox threads; no matching threads were returned."
+            first = items[0] if isinstance(items[0], dict) else {}
+            subject = str(first.get("subject", "")).strip() or "latest inbox thread"
+            return f"Listed {len(items)} Gmail thread(s); latest thread: {subject}"
+
+        if tool_name == "email_read_thread":
+            if not result.get("ok", False):
+                error = str(result.get("error", "email thread read failed")).strip()
+                return f"Gmail thread read failed: {error}"
+            thread = result.get("thread", {}) if isinstance(result.get("thread", {}), dict) else {}
+            subject = str(thread.get("subject", "")).strip() or "email thread"
+            count = int(thread.get("message_count", len(thread.get("messages", [])) or 0) or 0)
+            return f"Read Gmail thread '{subject}' with {count} message(s)"
+
+        if tool_name in {"email_prepare_reply_draft", "email_prepare_forward_draft"}:
+            if not result.get("ok", False):
+                error = str(result.get("error", "email draft preparation failed")).strip()
+                return f"Gmail draft preparation failed: {error}"
+            summary = result.get("summary", {}) if isinstance(result.get("summary", {}), dict) else {}
+            if result.get("needs_context", False):
+                return f"Prepared no Gmail draft yet; more user context is needed for thread {self._display_path(result.get('thread', {}).get('thread_id', '')) or 'reply'}"
+            subject = str(summary.get("subject", "")).strip() or "prepared Gmail draft"
+            draft_id = str(summary.get("draft_id", "")).strip()
+            return f"Prepared Gmail draft '{subject}' ({draft_id}) for review"
+
+        if tool_name == "email_send_draft":
+            if result.get("paused", False):
+                subject = str(result.get("subject", "")).strip() or "prepared Gmail draft"
+                return f"Paused before sending Gmail draft '{subject}' pending approval"
+            if not result.get("ok", False):
+                error = str(result.get("error", "email send failed")).strip()
+                return f"Gmail send failed: {error}"
+            summary = result.get("draft", {}) if isinstance(result.get("draft", {}), dict) else {}
+            subject = str(summary.get("subject", "")).strip() or "approved Gmail draft"
+            return f"Sent Gmail draft '{subject}'"
+
         if tool_name == "draft_proposed_edits":
             if not result.get("ok", False):
                 error = str(result.get("error", "draft edit planning failed")).strip()
@@ -2637,6 +2691,7 @@ class TaskState:
         browser_activity = self._collect_browser_activity(limit=4)
         desktop_activity = self._collect_desktop_activity(limit=4)
         review_bundle = self._collect_review_bundle(limit=3)
+        email_draft = self._latest_pending_email_draft()
         applied_changes = self._collect_applied_changes(limit=2)
         recent_notes = self._normalize_values(self.memory_notes[-6:], limit=6, text_limit=240)
         recovery_notes = self._normalize_values(
@@ -2721,6 +2776,22 @@ class TaskState:
                 "evidence_assessment": desktop_activity.get("checkpoint_evidence_assessment", {}),
                 "scene_preview": desktop_activity.get("checkpoint_scene", {}),
                 "vision_preview": desktop_activity.get("checkpoint_vision", {}),
+                "target_files": [],
+            }
+        elif email_draft:
+            pending_approval = {
+                "kind": "email_draft",
+                "reason": str(email_draft.get("reason", "")).strip() or "Prepared Gmail draft is waiting for approval before sending.",
+                "step": "send Gmail draft",
+                "tool": "email_send_draft",
+                "target": str(email_draft.get("target", "")).strip(),
+                "summary": str(email_draft.get("subject", "")).strip() or str(email_draft.get("summary", "")).strip(),
+                "approval_status": str(email_draft.get("approval_status", "not approved")).strip() or "not approved",
+                "evidence_id": "",
+                "evidence_summary": "",
+                "evidence_preview": {},
+                "evidence_assessment": {},
+                "scene_preview": {},
                 "target_files": [],
             }
         elif (

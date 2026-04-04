@@ -174,6 +174,7 @@ Recent runtime stabilization work also added:
 - batched live operator/session frames on top of the existing event stream
 - stable execution-focus behavior in the desktop UI so active runs stop forcing chat/view churn during bounded execution
 - stale-while-refresh transcript resync so routine conversation refreshes stop clearing the visible chat pane during execution
+- stable transcript message identity and incremental merge preservation so unchanged replies stay mounted instead of being subtly rebound during execution
 - top-layer menu/modal rendering and evidence-artifact image preview resolution through the existing local API path
 - conservative proposal-aware desktop action pacing so the same unchanged target is not hammered repeatedly
 

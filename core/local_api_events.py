@@ -379,6 +379,51 @@ def _compact_desktop_outcome(outcome: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
+def _compact_runtime(runtime: Dict[str, Any] | None) -> Dict[str, Any]:
+    runtime = runtime if isinstance(runtime, dict) else {}
+    tool_policy = runtime.get("tool_policy", {}) if isinstance(runtime.get("tool_policy", {}), dict) else {}
+    settings_hot_reload = runtime.get("settings_hot_reload", {}) if isinstance(runtime.get("settings_hot_reload", {}), dict) else {}
+    return {
+        "active_model": _trim_text(runtime.get("active_model", ""), limit=80),
+        "reasoning_effort": _trim_text(runtime.get("reasoning_effort", ""), limit=40),
+        "settings_version": _trim_text(runtime.get("settings_version", ""), limit=40),
+        "settings_loaded_at": _trim_text(runtime.get("settings_loaded_at", ""), limit=40),
+        "settings_reload_count": int(runtime.get("settings_reload_count", 0) or 0),
+        "hot_reload_enabled": bool(settings_hot_reload.get("enabled", False)),
+        "tool_policy_summary": _trim_text(tool_policy.get("summary", ""), limit=220),
+    }
+
+
+def _compact_backend_service(value: Dict[str, Any] | None) -> Dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+    return {
+        "active": _trim_text(value.get("active", ""), limit=40),
+        "reason": _trim_text(value.get("reason", ""), limit=60),
+        "message": _trim_text(value.get("message", ""), limit=220),
+    }
+
+
+def _compact_infrastructure(infrastructure: Dict[str, Any] | None) -> Dict[str, Any]:
+    infrastructure = infrastructure if isinstance(infrastructure, dict) else {}
+    return {
+        "scheduler": _compact_backend_service(infrastructure.get("scheduler", {})),
+        "file_watch": _compact_backend_service(infrastructure.get("file_watch", {})),
+        "desktop_capture": _compact_backend_service(infrastructure.get("desktop_capture", {})),
+        "desktop_window": _compact_backend_service(
+            infrastructure.get("desktop", {}).get("window", {})
+            if isinstance(infrastructure.get("desktop", {}), dict)
+            else {}
+        ),
+        "email": {
+            "provider": _trim_text(infrastructure.get("email", {}).get("provider", "") if isinstance(infrastructure.get("email", {}), dict) else "", limit=40),
+            "enabled": bool(infrastructure.get("email", {}).get("enabled", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "configured": bool(infrastructure.get("email", {}).get("configured", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "authenticated": bool(infrastructure.get("email", {}).get("authenticated", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+            "watch_enabled": bool(infrastructure.get("email", {}).get("watch_enabled", False)) if isinstance(infrastructure.get("email", {}), dict) else False,
+        },
+    }
+
+
 def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     latest_run = snapshot.get("latest_run", {}) if isinstance(snapshot.get("latest_run", {}), dict) else {}
@@ -395,6 +440,8 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
         "pending_approval": _compact_pending(snapshot.get("pending_approval", {})),
         "browser": _compact_browser(snapshot.get("browser", {})),
         "desktop": _compact_desktop(snapshot.get("desktop", {})),
+        "runtime": _compact_runtime(snapshot.get("runtime", {})),
+        "infrastructure": _compact_infrastructure(snapshot.get("infrastructure", {})),
         "lifecycle": _compact_lifecycle(snapshot.get("lifecycle", {})),
         "latest_run": {
             "run_id": _trim_text(latest_run.get("run_id", ""), limit=60),
@@ -574,7 +621,10 @@ class LocalApiEventStream:
                 }
             ),
             "browser": _json_fingerprint(snapshot.get("browser", {})),
+            "desktop": _json_fingerprint(snapshot.get("desktop", {})),
             "pending": _json_fingerprint(snapshot.get("pending_approval", {})),
+            "runtime": _json_fingerprint(snapshot.get("runtime", {})),
+            "infrastructure": _json_fingerprint(snapshot.get("infrastructure", {})),
             "task": snapshot.get("active_task", {}),
             "message_ids": [item.get("message_id", "") for item in state.get("messages", []) if item.get("message_id")],
             "alert_ids": [item.get("alert_id", "") for item in state.get("alerts", []) if item.get("alert_id")],
@@ -779,6 +829,19 @@ class LocalApiEventStream:
             cursor["desktop"] = desktop_fp
             self._publish_locked(channel, "desktop.state", data={"desktop": snapshot.get("desktop", {})})
             changed_sections.append("desktop")
+
+        runtime_fp = _json_fingerprint(snapshot.get("runtime", {}))
+        if runtime_fp != cursor.get("runtime", ""):
+            cursor["runtime"] = runtime_fp
+            self._publish_locked(channel, "runtime.updated", data={"runtime": snapshot.get("runtime", {})})
+            changed_sections.append("runtime")
+            critical_frame = True
+
+        infrastructure_fp = _json_fingerprint(snapshot.get("infrastructure", {}))
+        if infrastructure_fp != cursor.get("infrastructure", ""):
+            cursor["infrastructure"] = infrastructure_fp
+            self._publish_locked(channel, "infrastructure.updated", data={"infrastructure": snapshot.get("infrastructure", {})})
+            changed_sections.append("infrastructure")
 
         current_alerts = effective_state.get("alerts", [])
         current_alert_ids = [item.get("alert_id", "") for item in current_alerts if item.get("alert_id")]

@@ -15,8 +15,14 @@ import {
   EvidenceArtifact,
   EvidenceSummary,
   ensureLocalApi,
+  ExtensionSummary,
+  executeSlashCommand,
+  getExtensionCatalog,
   getAlerts,
   getDesktopEvidenceArtifact,
+  getSkillCatalog,
+  getSlashCommands,
+  getToolCatalog,
   isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
   getQueueState,
@@ -36,13 +42,25 @@ import {
   SessionDetail,
   SessionMessage,
   SessionSummary,
+  SkillSummary,
   StatusPayload,
   StreamEvent,
+  ToolSummary,
   type PendingApproval,
   type QueuePayload,
   type ScheduledPayload,
   type WatchPayload,
 } from "./lib/api";
+import {
+  type LocalSlashCommand,
+  type SlashCommand,
+  type SlashCommandSuggestion,
+  SLASH_COMMANDS,
+  applySlashCommandSuggestion,
+  getSlashCommandSuggestions,
+  parseSlashCommandInput,
+} from "./lib/slashCommands";
+import { buildSlashCommandPlan } from "./lib/commandRouter";
 
 type ActivityTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -60,6 +78,8 @@ type ControlSnapshot = {
   watches: WatchPayload | null;
   recentRuns: RunEntry[];
   desktopEvidence: EvidenceSummary[];
+  tools: ToolSummary[];
+  extensions: ExtensionSummary[];
 };
 
 type ThemeMode = "light" | "dark";
@@ -111,6 +131,8 @@ const STREAM_EVENTS = [
   "approval.approved",
   "approval.rejected",
   "browser.workflow",
+  "runtime.updated",
+  "infrastructure.updated",
   "alert",
 ];
 
@@ -128,6 +150,22 @@ function plainTextPreview(value: string | undefined, limit = 180): string {
     .replace(/\s+/g, " ")
     .trim();
   return trimText(text, limit);
+}
+
+function formatToolCatalogDetail(tools: ToolSummary[] = []): string {
+  if (!tools.length) {
+    return "No tools are registered right now.";
+  }
+  return tools
+    .map((tool) => {
+      const name = String(tool.name || "tool").trim();
+      const policy = tool.policy || {};
+      const risk = String(policy.risk_level || "unknown").trim();
+      const approval = String(policy.approval_mode || "unknown").trim();
+      const summary = String(policy.summary || tool.description || "Registered tool").trim();
+      return `${name} [${risk}/${approval}] - ${summary}`;
+    })
+    .join("\n");
 }
 
 function getInitialDrafts(): Record<string, string> {
@@ -298,10 +336,8 @@ const markdownComponents: Components = {
 function normalizeMessages(messages: SessionMessage[]): SessionMessage[] {
   const seen = new Set<string>();
   const ordered: SessionMessage[] = [];
-  messages.forEach((message, index) => {
-    const key =
-      message.message_id ||
-      `${message.role || "assistant"}:${message.kind || "message"}:${message.created_at || index}:${message.content || ""}`;
+  messages.forEach((message) => {
+    const key = messageStableKey(message);
     if (seen.has(key)) {
       return;
     }
@@ -311,19 +347,110 @@ function normalizeMessages(messages: SessionMessage[]): SessionMessage[] {
   return ordered;
 }
 
+function replaceMessagesPreservingIdentity(current: SessionMessage[], nextMessages: SessionMessage[]): SessionMessage[] {
+  const normalized = normalizeMessages(nextMessages);
+  if (!current.length) {
+    logMessageMutation("replace", { reason: "initial", count: normalized.length });
+    return normalized;
+  }
+  const currentByKey = new Map(current.map((message) => [messageStableKey(message), message] as const));
+  const next = normalized.map((message) => {
+    const existing = currentByKey.get(messageStableKey(message));
+    return existing && messagesEquivalent(existing, message) ? existing : message;
+  });
+  if (current.length === next.length && current.every((message, index) => message === next[index])) {
+    return current;
+  }
+  const reused = next.filter((message) => currentByKey.get(messageStableKey(message)) === message).length;
+  logMessageMutation("replace", {
+    reason: "authoritative_sync",
+    currentCount: current.length,
+    nextCount: next.length,
+    reused,
+  });
+  return next;
+}
+
 function mergeMessages(current: SessionMessage[], incoming: SessionMessage[]): SessionMessage[] {
-  if (!incoming.length) {
-    return normalizeMessages(current);
+  const normalizedIncoming = normalizeMessages(incoming);
+  if (!normalizedIncoming.length) {
+    return current;
   }
   if (!current.length) {
-    return normalizeMessages(incoming);
+    logMessageMutation("merge", { reason: "seed", count: normalizedIncoming.length });
+    return normalizedIncoming;
   }
-  return normalizeMessages([...incoming, ...current]);
+  const indexByKey = new Map(current.map((message, index) => [messageStableKey(message), index] as const));
+  const next = current.slice();
+  let added = 0;
+  let updated = 0;
+  for (const message of normalizedIncoming) {
+    const key = messageStableKey(message);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, next.length);
+      next.push(message);
+      added += 1;
+      continue;
+    }
+    const existing = next[existingIndex];
+    if (!messagesEquivalent(existing, message)) {
+      next[existingIndex] = message;
+      updated += 1;
+    }
+  }
+  if (!added && !updated) {
+    return current;
+  }
+  logMessageMutation("merge", {
+    reason: "incremental_frame",
+    currentCount: current.length,
+    nextCount: next.length,
+    added,
+    updated,
+  });
+  return next;
+}
+
+function reconcileSessionList(current: SessionSummary[], nextSessions: SessionSummary[]): SessionSummary[] {
+  if (!current.length) {
+    return nextSessions;
+  }
+  const currentById = new Map(current.map((session) => [session.session_id, session] as const));
+  let changed = current.length !== nextSessions.length;
+  const next = nextSessions.map((session) => {
+    const existing = currentById.get(session.session_id);
+    if (!existing) {
+      changed = true;
+      return session;
+    }
+    const merged = { ...existing, ...session };
+    if (fingerprintValue(existing) === fingerprintValue(merged)) {
+      return existing;
+    }
+    changed = true;
+    return merged;
+  });
+  if (!changed && current.every((session, index) => session === next[index])) {
+    return current;
+  }
+  return next;
 }
 
 function upsertSession(sessions: SessionSummary[], session: SessionSummary): SessionSummary[] {
-  const next = sessions.filter((item) => item.session_id !== session.session_id);
-  next.push(session);
+  const index = sessions.findIndex((item) => item.session_id === session.session_id);
+  if (index < 0) {
+    const next = [...sessions, session];
+    next.sort((left, right) => (right.updated_at || "").localeCompare(left.updated_at || ""));
+    return next;
+  }
+  const existing = sessions[index];
+  const merged = { ...existing, ...session };
+  if (fingerprintValue(existing) === fingerprintValue(merged)) {
+    return sessions;
+  }
+  const next = sessions.slice();
+  next[index] = merged;
   next.sort((left, right) => (right.updated_at || "").localeCompare(left.updated_at || ""));
   return next;
 }
@@ -342,12 +469,30 @@ function shouldRefreshControlDataFromFrame(frame?: StreamFramePayload | null): b
   if (!changed.size) {
     return Boolean(frame.alerts?.length);
   }
+  if (changed.has("runtime") || changed.has("infrastructure")) {
+    return true;
+  }
   for (const key of ["task", "task_progress", "pending_approval", "desktop", "alerts"]) {
     if (changed.has(key)) {
       return true;
     }
   }
   return false;
+}
+
+function isCriticalSnapshotUpdate(snapshot?: StatusPayload | null): boolean {
+  if (!snapshot) {
+    return false;
+  }
+  const phase = String(snapshot.run_phase || "").trim().toLowerCase();
+  const status = String(snapshot.status || "").trim().toLowerCase();
+  if (phase === "awaiting_approval" || phase === "post_execution") {
+    return true;
+  }
+  if (["paused", "completed", "blocked", "failed", "incomplete"].includes(status)) {
+    return true;
+  }
+  return Boolean(snapshot.pending_approval?.kind);
 }
 
 function formatTime(value?: string): string {
@@ -1031,6 +1176,29 @@ function timelineFromEvent(event: StreamEvent<Record<string, unknown>>): Activit
         tone: "info",
         timestamp: now,
       };
+    case "runtime.updated":
+      return {
+        id: event.event_id || `${event.event}:${now}`,
+        label: "Runtime updated",
+        detail: plainTextPreview(
+          String(
+            (data.runtime as { active_model?: string; settings_version?: string } | undefined)?.active_model ||
+              (data.runtime as { settings_version?: string } | undefined)?.settings_version ||
+              "Runtime configuration changed.",
+          ),
+          220,
+        ),
+        tone: "info",
+        timestamp: now,
+      };
+    case "infrastructure.updated":
+      return {
+        id: event.event_id || `${event.event}:${now}`,
+        label: "Infrastructure updated",
+        detail: plainTextPreview("Backend infrastructure state changed.", 220),
+        tone: "info",
+        timestamp: now,
+      };
     case "alert":
       return {
         id: event.event_id || `${event.event}:${now}`,
@@ -1083,6 +1251,14 @@ function MessageContent({ message }: { message: SessionMessage }) {
 }
 
 function MessageBubble({ message }: { message: SessionMessage }) {
+  if (isRenderDebugEnabled()) {
+    console.debug("[ai-operator][message-render]", {
+      key: messageStableKey(message),
+      kind: message.kind || "message",
+      status: message.status || "",
+      messageId: message.message_id || "",
+    });
+  }
   const displayKind = messageDisplayKind(message);
   const normalizedKind = (message.kind || "").toLowerCase();
   const badge =
@@ -1136,6 +1312,7 @@ type PendingStreamFrame = {
   messages: SessionMessage[];
   activity: ActivityEntry[];
   shouldRefreshControls: boolean;
+  critical: boolean;
 };
 
 function fingerprintValue(value: unknown): string {
@@ -1144,6 +1321,53 @@ function fingerprintValue(value: unknown): string {
   } catch (_error) {
     return "";
   }
+}
+
+function isRenderDebugEnabled(): boolean {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem("ai-operator:debug-renders") === "1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function messageStableKey(message: SessionMessage): string {
+  const messageId = String(message.message_id || "").trim();
+  if (messageId) {
+    return `id:${messageId}`;
+  }
+  const role = String(message.role || "assistant").trim();
+  const kind = String(message.kind || "message").trim();
+  const createdAt = String(message.created_at || "").trim();
+  const taskId = String(message.task_id || "").trim();
+  const runId = String(message.run_id || "").trim();
+  if (createdAt || taskId || runId) {
+    return `meta:${role}:${kind}:${createdAt}:${taskId}:${runId}`;
+  }
+  return `body:${role}:${kind}:${String(message.content || "").trim()}`;
+}
+
+function messagesEquivalent(left: SessionMessage, right: SessionMessage): boolean {
+  return (
+    left.message_id === right.message_id &&
+    left.created_at === right.created_at &&
+    left.role === right.role &&
+    left.kind === right.kind &&
+    left.content === right.content &&
+    left.task_id === right.task_id &&
+    left.run_id === right.run_id &&
+    left.status === right.status
+  );
+}
+
+function logMessageMutation(mode: "replace" | "merge", detail: Record<string, unknown>) {
+  if (!isRenderDebugEnabled()) {
+    return;
+  }
+  console.debug(`[ai-operator][messages:${mode}]`, detail);
 }
 
 function mergeSessionDetail(current: SessionDetail | null, session: SessionSummary | SessionDetail): SessionDetail | null {
@@ -1156,7 +1380,57 @@ function mergeSessionDetail(current: SessionDetail | null, session: SessionSumma
   if (current.session_id !== session.session_id) {
     return current;
   }
-  return { ...current, ...session };
+  const merged = { ...current, ...session };
+  return fingerprintValue(merged) === fingerprintValue(current) ? current : merged;
+}
+
+function mergeStatusPayload(current: StatusPayload | null, update: StatusPayload | null | undefined): StatusPayload | null {
+  if (!update) {
+    return current;
+  }
+  if (!current) {
+    return update;
+  }
+  const merged: StatusPayload = {
+    ...current,
+    ...update,
+    runtime: update.runtime ? { ...(current.runtime || {}), ...update.runtime } : current.runtime,
+    infrastructure: update.infrastructure
+      ? { ...(current.infrastructure || {}), ...update.infrastructure }
+      : current.infrastructure,
+  };
+  return fingerprintValue(merged) === fingerprintValue(current) ? current : merged;
+}
+
+function backendServiceStatus(service: unknown): string {
+  const value = (service || {}) as { active?: string; reason?: string; message?: string };
+  return String(value.active || value.reason || value.message || "unknown").trim() || "unknown";
+}
+
+function backendServiceTone(service: unknown): ActivityTone {
+  const value = (service || {}) as { available?: boolean; active?: string; reason?: string };
+  const active = String(value.active || "").trim().toLowerCase();
+  const reason = String(value.reason || "").trim().toLowerCase();
+  if (value.available === false || active === "unavailable" || active === "disabled") {
+    return "warning";
+  }
+  if (reason.includes("error") || reason.includes("failed")) {
+    return "error";
+  }
+  return "info";
+}
+
+function backendServiceDetail(service: unknown): string {
+  const value = (service || {}) as { message?: string; reason?: string };
+  return plainTextPreview(String(value.message || value.reason || "Backend service state is available."), 140);
+}
+
+function extensionCommandPreview(extension: ExtensionSummary): string {
+  return (extension.commands || [])
+    .map((command) => `/${String(command.name || "").trim()}`)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(", ");
 }
 
 function SkeletonTranscript() {
@@ -1196,11 +1470,17 @@ export default function App() {
     watches: null,
     recentRuns: [],
     desktopEvidence: [],
+    tools: [],
+    extensions: [],
   });
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(SLASH_COMMANDS);
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
+  const [availableExtensions, setAvailableExtensions] = useState<ExtensionSummary[]>([]);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState>({
     open: false,
@@ -1220,6 +1500,10 @@ export default function App() {
   const deferredQuery = useDeferredValue(query);
   const draftKey = getDraftKey(selectedSessionId);
   const draft = draftsBySession[draftKey] || "";
+  const parsedSlashCommand = parseSlashCommandInput(draft);
+  const commandSuggestions = getSlashCommandSuggestions(draft, slashCommands);
+  const activeCommandSuggestion =
+    commandSuggestions[Math.min(selectedCommandIndex, Math.max(commandSuggestions.length - 1, 0))] || null;
   const selectedSessionRef = useRef("");
   const detailsOpenRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
@@ -1240,6 +1524,7 @@ export default function App() {
     messages: [],
     activity: [],
     shouldRefreshControls: false,
+    critical: false,
   });
   const streamFlushTimerRef = useRef<number | null>(null);
 
@@ -1307,6 +1592,10 @@ export default function App() {
   }, [draft, selectedSessionId]);
 
   useEffect(() => {
+    setSelectedCommandIndex(0);
+  }, [draft]);
+
+  useEffect(() => {
     return () => {
       if (refreshTimerRef.current) {
         window.clearTimeout(refreshTimerRef.current);
@@ -1332,6 +1621,25 @@ export default function App() {
 
   function clearDraft(sessionId = selectedSessionRef.current) {
     updateDraft("", sessionId);
+  }
+
+  function addLocalActivity(label: string, detail: string, tone: ActivityTone = "info") {
+    const entry: ActivityEntry = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      label,
+      detail,
+      tone,
+      timestamp: new Date().toISOString(),
+    };
+    setActivity((current) => [entry, ...current].slice(0, 30));
+  }
+
+  function applyCommandSuggestion(suggestion: SlashCommandSuggestion | null) {
+    if (!suggestion) {
+      return;
+    }
+    updateDraft(applySlashCommandSuggestion(draft, suggestion.command), selectedSessionId);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   function scrollTranscriptToLatest(behavior: ScrollBehavior = "smooth") {
@@ -1360,7 +1668,7 @@ export default function App() {
     }
     const payload = await listSessions(apiBaseUrl, 32);
     const nextSessions = payload.sessions || payload.items || [];
-    setSessions(nextSessions);
+    setSessions((current) => reconcileSessionList(current, nextSessions));
     const lockedSessionId =
       !preferredSessionId && runFocusLockedRef.current
         ? runFocusSessionRef.current || selectedSessionRef.current
@@ -1415,10 +1723,12 @@ export default function App() {
       }
       const fetchedMessages = normalizeMessages(messagesPayload.messages || messagesPayload.items || detailPayload.session.messages || []);
       setSessionDetail((current) =>
-        current?.session_id === sessionId && preserveVisibleState ? { ...current, ...detailPayload.session } : detailPayload.session,
+        current?.session_id === sessionId && preserveVisibleState ? mergeSessionDetail(current, detailPayload.session) : detailPayload.session,
       );
       setMessages((current) =>
-        preserveVisibleState && selectedSessionRef.current === sessionId ? mergeMessages(current, fetchedMessages) : fetchedMessages,
+        preserveVisibleState && selectedSessionRef.current === sessionId
+          ? replaceMessagesPreservingIdentity(current, fetchedMessages)
+          : replaceMessagesPreservingIdentity([], fetchedMessages),
       );
       setStatus(statusPayload);
       setAlerts(alertsPayload.items || []);
@@ -1434,20 +1744,45 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
-    const [queue, scheduled, watches, runs, desktopEvidence] = await Promise.all([
+    const [queue, scheduled, watches, runs, desktopEvidence, toolCatalog, extensionCatalog] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
       getRecentRuns(apiBaseUrl, sessionId, 10),
       getDesktopEvidence(apiBaseUrl, 6),
+      getToolCatalog(apiBaseUrl),
+      getExtensionCatalog(apiBaseUrl),
     ]);
+    setAvailableExtensions(extensionCatalog.items || []);
     setControlData({
       queue,
       scheduled,
       watches,
       recentRuns: runs.items || [],
       desktopEvidence: desktopEvidence.recent_summaries || [],
+      tools: toolCatalog.items || [],
+      extensions: extensionCatalog.items || [],
     });
+  }
+
+  async function refreshCommandCatalog(baseUrl = apiBaseUrl) {
+    if (!baseUrl) {
+      return;
+    }
+    try {
+      const [commandCatalog, skillCatalog, extensionCatalog] = await Promise.all([
+        getSlashCommands(baseUrl),
+        getSkillCatalog(baseUrl),
+        getExtensionCatalog(baseUrl),
+      ]);
+      setSlashCommands(commandCatalog.items?.length ? commandCatalog.items : SLASH_COMMANDS);
+      setAvailableSkills(skillCatalog.items || []);
+      setAvailableExtensions(extensionCatalog.items || []);
+    } catch (_error) {
+      setSlashCommands(SLASH_COMMANDS);
+      setAvailableSkills([]);
+      setAvailableExtensions([]);
+    }
   }
 
   function flushPendingStreamFrame() {
@@ -1457,6 +1792,7 @@ export default function App() {
       messages: [],
       activity: [],
       shouldRefreshControls: false,
+      critical: false,
     };
 
     if (pending.activity.length) {
@@ -1477,7 +1813,7 @@ export default function App() {
       const snapshotFingerprint = fingerprintValue(pending.snapshot);
       if (snapshotFingerprint !== lastStatusFingerprintRef.current) {
         lastStatusFingerprintRef.current = snapshotFingerprint;
-        setStatus(pending.snapshot);
+        setStatus((current) => mergeStatusPayload(current, pending.snapshot));
       }
     }
     if (pending.alerts) {
@@ -1508,12 +1844,20 @@ export default function App() {
     if (update.shouldRefreshControls) {
       pending.shouldRefreshControls = true;
     }
+    if (update.critical) {
+      pending.critical = true;
+    }
+    const delayMs = pending.critical ? 18 : 42;
     if (streamFlushTimerRef.current) {
-      return;
+      if (!pending.critical) {
+        return;
+      }
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
     }
     streamFlushTimerRef.current = window.setTimeout(() => {
       startTransition(() => flushPendingStreamFrame());
-    }, 70);
+    }, delayMs);
   }
 
   function scheduleConversationRefresh(
@@ -1594,6 +1938,10 @@ export default function App() {
           }
           setStatus(operatorStatus);
           setAlerts(operatorAlerts.items || []);
+        }
+        await refreshCommandCatalog(apiBaseUrl);
+        if (!alive) {
+          return;
         }
         setBootState("ready");
       } catch (error) {
@@ -1691,6 +2039,7 @@ export default function App() {
             queueStreamFrame({
               messages: [nextMessage],
               activity: activityUpdate,
+              critical: true,
             });
             return;
           }
@@ -1709,6 +2058,7 @@ export default function App() {
             alerts: syncData.alerts,
             activity: activityUpdate,
             shouldRefreshControls: shouldRefreshControlDataFromFrame(syncData),
+            critical: Boolean(syncData.critical) || isCriticalSnapshotUpdate(syncData.snapshot),
           });
           return;
         }
@@ -1719,9 +2069,30 @@ export default function App() {
             queueStreamFrame({
               session,
               activity: activityUpdate,
+              critical: session.session_id === selectedSessionRef.current,
             });
             return;
           }
+        }
+
+        if (payload.event === "runtime.updated") {
+          queueStreamFrame({
+            snapshot: { runtime: (payload.data.runtime || {}) as StatusPayload["runtime"] },
+            activity: activityUpdate,
+            shouldRefreshControls: true,
+            critical: true,
+          });
+          return;
+        }
+
+        if (payload.event === "infrastructure.updated") {
+          queueStreamFrame({
+            snapshot: { infrastructure: (payload.data.infrastructure || {}) as StatusPayload["infrastructure"] },
+            activity: activityUpdate,
+            shouldRefreshControls: true,
+            critical: true,
+          });
+          return;
         }
 
         if (payload.event === "alert") {
@@ -1730,7 +2101,7 @@ export default function App() {
             setAlerts((current) => [alert, ...current.filter((item) => item.alert_id !== alert.alert_id)].slice(0, 8));
           }
           if (activityUpdate.length) {
-            queueStreamFrame({ activity: activityUpdate });
+            queueStreamFrame({ activity: activityUpdate, critical: true });
           }
           return;
         }
@@ -1784,6 +2155,20 @@ export default function App() {
   const checkpointDesktopEvidence = status?.desktop?.checkpoint_evidence || null;
   const selectedTargetProposalContext = status?.desktop?.selected_target_proposals || null;
   const checkpointTargetProposalContext = status?.desktop?.checkpoint_target_proposals || null;
+  const runtimePolicy = status?.runtime?.tool_policy || null;
+  const infrastructure = (status?.infrastructure || {}) as Record<string, unknown>;
+  const infrastructureServices = [
+    { key: "scheduler", label: "Scheduler", service: infrastructure.scheduler },
+    { key: "file_watch", label: "File watch", service: infrastructure.file_watch },
+    { key: "desktop_capture", label: "Desktop capture", service: infrastructure.desktop_capture },
+    { key: "desktop", label: "Desktop backends", service: infrastructure.desktop },
+  ].filter((item) => item.service);
+  const highlightedTools = [...controlData.tools].sort((left, right) => {
+    const order = ["high", "medium", "low", "unknown"];
+    const leftRisk = String(left.policy?.risk_level || "unknown").toLowerCase();
+    const rightRisk = String(right.policy?.risk_level || "unknown").toLowerCase();
+    return order.indexOf(leftRisk) - order.indexOf(rightRisk);
+  });
   const pendingApprovalEvidence = pendingApproval?.evidence_preview || checkpointDesktopEvidence || null;
   const distinctCheckpointEvidence =
     checkpointDesktopEvidence?.evidence_id && checkpointDesktopEvidence.evidence_id === selectedDesktopEvidence?.evidence_id
@@ -1798,15 +2183,25 @@ export default function App() {
   const title = sessionDetail?.title || "New conversation";
   const showConversationSkeleton = loadingConversation && !messages.length;
   const emptyState = !messages.length && !loadingConversation;
+  const slashCommandHint = activeCommandSuggestion
+    ? `/${activeCommandSuggestion.command.name}${
+        activeCommandSuggestion.command.argumentHint ? ` ${activeCommandSuggestion.command.argumentHint}` : ""
+      } - ${activeCommandSuggestion.command.description}`
+    : "Use slash commands for quick operator actions and canned prompts.";
+  const commandMenuVisible = Boolean(parsedSlashCommand);
   const composerHint =
     sending
       ? "Sending your message to the operator..."
+      : parsedSlashCommand
+        ? `Tab to autocomplete. Enter to run. ${slashCommandHint}`
       : pendingApproval?.kind
         ? "Approval is waiting on the right rail. You can still add context here."
         : "Enter to send. Shift+Enter for a newline.";
   const composerPlaceholder =
     bootState !== "ready"
       ? "Connecting to the operator..."
+      : parsedSlashCommand
+        ? "Run a slash command like /new, /refresh, or /architecture..."
       : pendingApproval?.kind
         ? "Add context or resolve the approval..."
         : "Message the operator...";
@@ -1825,7 +2220,7 @@ export default function App() {
       }
       setSessions((current) => upsertSession(current, nextSession));
       setSessionDetail(nextSession);
-      setMessages(normalizeMessages(nextSession.messages || []));
+      setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
       startTransition(() => setSelectedSessionId(nextSession.session_id));
       clearDraft(nextSession.session_id);
       setActivity([]);
@@ -1836,8 +2231,8 @@ export default function App() {
     }
   }
 
-  async function handleSendMessage() {
-    const content = draft.trim();
+  async function sendMessageContent(rawContent: string) {
+    const content = rawContent.trim();
     if (!content || !apiBaseUrl || sending) {
       return;
     }
@@ -1858,9 +2253,12 @@ export default function App() {
         result = await sendSessionMessage(apiBaseUrl, nextSessionId, content);
       }
       if (result?.session) {
-        setSessionDetail(result.session);
-        setMessages(normalizeMessages(result.session.messages || []));
-        setSessions((current) => upsertSession(current, result.session as SessionSummary));
+        const nextSession = result.session;
+        setSessionDetail((current) =>
+          current?.session_id === nextSession.session_id ? mergeSessionDetail(current, nextSession as SessionDetail) : nextSession,
+        );
+        setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
+        setSessions((current) => upsertSession(current, nextSession as SessionSummary));
       }
       if (nextSessionId && nextSessionId !== selectedSessionId) {
         startTransition(() => setSelectedSessionId(nextSessionId));
@@ -1879,6 +2277,208 @@ export default function App() {
     }
   }
 
+  async function executeLocalSlashCommand(command: LocalSlashCommand, args: string) {
+    const normalizedArgs = args.trim().toLowerCase();
+
+    if (command.action === "new-chat") {
+      await handleNewChat();
+      addLocalActivity("Command executed", "Started a new conversation.", "success");
+      return;
+    }
+
+    if (command.action === "refresh") {
+      await handleRefresh();
+      addLocalActivity("Command executed", "Refreshed the operator view.", "success");
+      return;
+    }
+
+    if (command.action === "toggle-details") {
+      let nextState = !detailsOpenRef.current;
+      if (normalizedArgs === "show") {
+        nextState = true;
+      } else if (normalizedArgs === "hide") {
+        nextState = false;
+      }
+      setDetailsOpen(nextState);
+      addLocalActivity(
+        "Command executed",
+        nextState ? "Opened the operator details rail." : "Collapsed the operator details rail.",
+        "success",
+      );
+      return;
+    }
+
+    if (command.action === "toggle-theme") {
+      let nextTheme: ThemeMode = themeMode === "light" ? "dark" : "light";
+      if (normalizedArgs === "light" || normalizedArgs === "dark") {
+        nextTheme = normalizedArgs;
+      }
+      setThemeMode(nextTheme);
+      addLocalActivity("Command executed", `Switched the UI theme to ${nextTheme}.`, "success");
+      return;
+    }
+
+    if (command.action === "show-tools") {
+      if (!apiBaseUrl) {
+        addLocalActivity("Command unavailable", "The tool catalog needs the local API to be connected.", "warning");
+        return;
+      }
+      const toolCatalog = await getToolCatalog(apiBaseUrl);
+      addLocalActivity("Registered tools", formatToolCatalogDetail(toolCatalog.items || []), "info");
+      return;
+    }
+
+    if (command.action === "show-extensions") {
+      const detail = availableExtensions.length
+        ? availableExtensions
+            .map((extension) => {
+              const title = String(extension.title || extension.slug || "extension").trim();
+              const description = String(extension.description || "Local extension manifest.").trim();
+              const commands = extensionCommandPreview(extension);
+              return commands ? `${title} - ${description}\nCommands: ${commands}` : `${title} - ${description}`;
+            })
+            .join("\n")
+        : "No local extension manifests are loaded right now.";
+      addLocalActivity("Local extensions", detail, "info");
+      return;
+    }
+
+    if (command.action === "approve") {
+      await handleApproval("approve");
+      addLocalActivity("Command executed", "Approved the pending step.", "success");
+      return;
+    }
+    if (command.action === "reject") {
+      await handleApproval("reject");
+      addLocalActivity("Command executed", "Rejected the pending step.", "warning");
+      return;
+    }
+
+    addLocalActivity("Command unavailable", `/${command.name} is not executable from the local UI router.`, "warning");
+  }
+
+  async function handleClientCommandAction(action: string, args: string) {
+    const command = slashCommands.find(
+      (item) => item.type === "local" && String(item.action || "").trim() === String(action || "").trim(),
+    ) as LocalSlashCommand | undefined;
+    if (!command) {
+      addLocalActivity("Command unavailable", `The client action ${action || "unknown"} is not registered in the UI.`, "warning");
+      return;
+    }
+    await executeLocalSlashCommand(command, args);
+  }
+
+  async function tryHandleBackendSlashCommand() {
+    if (!parsedSlashCommand || !apiBaseUrl) {
+      return false;
+    }
+
+    try {
+      const payload = await executeSlashCommand(apiBaseUrl, draft, selectedSessionId);
+      const execution = payload.execution || {};
+      const kind = String(execution.kind || "").trim();
+      if (!kind || kind === "none") {
+        return false;
+      }
+
+      if (execution.clear_draft) {
+        clearDraft(selectedSessionId);
+      }
+
+      if (kind === "activity") {
+        addLocalActivity(
+          String(execution.title || "Slash command").trim() || "Slash command",
+          String(execution.detail || "").trim() || "Command completed.",
+          (String(execution.tone || "info").trim() as ActivityTone) || "info",
+        );
+        return true;
+      }
+
+      if (kind === "prompt") {
+        const promptText = String(execution.prompt_text || "").trim();
+        if (!promptText) {
+          return false;
+        }
+        await sendMessageContent(promptText);
+        addLocalActivity(
+          "Command executed",
+          String(execution.success_message || "Sent the prompt command.").trim(),
+          "success",
+        );
+        return true;
+      }
+
+      if (kind === "client_action") {
+        await handleClientCommandAction(String(execution.action || "").trim(), String(execution.args || "").trim());
+        return true;
+      }
+
+      if (kind === "operator_action") {
+        if (execution.status) {
+          setStatus(execution.status);
+        }
+        if (execution.session?.session_id) {
+          setSessions((current) => upsertSession(current, execution.session as SessionSummary));
+        }
+        addLocalActivity(
+          String(execution.title || "Command executed").trim() || "Command executed",
+          String(execution.detail || "The operator handled the requested action.").trim(),
+          (String(execution.tone || "info").trim() as ActivityTone) || "info",
+        );
+        scheduleConversationRefresh(selectedSessionId, { includeConversation: true, includeControls: detailsOpenRef.current });
+        return true;
+      }
+    } catch (_error) {
+      return false;
+    }
+    return false;
+  }
+
+  async function tryHandleSlashCommand() {
+    if (await tryHandleBackendSlashCommand()) {
+      return true;
+    }
+
+    const plan = buildSlashCommandPlan({
+      input: draft,
+      commands: slashCommands,
+      activeSuggestion: activeCommandSuggestion?.command || null,
+      skills: availableSkills,
+      extensions: availableExtensions,
+      runtime: status?.runtime || null,
+      pendingApprovalKind: pendingApproval?.kind || "",
+    });
+
+    if (plan.kind === "none") {
+      return false;
+    }
+
+    if (plan.clearDraft) {
+      clearDraft(selectedSessionId);
+    }
+
+    if (plan.kind === "activity") {
+      addLocalActivity(plan.title, plan.detail, plan.tone);
+      return true;
+    }
+
+    if (plan.kind === "prompt") {
+      await sendMessageContent(plan.promptText);
+      addLocalActivity("Command executed", plan.successMessage, "success");
+      return true;
+    }
+
+    await executeLocalSlashCommand(plan.command, plan.args);
+    return true;
+  }
+
+  async function handleSendMessage() {
+    if (await tryHandleSlashCommand()) {
+      return;
+    }
+    await sendMessageContent(draft);
+  }
+
   async function handleApproval(action: "approve" | "reject") {
     if (!apiBaseUrl || !pendingApproval?.kind) {
       return;
@@ -1887,9 +2487,12 @@ export default function App() {
     try {
       const result = action === "approve" ? await approvePending(apiBaseUrl, selectedSessionId) : await rejectPending(apiBaseUrl, selectedSessionId);
       if (result.session) {
-        setSessionDetail(result.session);
-        setMessages(normalizeMessages(result.session.messages || []));
-        setSessions((current) => upsertSession(current, result.session as SessionSummary));
+        const nextSession = result.session;
+        setSessionDetail((current) =>
+          current?.session_id === nextSession.session_id ? mergeSessionDetail(current, nextSession as SessionDetail) : nextSession,
+        );
+        setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
+        setSessions((current) => upsertSession(current, nextSession as SessionSummary));
       }
       if (result.status) {
         setStatus(result.status);
@@ -1965,6 +2568,7 @@ export default function App() {
       return;
     }
     const resolved = await refreshSidebar(selectedSessionId);
+    await refreshCommandCatalog();
     if (resolved) {
       await loadConversation(resolved, { preserveVisibleState: true });
     }
@@ -2137,9 +2741,9 @@ export default function App() {
             </div>
           ) : (
             <div className="transcript" onScroll={handleTranscriptScroll} ref={transcriptRef}>
-              {messages.map((message, index) => (
+              {messages.map((message) => (
                 <MemoMessageBubble
-                  key={message.message_id || `${message.created_at || index}:${message.role || "assistant"}:${message.kind || "message"}`}
+                  key={messageStableKey(message)}
                   message={message}
                 />
               ))}
@@ -2160,6 +2764,21 @@ export default function App() {
             onChange={(event) => updateDraft(event.target.value, selectedSessionId)}
             placeholder={composerPlaceholder}
             onKeyDown={(event) => {
+              if (commandMenuVisible && commandSuggestions.length && event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => (current + 1) % commandSuggestions.length);
+                return;
+              }
+              if (commandMenuVisible && commandSuggestions.length && event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => (current - 1 + commandSuggestions.length) % commandSuggestions.length);
+                return;
+              }
+              if (commandMenuVisible && activeCommandSuggestion && event.key === "Tab") {
+                event.preventDefault();
+                applyCommandSuggestion(activeCommandSuggestion);
+                return;
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 void handleSendMessage();
@@ -2167,6 +2786,55 @@ export default function App() {
             }}
             rows={1}
           />
+          {commandMenuVisible ? (
+            <div aria-label="Slash commands" className="composer-command-menu" role="listbox">
+              {commandSuggestions.length ? (
+                commandSuggestions.map((suggestion, index) => (
+                  <button
+                    key={`${suggestion.command.name}:${suggestion.command.type}`}
+                    aria-selected={index === selectedCommandIndex}
+                    className={clsx("composer-command-item", index === selectedCommandIndex && "is-selected")}
+                    onClick={() => applyCommandSuggestion(suggestion)}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setSelectedCommandIndex(index)}
+                    type="button"
+                  >
+                    <span className="composer-command-meta">
+                      <span className="composer-command-name">
+                        /{suggestion.command.name}
+                        {suggestion.command.argumentHint ? ` ${suggestion.command.argumentHint}` : ""}
+                      </span>
+                      <span
+                        className={clsx(
+                          "composer-command-kind",
+                          suggestion.command.source === "repo_skill"
+                            ? "is-skill"
+                            : suggestion.command.source === "local_extension"
+                              ? "is-prompt"
+                              : `is-${suggestion.command.type}`,
+                        )}
+                      >
+                        {suggestion.command.source === "repo_skill"
+                          ? "Skill"
+                          : suggestion.command.source === "local_extension"
+                            ? "Extension"
+                          : suggestion.command.type === "local"
+                            ? "Local"
+                            : "Prompt"}
+                      </span>
+                    </span>
+                    <span className="composer-command-description">{suggestion.command.description}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="composer-command-empty">
+                  {parsedSlashCommand?.query
+                    ? `No slash command matches /${parsedSlashCommand.query}.`
+                    : "Type a slash command like /new, /refresh, or /architecture."}
+                </div>
+              )}
+            </div>
+          ) : null}
           <div className="composer-footer">
             <span className="composer-hint">{composerHint}</span>
             <button className="send-button" onClick={() => void handleSendMessage()} disabled={bootState !== "ready" || sending || !draft.trim()}>
@@ -2447,6 +3115,105 @@ export default function App() {
                     </article>
                   ))}
                   {!(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No active watches.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Runtime</h4>
+                  <span className="muted-label">{status?.runtime?.settings_reload_count || 1}</span>
+                </div>
+                <div className="mini-list">
+                  <article className="mini-list-item tone-info">
+                    <div className="mini-list-title">
+                      {plainTextPreview(status?.runtime?.active_model || "Unknown model", 40)}
+                      <span className="mini-list-time">{plainTextPreview(status?.runtime?.reasoning_effort || "default", 20)}</span>
+                    </div>
+                    <div className="mini-list-detail">
+                      {plainTextPreview(
+                        `Version ${status?.runtime?.settings_version || "unknown"}${
+                          status?.runtime?.settings_hot_reload?.enabled ? " | hot reload enabled" : ""
+                        }`,
+                        160,
+                      )}
+                    </div>
+                  </article>
+                  {runtimePolicy?.summary ? (
+                    <article className="mini-list-item tone-neutral">
+                      <div className="mini-list-title">Policy summary</div>
+                      <div className="mini-list-detail">{plainTextPreview(runtimePolicy.summary, 160)}</div>
+                      <div className="evidence-preview-meta">
+                        {(runtimePolicy.explicit_approval_tools || []).slice(0, 3).map((tool) => (
+                          <span key={`explicit:${tool}`} className="evidence-chip">
+                            {plainTextPreview(tool, 24)}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  ) : null}
+                  {!status?.runtime ? <p className="secondary-copy">Runtime metadata is not available yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Infrastructure</h4>
+                  <span className="muted-label">{infrastructureServices.length}</span>
+                </div>
+                <div className="mini-list">
+                  {infrastructureServices.map((item) => (
+                    <article key={item.key} className={clsx("mini-list-item", `tone-${backendServiceTone(item.service)}`)}>
+                      <div className="mini-list-title">{item.label}</div>
+                      <div className="mini-list-detail">{backendServiceDetail(item.service)}</div>
+                      <div className="evidence-preview-meta">
+                        <span className="evidence-chip evidence-chip-soft">{plainTextPreview(backendServiceStatus(item.service), 28)}</span>
+                      </div>
+                    </article>
+                  ))}
+                  {!infrastructureServices.length ? <p className="secondary-copy">Infrastructure details are not available yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Tool catalog</h4>
+                  <span className="muted-label">{controlData.tools.length}</span>
+                </div>
+                <div className="mini-list">
+                  {highlightedTools.slice(0, 8).map((tool) => (
+                    <article key={tool.name || tool.description} className={clsx("mini-list-item", `tone-${statusTone(tool.policy?.risk_level)}`)}>
+                      <div className="mini-list-title">
+                        {plainTextPreview(tool.name || "tool", 40)}
+                        <span className="mini-list-time">{plainTextPreview(tool.policy?.approval_mode || "unknown", 20)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(tool.policy?.summary || tool.description || "Registered tool", 150)}</div>
+                    </article>
+                  ))}
+                  {!controlData.tools.length ? <p className="secondary-copy">No tool catalog is loaded yet.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Extensions</h4>
+                  <span className="muted-label">{controlData.extensions.length}</span>
+                </div>
+                <div className="mini-list">
+                  {controlData.extensions.map((extension) => (
+                    <article key={extension.slug || extension.relativePath || extension.title} className="mini-list-item tone-info">
+                      <div className="mini-list-title">
+                        {plainTextPreview(extension.title || extension.slug || "extension", 44)}
+                        <span className="mini-list-time">{extension.commandCount || (extension.commands || []).length || 0}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(extension.description || "Local extension manifest.", 150)}</div>
+                      {extensionCommandPreview(extension) ? (
+                        <div className="evidence-preview-meta">
+                          <span className="evidence-chip evidence-chip-soft">{plainTextPreview(extensionCommandPreview(extension), 72)}</span>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                  {!controlData.extensions.length ? <p className="secondary-copy">No local extensions are loaded.</p> : null}
                 </div>
               </section>
             </div>

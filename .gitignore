@@ -14,3 +14,5 @@ build/
 *.log
 tmp_write_probe.txt
 data/
+config/settings.local.yaml
+config/gmail-client-secret.json
