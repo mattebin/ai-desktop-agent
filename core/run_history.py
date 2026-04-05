@@ -353,6 +353,24 @@ class RunHistoryStore:
                 return run
         return {}
 
+    def get_run(
+        self,
+        run_id: str,
+        *,
+        session_id: str = "",
+        state_scope_id: str = "",
+    ) -> Dict[str, Any]:
+        safe_run_id = _trim_text(run_id, limit=60)
+        if not safe_run_id:
+            return {}
+        for run in self.load_runs():
+            if _trim_text(run.get("run_id", ""), limit=60) != safe_run_id:
+                continue
+            if not self._run_matches(run, session_id=session_id, state_scope_id=state_scope_id):
+                continue
+            return run
+        return {}
+
     def record_run(
         self,
         *,

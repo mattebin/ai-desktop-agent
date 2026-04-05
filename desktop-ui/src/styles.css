@@ -2147,3 +2147,289 @@ body {
     border-radius: 18px;
   }
 }
+
+/* Product capability surfaces */
+
+.workspace-nav,
+.surface-switcher,
+.surface-header,
+.surface-header-meta,
+.surface-grid,
+.surface-card-header,
+.surface-list-head,
+.surface-meta-row,
+.surface-actions,
+.surface-form-grid,
+.segmented-control,
+.workspace-nav-button-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-nav {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.workspace-nav-button,
+.surface-switcher-button,
+.surface-list-button {
+  border: 1px solid var(--border-soft);
+  background: var(--surface-soft);
+  color: inherit;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.workspace-nav-button {
+  width: 100%;
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.workspace-nav-button:hover,
+.surface-list-button:hover,
+.surface-switcher-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(37, 99, 235, 0.18);
+  background: var(--surface-selected);
+}
+
+.workspace-nav-button.is-active,
+.surface-switcher-button.is-active,
+.surface-list-button.is-selected {
+  border-color: rgba(37, 99, 235, 0.24);
+  background: var(--surface-selected);
+}
+
+.workspace-nav-button-count {
+  font-size: 0.74rem;
+  color: var(--muted-soft);
+}
+
+.surface-switcher {
+  padding: 0 4px;
+  flex-wrap: wrap;
+}
+
+.surface-switcher-button {
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.surface-view {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 100%;
+}
+
+.surface-header {
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.surface-header h3 {
+  margin: 2px 0 6px;
+  font-size: 1.1rem;
+}
+
+.surface-header-meta {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.surface-grid {
+  align-items: start;
+  gap: 14px;
+}
+
+.surface-grid-automations,
+.surface-grid-workflows,
+.surface-grid-runs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.surface-grid-gmail {
+  display: grid;
+  grid-template-columns: 0.9fr 1.1fr 1fr;
+}
+
+.surface-card {
+  border: 1px solid var(--border-soft);
+  background: var(--surface-soft);
+  border-radius: 20px;
+  padding: 14px;
+  min-height: 0;
+}
+
+.surface-card-header {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.surface-form,
+.surface-list,
+.surface-thread,
+.surface-thread-messages,
+.surface-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.surface-list {
+  min-height: 0;
+}
+
+.surface-list-item {
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
+  border-radius: 16px;
+  padding: 12px;
+  text-align: left;
+}
+
+.surface-list-title {
+  font-weight: 650;
+}
+
+.surface-list-copy {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.surface-form-grid {
+  align-items: stretch;
+}
+
+.surface-form-grid > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field span {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--muted-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  border-radius: 14px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.segmented-control {
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--neutral-soft);
+}
+
+.segmented-control-button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 7px 12px;
+  border-radius: 999px;
+}
+
+.segmented-control-button.is-active {
+  background: var(--panel-strong);
+  color: var(--text);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.surface-actions {
+  flex-wrap: wrap;
+}
+
+.surface-actions-tight {
+  margin-top: 10px;
+}
+
+.surface-group-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
+.surface-thread-header h5 {
+  margin: 0 0 4px;
+  font-size: 0.98rem;
+}
+
+.draft-preview-card {
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  background: linear-gradient(180deg, var(--panel-strong), var(--accent-soft));
+  border-radius: 18px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.draft-preview-body {
+  margin: 0;
+  border-radius: 14px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-soft);
+  padding: 12px;
+  color: inherit;
+  font: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.approval-explainer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+@media (max-width: 1240px) {
+  .surface-grid-gmail {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1120px) {
+  .surface-grid-automations,
+  .surface-grid-workflows,
+  .surface-grid-runs {
+    grid-template-columns: 1fr;
+  }
+}

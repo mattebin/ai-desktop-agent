@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   BellRing,
   Bot,
+  CalendarClock,
   CheckCircle2,
   CircleDot,
   Clock3,
@@ -28,6 +29,7 @@ import {
   PanelRightOpen,
   PauseCircle,
   Play,
+  Puzzle,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -43,12 +45,16 @@ import {
   approvePending,
   BrowserState,
   connectGmail,
+  createScheduledAutomation,
   createSession,
+  createWatchAutomation,
   DesktopTargetProposal,
   DesktopTargetProposalContext,
   DesktopRuntimeStatus,
+  EmailDraftSummary,
   EmailDraftsPayload,
   EmailStatusPayload,
+  EmailThreadSummary,
   EmailThreadsPayload,
   EvidenceArtifact,
   EvidenceSummary,
@@ -58,9 +64,11 @@ import {
   getExtensionCatalog,
   getAlerts,
   getDesktopEvidenceArtifact,
+  getEmailDraft,
   getSkillCatalog,
   getSlashCommands,
   getEmailStatus,
+  getRunDetail,
   getToolCatalog,
   isDesktopEvidenceArtifactImage,
   getDesktopEvidence,
@@ -75,11 +83,17 @@ import {
   listEmailThreads,
   listSessions,
   openSessionEventStream,
+  prepareEmailForwardDraft,
+  prepareEmailReplyDraft,
+  readEmailThread,
   rejectPending,
+  rejectEmailDraft,
   resolveDesktopEvidenceArtifactPreviewUrl,
+  RunDetail,
   resumeTask,
   RunFocus,
   RunEntry,
+  sendEmailDraft,
   sendSessionMessage,
   SessionDetail,
   SessionMessage,
@@ -90,10 +104,14 @@ import {
   stopTask,
   ToolSummary,
   retryTask,
+  updateScheduledAutomation,
+  updateWatchAutomation,
   type PendingApproval,
   type QueuePayload,
   type ScheduledPayload,
+  type ScheduledTask,
   type WatchPayload,
+  type WatchTask,
 } from "./lib/api";
 import {
   type LocalSlashCommand,
@@ -125,6 +143,10 @@ type ControlSnapshot = {
   tools: ToolSummary[];
   extensions: ExtensionSummary[];
 };
+
+type WorkspaceSurface = "chat" | "automations" | "gmail" | "workflows" | "runs";
+
+type AutomationComposerMode = "scheduled" | "watch";
 
 type ThemeMode = "light" | "dark";
 
@@ -787,6 +809,9 @@ type IconName =
   | "tools"
   | "gmail"
   | "desktop"
+  | "automations"
+  | "workflows"
+  | "extensions"
   | "run"
   | "stop"
   | "handoff"
@@ -811,6 +836,9 @@ const ICONS = {
   tools: Command,
   gmail: Mail,
   desktop: MonitorSmartphone,
+  automations: CalendarClock,
+  workflows: Sparkles,
+  extensions: Puzzle,
   run: Play,
   stop: Square,
   handoff: GitBranchPlus,
@@ -1721,6 +1749,36 @@ export default function App() {
     tools: [],
     extensions: [],
   });
+  const [activeSurface, setActiveSurface] = useState<WorkspaceSurface>("chat");
+  const [automationComposerMode, setAutomationComposerMode] = useState<AutomationComposerMode>("scheduled");
+  const [automationBusy, setAutomationBusy] = useState("");
+  const [automationGoal, setAutomationGoal] = useState("");
+  const [automationRunAt, setAutomationRunAt] = useState(() => {
+    const base = new Date(Date.now() + 60 * 60 * 1000);
+    base.setMinutes(Math.ceil(base.getMinutes() / 15) * 15, 0, 0);
+    return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, "0")}-${String(base.getDate()).padStart(2, "0")}T${String(base.getHours()).padStart(2, "0")}:${String(base.getMinutes()).padStart(2, "0")}`;
+  });
+  const [automationRecurrence, setAutomationRecurrence] = useState("once");
+  const [watchGoal, setWatchGoal] = useState("");
+  const [watchConditionType, setWatchConditionType] = useState("file_exists");
+  const [watchTarget, setWatchTarget] = useState("");
+  const [watchMatchText, setWatchMatchText] = useState("");
+  const [watchIntervalSeconds, setWatchIntervalSeconds] = useState(30);
+  const [watchAllowRepeat, setWatchAllowRepeat] = useState(false);
+  const [emailPanelStatus, setEmailPanelStatus] = useState<EmailStatusPayload | null>(null);
+  const [emailThreads, setEmailThreads] = useState<EmailThreadSummary[]>([]);
+  const [emailSelectedThread, setEmailSelectedThread] = useState<EmailThreadSummary | null>(null);
+  const [emailDrafts, setEmailDrafts] = useState<EmailDraftSummary[]>([]);
+  const [emailDraftDetail, setEmailDraftDetail] = useState<EmailDraftsPayload | null>(null);
+  const [emailQuery, setEmailQuery] = useState("");
+  const [emailBusy, setEmailBusy] = useState("");
+  const [emailReplyGuidance, setEmailReplyGuidance] = useState("");
+  const [emailReplyContext, setEmailReplyContext] = useState("");
+  const [emailForwardTo, setEmailForwardTo] = useState("");
+  const [emailForwardNote, setEmailForwardNote] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
+  const [runDetailBusy, setRunDetailBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -1853,6 +1911,32 @@ export default function App() {
       streamRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (!apiBaseUrl || bootState !== "ready") {
+      return;
+    }
+    if (activeSurface === "gmail") {
+      void refreshEmailPanel();
+      return;
+    }
+    if (activeSurface !== "chat") {
+      void refreshControlData(selectedSessionRef.current);
+    }
+  }, [activeSurface, apiBaseUrl, bootState, selectedSessionId]);
+
+  useEffect(() => {
+    if (activeSurface !== "runs" || !apiBaseUrl) {
+      return;
+    }
+    if (selectedRunId) {
+      return;
+    }
+    const nextRunId = controlData.recentRuns[0]?.run_id;
+    if (nextRunId) {
+      void loadRunDetail(nextRunId);
+    }
+  }, [activeSurface, apiBaseUrl, controlData.recentRuns, selectedRunId]);
 
   function updateDraft(nextValue: string, sessionId = selectedSessionRef.current) {
     const nextKey = getDraftKey(sessionId);
@@ -1994,11 +2078,12 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
+    const runsSessionId = activeSurface === "runs" ? "" : sessionId;
     const [queue, scheduled, watches, runs, desktopEvidence, toolCatalog, extensionCatalog] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
-      getRecentRuns(apiBaseUrl, sessionId, 10),
+      getRecentRuns(apiBaseUrl, runsSessionId, 10),
       getDesktopEvidence(apiBaseUrl, 6),
       getToolCatalog(apiBaseUrl),
       getExtensionCatalog(apiBaseUrl),
@@ -2035,6 +2120,295 @@ export default function App() {
     }
   }
 
+  async function refreshEmailPanel(options: { threadId?: string; draftId?: string } = {}) {
+    if (!apiBaseUrl) {
+      return;
+    }
+    const [statusPayload, threadsPayload, draftsPayload] = await Promise.all([
+      getEmailStatus(apiBaseUrl),
+      listEmailThreads(apiBaseUrl, { limit: 18, query: emailQuery.trim() || undefined, labelIds: ["INBOX"] }),
+      listEmailDrafts(apiBaseUrl, "", 12),
+    ]);
+    setEmailPanelStatus(statusPayload);
+    setEmailThreads(threadsPayload.items || []);
+    setEmailDrafts(draftsPayload.items || []);
+
+    const nextThreadId =
+      options.threadId ||
+      emailSelectedThread?.thread_id ||
+      threadsPayload.thread?.thread_id ||
+      threadsPayload.items?.[0]?.thread_id ||
+      "";
+    if (nextThreadId) {
+      try {
+        const threadPayload = await readEmailThread(apiBaseUrl, nextThreadId, 10);
+        setEmailSelectedThread(threadPayload.thread || null);
+      } catch (_error) {
+        setEmailSelectedThread(null);
+      }
+    } else {
+      setEmailSelectedThread(null);
+    }
+
+    const nextDraftId =
+      options.draftId ||
+      String(emailDraftDetail?.draft?.draft_id || "").trim() ||
+      draftsPayload.items?.[0]?.draft_id ||
+      "";
+    if (nextDraftId) {
+      try {
+        const draftPayload = await getEmailDraft(apiBaseUrl, nextDraftId);
+        setEmailDraftDetail(draftPayload);
+      } catch (_error) {
+        setEmailDraftDetail(null);
+      }
+    } else {
+      setEmailDraftDetail(null);
+    }
+  }
+
+  async function loadEmailThreadDetail(threadId: string) {
+    if (!apiBaseUrl || !threadId) {
+      return;
+    }
+    setEmailBusy("thread");
+    try {
+      const payload = await readEmailThread(apiBaseUrl, threadId, 10);
+      setEmailSelectedThread(payload.thread || null);
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function loadRunDetail(runId: string) {
+    if (!apiBaseUrl || !runId) {
+      setSelectedRun(null);
+      return;
+    }
+    setRunDetailBusy(true);
+    try {
+      const payload = await getRunDetail(apiBaseUrl, runId, activeSurface === "runs" ? "" : selectedSessionId);
+      setSelectedRunId(runId);
+      setSelectedRun(payload.run || null);
+    } finally {
+      setRunDetailBusy(false);
+    }
+  }
+
+  async function handleCreateScheduledAutomation() {
+    if (!apiBaseUrl || !automationGoal.trim() || !automationRunAt.trim()) {
+      return;
+    }
+    setAutomationBusy("scheduled:create");
+    try {
+      const payload = await createScheduledAutomation(apiBaseUrl, {
+        goal: automationGoal.trim(),
+        run_at: automationRunAt,
+        recurrence: automationRecurrence,
+      });
+      setControlData((current) => ({
+        ...current,
+        queue: payload.queue || current.queue,
+        scheduled: payload.scheduled || current.scheduled,
+      }));
+      addLocalActivity("Automation created", plainTextPreview(String(payload.result?.message || "Created the scheduled automation."), 180), "success");
+      setAutomationGoal("");
+    } finally {
+      setAutomationBusy("");
+    }
+  }
+
+  async function handleScheduledAutomationAction(task: ScheduledTask, action: "pause" | "resume" | "delete") {
+    if (!apiBaseUrl || !task.scheduled_id) {
+      return;
+    }
+    setAutomationBusy(`scheduled:${action}:${task.scheduled_id}`);
+    try {
+      const payload = await updateScheduledAutomation(apiBaseUrl, task.scheduled_id, action);
+      setControlData((current) => ({
+        ...current,
+        queue: payload.queue || current.queue,
+        scheduled: payload.scheduled || current.scheduled,
+      }));
+      addLocalActivity("Scheduled automation updated", plainTextPreview(String(payload.result?.message || "Updated the scheduled automation."), 180), action === "delete" ? "warning" : "info");
+    } finally {
+      setAutomationBusy("");
+    }
+  }
+
+  async function handleCreateWatchAutomation() {
+    if (!apiBaseUrl || !watchGoal.trim()) {
+      return;
+    }
+    setAutomationBusy("watch:create");
+    try {
+      const payload = await createWatchAutomation(apiBaseUrl, {
+        goal: watchGoal.trim(),
+        condition_type: watchConditionType,
+        target: watchTarget.trim(),
+        match_text: watchMatchText.trim(),
+        interval_seconds: watchIntervalSeconds,
+        allow_repeat: watchAllowRepeat,
+      });
+      setControlData((current) => ({
+        ...current,
+        queue: payload.queue || current.queue,
+        watches: payload.watches || current.watches,
+      }));
+      addLocalActivity("Watch created", plainTextPreview(String(payload.result?.message || "Created the watch automation."), 180), "success");
+      setWatchGoal("");
+      setWatchTarget("");
+      setWatchMatchText("");
+    } finally {
+      setAutomationBusy("");
+    }
+  }
+
+  async function handleWatchAutomationAction(task: WatchTask, action: "pause" | "resume" | "delete") {
+    if (!apiBaseUrl || !task.watch_id) {
+      return;
+    }
+    setAutomationBusy(`watch:${action}:${task.watch_id}`);
+    try {
+      const payload = await updateWatchAutomation(apiBaseUrl, task.watch_id, action);
+      setControlData((current) => ({
+        ...current,
+        queue: payload.queue || current.queue,
+        watches: payload.watches || current.watches,
+      }));
+      addLocalActivity("Watch updated", plainTextPreview(String(payload.result?.message || "Updated the watch automation."), 180), action === "delete" ? "warning" : "info");
+    } finally {
+      setAutomationBusy("");
+    }
+  }
+
+  async function handleConnectGmailSurface() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    setEmailBusy("connect");
+    try {
+      await connectGmail(apiBaseUrl);
+      await refreshEmailPanel();
+      addLocalActivity("Gmail connected", "The Gmail workspace is ready for inbox review and draft actions.", "success");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function handleReplyDraft() {
+    if (!apiBaseUrl || !emailSelectedThread?.thread_id) {
+      return;
+    }
+    setEmailBusy("reply");
+    try {
+      const payload = await prepareEmailReplyDraft(apiBaseUrl, {
+        thread_id: emailSelectedThread.thread_id,
+        guidance: emailReplyGuidance.trim(),
+        user_context: emailReplyContext.trim(),
+      });
+      setEmailDraftDetail(payload);
+      await refreshEmailPanel({ threadId: emailSelectedThread.thread_id, draftId: String(payload.draft?.draft_id || "").trim() });
+      addLocalActivity("Reply draft prepared", plainTextPreview(String(payload.message || (typeof payload.summary === "string" ? payload.summary : payload.summary?.summary) || "Prepared a reply draft."), 180), payload.needs_context ? "warning" : "success");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function handleForwardDraft() {
+    if (!apiBaseUrl || !emailSelectedThread?.thread_id || !emailForwardTo.trim()) {
+      return;
+    }
+    setEmailBusy("forward");
+    try {
+      const payload = await prepareEmailForwardDraft(apiBaseUrl, {
+        thread_id: emailSelectedThread.thread_id,
+        to: emailForwardTo
+          .split(/[,\n;]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+        note: emailForwardNote.trim(),
+      });
+      setEmailDraftDetail(payload);
+      await refreshEmailPanel({ threadId: emailSelectedThread.thread_id, draftId: String(payload.draft?.draft_id || "").trim() });
+      addLocalActivity("Forward draft prepared", plainTextPreview(String(payload.message || (typeof payload.summary === "string" ? payload.summary : payload.summary?.summary) || "Prepared a forward draft."), 180), "success");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function handleSendPreparedDraft() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    const draftId = String(
+      emailDraftDetail?.draft?.draft_id ||
+        (emailDraftDetail?.summary && typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary.draft_id : "") ||
+        "",
+    ).trim();
+    if (!draftId) {
+      return;
+    }
+    setEmailBusy("send");
+    try {
+      const payload = await sendEmailDraft(apiBaseUrl, draftId, "approved");
+      setEmailDraftDetail(payload);
+      await refreshEmailPanel({ draftId });
+      addLocalActivity("Draft sent", plainTextPreview(String(payload.message || "Sent the approved Gmail draft."), 180), payload.ok ? "success" : "warning");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function handleRejectPreparedDraft() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    const draftId = String(
+      emailDraftDetail?.draft?.draft_id ||
+        (emailDraftDetail?.summary && typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary.draft_id : "") ||
+        "",
+    ).trim();
+    if (!draftId) {
+      return;
+    }
+    setEmailBusy("reject-draft");
+    try {
+      const payload = await rejectEmailDraft(apiBaseUrl, draftId, "Rejected from the Gmail workspace.");
+      setEmailDraftDetail(payload);
+      await refreshEmailPanel({ draftId });
+      addLocalActivity("Draft rejected", plainTextPreview(String(payload.message || "Rejected the Gmail draft."), 180), "warning");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function loadEmailDraftDetail(draftId: string) {
+    if (!apiBaseUrl || !draftId) {
+      return;
+    }
+    setEmailBusy("draft");
+    try {
+      const payload = await getEmailDraft(apiBaseUrl, draftId);
+      setEmailDraftDetail(payload);
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  function handleUseTargetProposal(proposal: DesktopTargetProposal) {
+    const promptParts = [
+      "Use this desktop target for the next bounded step.",
+      proposal.target_kind ? `Target kind: ${proposal.target_kind}.` : "",
+      proposal.window_title ? `Window: ${proposal.window_title}.` : "",
+      proposal.summary ? `Reason: ${proposal.summary}.` : "",
+      proposal.suggested_next_actions?.length ? `Suggested next action: ${proposal.suggested_next_actions[0]}.` : "",
+    ].filter(Boolean);
+    setActiveSurface("chat");
+    updateDraft(promptParts.join(" "), selectedSessionId);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
   function flushPendingStreamFrame() {
     streamFlushTimerRef.current = null;
     const pending = pendingStreamFrameRef.current;
@@ -2069,7 +2443,7 @@ export default function App() {
     if (pending.alerts) {
       setAlerts(pending.alerts);
     }
-    if (pending.shouldRefreshControls && detailsOpenRef.current) {
+    if (pending.shouldRefreshControls && (detailsOpenRef.current || activeSurface !== "chat")) {
       void refreshControlData(selectedSessionRef.current);
     }
   }
@@ -2128,7 +2502,7 @@ export default function App() {
       if (options.includeConversation) {
         void loadConversation(sessionId, { preserveVisibleState: true });
       }
-      if (options.includeControls || detailsOpenRef.current) {
+      if (options.includeControls || detailsOpenRef.current || activeSurface !== "chat") {
         void refreshControlData(sessionId);
       }
       refreshTimerRef.current = null;
@@ -2461,6 +2835,23 @@ export default function App() {
         : "Message the operator...";
   const emailService = infrastructure.email as Record<string, unknown> | undefined;
   const emailConnected = Boolean(emailService && String(emailService.active || "").toLowerCase() === "connected");
+  const pendingApprovalToolName = String(pendingApproval?.tool || "").trim().toLowerCase();
+  const approvalTool = pendingApprovalToolName
+    ? controlData.tools.find((tool) => String(tool.name || "").trim().toLowerCase() === pendingApprovalToolName) || null
+    : null;
+  const activeDraftId = String(
+    emailDraftDetail?.draft?.draft_id ||
+      (emailDraftDetail?.summary && typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary.draft_id : "") ||
+      "",
+  ).trim();
+  const groupedSkills = availableSkills.reduce<Record<string, SkillSummary[]>>((groups, skill) => {
+    const key = String(skill.tags?.[0] || skill.source || "general").trim() || "general";
+    if (!groups[key]) {
+      groups[key] = [];
+    }
+    groups[key].push(skill);
+    return groups;
+  }, {});
   const topbarPrimaryLabel =
     String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
     String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
@@ -2968,9 +3359,591 @@ export default function App() {
     if (resolved) {
       await loadConversation(resolved, { preserveVisibleState: true });
     }
-    if (detailsOpen) {
+    if (detailsOpen || activeSurface !== "chat") {
       await refreshControlData(resolved);
     }
+    if (activeSurface === "gmail") {
+      await refreshEmailPanel();
+    }
+    if (activeSurface === "runs" && selectedRunId) {
+      await loadRunDetail(selectedRunId);
+    }
+  }
+
+  function renderWorkspaceSurface() {
+    if (activeSurface === "automations") {
+      return (
+        <div className="surface-view">
+          <div className="surface-header">
+            <div>
+              <div className="eyebrow">Operator automations</div>
+              <h3>Automations</h3>
+              <p className="secondary-copy">
+                Schedule follow-up work, create lightweight watches, and keep an eye on what is queued behind the active conversation.
+              </p>
+            </div>
+            <div className="surface-header-meta">
+              <span className="meta-pill">{controlData.scheduled?.tasks?.length || 0} scheduled</span>
+              <span className="meta-pill">{controlData.watches?.tasks?.length || 0} watches</span>
+              <span className="meta-pill">{controlData.queue?.queued_tasks?.length || 0} queued</span>
+            </div>
+          </div>
+
+          <div className="surface-grid surface-grid-automations">
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Create automation</h4>
+                <div className="segmented-control">
+                  <button
+                    className={clsx("segmented-control-button", automationComposerMode === "scheduled" && "is-active")}
+                    onClick={() => setAutomationComposerMode("scheduled")}
+                    type="button"
+                  >
+                    Schedule
+                  </button>
+                  <button
+                    className={clsx("segmented-control-button", automationComposerMode === "watch" && "is-active")}
+                    onClick={() => setAutomationComposerMode("watch")}
+                    type="button"
+                  >
+                    Watch
+                  </button>
+                </div>
+              </div>
+
+              {automationComposerMode === "scheduled" ? (
+                <div className="surface-form">
+                  <label className="field">
+                    <span>Goal</span>
+                    <textarea
+                      value={automationGoal}
+                      onChange={(event) => setAutomationGoal(event.target.value)}
+                      placeholder="Check the repo every morning and summarize anything blocked."
+                      rows={3}
+                    />
+                  </label>
+                  <div className="surface-form-grid">
+                    <label className="field">
+                      <span>Run at</span>
+                      <input type="datetime-local" value={automationRunAt} onChange={(event) => setAutomationRunAt(event.target.value)} />
+                    </label>
+                    <label className="field">
+                      <span>Recurrence</span>
+                      <select value={automationRecurrence} onChange={(event) => setAutomationRecurrence(event.target.value)}>
+                        <option value="once">Once</option>
+                        <option value="daily">Daily</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={automationBusy === "scheduled:create" || !automationGoal.trim() || !automationRunAt.trim()} onClick={() => void handleCreateScheduledAutomation()} type="button">
+                      {automationBusy === "scheduled:create" ? "Creating..." : "Create schedule"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="surface-form">
+                  <label className="field">
+                    <span>Goal</span>
+                    <textarea
+                      value={watchGoal}
+                      onChange={(event) => setWatchGoal(event.target.value)}
+                      placeholder="Alert me when the project inspection changes in a meaningful way."
+                      rows={3}
+                    />
+                  </label>
+                  <div className="surface-form-grid">
+                    <label className="field">
+                      <span>Condition</span>
+                      <select value={watchConditionType} onChange={(event) => setWatchConditionType(event.target.value)}>
+                        <option value="file_exists">File exists</option>
+                        <option value="file_changed">File changed</option>
+                        <option value="browser_text_contains">Browser text contains</option>
+                        <option value="inspect_project_changed">Project inspection changed</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Check every</span>
+                      <input
+                        type="number"
+                        min={2}
+                        max={3600}
+                        value={watchIntervalSeconds}
+                        onChange={(event) => setWatchIntervalSeconds(Math.max(2, Number(event.target.value || 10)))}
+                      />
+                    </label>
+                  </div>
+                  <label className="field">
+                    <span>{watchConditionType === "browser_text_contains" ? "Browser target" : "Target"}</span>
+                    <input
+                      value={watchTarget}
+                      onChange={(event) => setWatchTarget(event.target.value)}
+                      placeholder={watchConditionType === "inspect_project_changed" ? "." : "Path, URL, or target"}
+                    />
+                  </label>
+                  {watchConditionType === "browser_text_contains" ? (
+                    <label className="field">
+                      <span>Match text</span>
+                      <input value={watchMatchText} onChange={(event) => setWatchMatchText(event.target.value)} placeholder="Success, Uploaded, or other expected text" />
+                    </label>
+                  ) : null}
+                  <label className="checkbox-row">
+                    <input checked={watchAllowRepeat} onChange={(event) => setWatchAllowRepeat(event.target.checked)} type="checkbox" />
+                    <span>Allow repeat triggers after the first match</span>
+                  </label>
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={automationBusy === "watch:create" || !watchGoal.trim()} onClick={() => void handleCreateWatchAutomation()} type="button">
+                      {automationBusy === "watch:create" ? "Creating..." : "Create watch"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Queued tasks</h4>
+                <span className="muted-label">{controlData.queue?.queued_tasks?.length || 0}</span>
+              </div>
+              <div className="surface-list">
+                {(controlData.queue?.queued_tasks || []).map((task) => (
+                  <article key={task.task_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(task.goal || "Queued task", 88)}</span>
+                      <span className="mini-list-time">{plainTextPreview(task.status || "queued", 24)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(task.last_message || "Waiting behind the active task.", 180)}</p>
+                  </article>
+                ))}
+                {!(controlData.queue?.queued_tasks || []).length ? <p className="secondary-copy">No queued tasks right now.</p> : null}
+              </div>
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Scheduled</h4>
+                <span className="muted-label">{controlData.scheduled?.tasks?.length || 0}</span>
+              </div>
+              <div className="surface-list">
+                {(controlData.scheduled?.tasks || []).map((task) => (
+                  <article key={task.scheduled_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(task.goal || "Scheduled task", 88)}</span>
+                      <span className="mini-list-time">{plainTextPreview(task.recurrence || "once", 20)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(task.last_message || task.goal || "Scheduled task", 180)}</p>
+                    <div className="surface-meta-row">
+                      <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.next_run_at || task.scheduled_for || "unscheduled", 36)}</span>
+                      <span className="evidence-chip">{plainTextPreview(task.status || "scheduled", 20)}</span>
+                    </div>
+                    <div className="surface-actions">
+                      <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `scheduled:pause:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "pause")} type="button">Pause</button>
+                      <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `scheduled:resume:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "resume")} type="button">Resume</button>
+                      <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `scheduled:delete:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "delete")} type="button">Delete</button>
+                    </div>
+                  </article>
+                ))}
+                {!(controlData.scheduled?.tasks || []).length ? <p className="secondary-copy">No scheduled automations yet.</p> : null}
+              </div>
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Watches</h4>
+                <span className="muted-label">{controlData.watches?.tasks?.length || 0}</span>
+              </div>
+              <div className="surface-list">
+                {(controlData.watches?.tasks || []).map((task) => (
+                  <article key={task.watch_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(task.goal || "Watch", 88)}</span>
+                      <span className="mini-list-time">{plainTextPreview(task.condition_label || task.condition_type || "watch", 24)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(task.last_message || task.target || "Waiting for the watch condition.", 180)}</p>
+                    <div className="surface-meta-row">
+                      {task.target ? <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.target, 36)}</span> : null}
+                      <span className="evidence-chip">{plainTextPreview(task.status || "watching", 20)}</span>
+                      {typeof task.trigger_count === "number" ? <span className="evidence-chip">Triggers {task.trigger_count}</span> : null}
+                    </div>
+                    <div className="surface-actions">
+                      <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `watch:pause:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "pause")} type="button">Pause</button>
+                      <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `watch:resume:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "resume")} type="button">Resume</button>
+                      <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `watch:delete:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "delete")} type="button">Delete</button>
+                    </div>
+                  </article>
+                ))}
+                {!(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No watch conditions yet.</p> : null}
+              </div>
+            </section>
+          </div>
+        </div>
+      );
+    }
+    if (activeSurface === "gmail") {
+      const draftSummaryText =
+        typeof emailDraftDetail?.summary === "string"
+          ? emailDraftDetail.summary
+          : emailDraftDetail?.summary?.summary || emailDraftDetail?.message || "";
+      const draftQuestions =
+        emailDraftDetail?.questions ||
+        (typeof emailDraftDetail?.summary !== "string" ? emailDraftDetail?.summary?.questions : []) ||
+        [];
+      return (
+        <div className="surface-view">
+          <div className="surface-header">
+            <div>
+              <div className="eyebrow">Operator Gmail</div>
+              <h3>Inbox</h3>
+              <p className="secondary-copy">Read a thread, generate a draft, answer missing context questions, and only send when you explicitly approve it.</p>
+            </div>
+            <div className="surface-header-meta">
+              {emailPanelStatus?.profile_email ? <span className="meta-pill">{plainTextPreview(emailPanelStatus.profile_email, 32)}</span> : null}
+              <span className="meta-pill">
+                {emailPanelStatus?.watch_enabled
+                  ? `Inbox watch ${emailPanelStatus.poll_seconds || 60}s`
+                  : "Manual inbox mode"}
+              </span>
+            </div>
+            <div className="surface-actions">
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setActiveSurface("automations");
+                  setAutomationComposerMode("scheduled");
+                  setAutomationGoal(
+                    `Review Gmail inbox${emailQuery.trim() ? ` for ${emailQuery.trim()}` : ""}, summarize what needs action, and queue follow-up if a reply or escalation is needed.`,
+                  );
+                }}
+                type="button"
+              >
+                Create inbox automation
+              </button>
+              <button className="ghost-button" onClick={() => void refreshEmailPanel()} type="button">Refresh</button>
+              {!emailPanelStatus?.authenticated ? (
+                <button className="send-button" disabled={emailBusy === "connect"} onClick={() => void handleConnectGmailSurface()} type="button">
+                  {emailBusy === "connect" ? "Connecting..." : "Connect Gmail"}
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="surface-grid surface-grid-gmail">
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Inbox</h4>
+                <span className="muted-label">{emailThreads.length}</span>
+              </div>
+              <label className="field">
+                <span>Search</span>
+                <input value={emailQuery} onChange={(event) => setEmailQuery(event.target.value)} placeholder="from:alice@example.com newer_than:7d" />
+              </label>
+              <div className="surface-actions">
+                <button className="ghost-button" onClick={() => void refreshEmailPanel()} type="button">Run query</button>
+              </div>
+              <div className="surface-list">
+                {emailThreads.map((thread) => (
+                  <button
+                    key={thread.thread_id || `${thread.subject}:${thread.last_date}`}
+                    className={clsx("surface-list-item surface-list-button", emailSelectedThread?.thread_id === thread.thread_id && "is-selected")}
+                    onClick={() => void loadEmailThreadDetail(String(thread.thread_id || ""))}
+                    type="button"
+                  >
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(thread.subject || "Untitled thread", 72)}</span>
+                      <span className="mini-list-time">{formatTime(thread.last_date)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(thread.snippet || thread.last_from || "Thread preview", 160)}</p>
+                    <div className="surface-meta-row">
+                      {thread.last_from ? <span className="evidence-chip evidence-chip-soft">{plainTextPreview(thread.last_from, 28)}</span> : null}
+                      {thread.unread ? <span className="evidence-chip">Unread</span> : null}
+                    </div>
+                  </button>
+                ))}
+                {!emailThreads.length ? <p className="secondary-copy">No inbox threads match the current query.</p> : null}
+              </div>
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Thread</h4>
+                <span className="muted-label">{emailSelectedThread?.message_count || 0}</span>
+              </div>
+              {emailSelectedThread ? (
+                <div className="surface-thread">
+                  <div className="surface-thread-header">
+                    <h5>{plainTextPreview(emailSelectedThread.subject || "Thread", 96)}</h5>
+                    <p className="secondary-copy">{plainTextPreview(emailSelectedThread.snippet || "Selected Gmail thread.", 180)}</p>
+                  </div>
+                  <div className="surface-list surface-thread-messages">
+                    {(emailSelectedThread.messages || []).map((message) => (
+                      <article key={message.message_id || `${message.from}:${message.date}`} className={clsx("surface-list-item", message.sent_by_self ? "tone-info" : "tone-neutral")}>
+                        <div className="surface-list-head">
+                          <span className="surface-list-title">{plainTextPreview(message.from || message.from_address || "Message", 64)}</span>
+                          <span className="mini-list-time">{formatDateTime(message.date)}</span>
+                        </div>
+                        <p className="surface-list-copy">{plainTextPreview(message.body_text || message.snippet || "Message preview", 420)}</p>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="secondary-copy">Select a thread to inspect the conversation and prepare a reply.</p>
+              )}
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Draft</h4>
+                <span className="muted-label">{emailDrafts.length}</span>
+              </div>
+              <div className="surface-form">
+                <label className="field">
+                  <span>Reply guidance</span>
+                  <textarea value={emailReplyGuidance} onChange={(event) => setEmailReplyGuidance(event.target.value)} placeholder="Keep it short, confirm delivery, and ask for one next step." rows={3} />
+                </label>
+                <label className="field">
+                  <span>User context</span>
+                  <textarea value={emailReplyContext} onChange={(event) => setEmailReplyContext(event.target.value)} placeholder="Use facts the model needs before drafting." rows={3} />
+                </label>
+                <div className="surface-actions">
+                  <button className="send-button" disabled={emailBusy === "reply" || !emailSelectedThread?.thread_id} onClick={() => void handleReplyDraft()} type="button">
+                    {emailBusy === "reply" ? "Drafting..." : "Generate reply"}
+                  </button>
+                </div>
+                <div className="surface-form-grid">
+                  <label className="field">
+                    <span>Forward to</span>
+                    <input value={emailForwardTo} onChange={(event) => setEmailForwardTo(event.target.value)} placeholder="name@example.com, ops@example.com" />
+                  </label>
+                  <label className="field">
+                    <span>Forward note</span>
+                    <input value={emailForwardNote} onChange={(event) => setEmailForwardNote(event.target.value)} placeholder="Optional note above the forwarded message" />
+                  </label>
+                </div>
+                <div className="surface-actions">
+                  <button className="ghost-button" disabled={emailBusy === "forward" || !emailSelectedThread?.thread_id || !emailForwardTo.trim()} onClick={() => void handleForwardDraft()} type="button">
+                    {emailBusy === "forward" ? "Preparing..." : "Prepare forward"}
+                  </button>
+                </div>
+              </div>
+
+              {emailDraftDetail ? (
+                <div className="draft-preview-card">
+                  <div className="surface-list-head">
+                    <span className="surface-list-title">{plainTextPreview(typeof emailDraftDetail.summary === "string" ? "Draft guidance" : emailDraftDetail.summary?.subject || emailDraftDetail.draft?.subject || "Prepared draft", 88)}</span>
+                    <span className="mini-list-time">{plainTextPreview(emailDraftDetail.confidence || (typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary?.confidence : "") || "review", 18)}</span>
+                  </div>
+                  <p className="surface-list-copy">{plainTextPreview(draftSummaryText || "Draft details appear here after you prepare a reply or forward.", 220)}</p>
+                  {draftQuestions.length ? (
+                    <div className="surface-meta-row">
+                      {draftQuestions.map((question) => (
+                        <span key={question} className="evidence-chip">{plainTextPreview(question, 44)}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim() ? (
+                    <pre className="draft-preview-body">{String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim()}</pre>
+                  ) : null}
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={!activeDraftId || emailBusy === "send"} onClick={() => void handleSendPreparedDraft()} type="button">
+                      {emailBusy === "send" ? "Sending..." : "Approve & send"}
+                    </button>
+                    <button className="ghost-button" disabled={!activeDraftId || emailBusy === "reject-draft"} onClick={() => void handleRejectPreparedDraft()} type="button">
+                      {emailBusy === "reject-draft" ? "Rejecting..." : "Reject draft"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="surface-list">
+                {emailDrafts.map((draft) => (
+                  <button
+                    key={draft.draft_id || `${draft.subject}:${draft.updated_at}`}
+                    className={clsx("surface-list-item surface-list-button", activeDraftId && draft.draft_id === activeDraftId && "is-selected")}
+                    onClick={() => void loadEmailDraftDetail(String(draft.draft_id || ""))}
+                    type="button"
+                  >
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(draft.subject || "Prepared draft", 72)}</span>
+                      <span className="mini-list-time">{plainTextPreview(draft.status || "prepared", 20)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(draft.summary || "Draft summary", 160)}</p>
+                  </button>
+                ))}
+                {!emailDrafts.length ? <p className="secondary-copy">No stored Gmail drafts yet.</p> : null}
+              </div>
+            </section>
+          </div>
+        </div>
+      );
+    }
+    if (activeSurface === "workflows") {
+      return (
+        <div className="surface-view">
+          <div className="surface-header">
+            <div>
+              <div className="eyebrow">Visible capabilities</div>
+              <h3>Workflows & extensions</h3>
+              <p className="secondary-copy">Browse the operator's built-in workflows, inspect local extensions, and drop a skill into chat without remembering the slash command first.</p>
+            </div>
+            <div className="surface-header-meta">
+              <span className="meta-pill">{availableSkills.length} skills</span>
+              <span className="meta-pill">{availableExtensions.length} extensions</span>
+              <span className="meta-pill">{slashCommands.length} commands</span>
+            </div>
+          </div>
+          <div className="surface-grid surface-grid-workflows">
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Skills</h4>
+                <span className="muted-label">{availableSkills.length}</span>
+              </div>
+              <div className="surface-list">
+                {Object.entries(groupedSkills).map(([group, skills]) => (
+                  <div key={group} className="surface-group">
+                    <div className="surface-group-label">{plainTextPreview(group.replace(/_/g, " "), 32)}</div>
+                    {skills.map((skill) => (
+                      <article key={skill.slug || skill.commandName || skill.title} className="surface-list-item tone-neutral">
+                        <div className="surface-list-head">
+                          <span className="surface-list-title">{plainTextPreview(skill.title || skill.commandName || "Skill", 72)}</span>
+                          {skill.commandName ? <span className="mini-list-time">/{skill.commandName}</span> : null}
+                        </div>
+                        <p className="surface-list-copy">{plainTextPreview(skill.description || skill.purpose || "Workflow skill", 180)}</p>
+                        <div className="surface-actions">
+                          <button
+                            className="ghost-button"
+                            onClick={() => {
+                              setActiveSurface("chat");
+                              updateDraft(skill.commandName ? `/${skill.commandName} ` : skill.promptText || "", selectedSessionId);
+                              window.requestAnimationFrame(() => textareaRef.current?.focus());
+                            }}
+                            type="button"
+                          >
+                            Use in chat
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ))}
+                {!availableSkills.length ? <p className="secondary-copy">No repo-local skills are available.</p> : null}
+              </div>
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Extensions</h4>
+                <span className="muted-label">{availableExtensions.length}</span>
+              </div>
+              <div className="surface-list">
+                {availableExtensions.map((extension) => (
+                  <article key={extension.slug || extension.relativePath || extension.title} className="surface-list-item tone-info">
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(extension.title || extension.slug || "Extension", 72)}</span>
+                      <span className="mini-list-time">{extension.commandCount || extension.commands?.length || 0} cmds</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(extension.description || "Local extension manifest.", 180)}</p>
+                    {(extension.commands || []).length ? (
+                      <div className="surface-meta-row">
+                        {(extension.commands || []).slice(0, 4).map((command) => (
+                          <span key={`${extension.slug}:${command.name}`} className="evidence-chip evidence-chip-soft">
+                            /{plainTextPreview(command.name || "command", 20)}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                ))}
+                {!availableExtensions.length ? <p className="secondary-copy">No local extensions are loaded.</p> : null}
+              </div>
+            </section>
+          </div>
+        </div>
+      );
+    }
+    if (activeSurface === "runs") {
+      return (
+        <div className="surface-view">
+          <div className="surface-header">
+            <div>
+              <div className="eyebrow">Traceability</div>
+              <h3>Runs</h3>
+              <p className="secondary-copy">Inspect recent runs, review what the operator decided, and replay the step history without leaving the conversation shell.</p>
+            </div>
+            <div className="surface-header-meta">
+              <span className="meta-pill">{controlData.recentRuns.length} recent runs</span>
+              {selectedRun?.final_status ? <span className={clsx("status-pill", `tone-${statusTone(selectedRun.final_status)}`)}>{selectedRun.final_status}</span> : null}
+            </div>
+          </div>
+          <div className="surface-grid surface-grid-runs">
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Recent runs</h4>
+                <span className="muted-label">{controlData.recentRuns.length}</span>
+              </div>
+              <div className="surface-list">
+                {controlData.recentRuns.map((run) => (
+                  <button
+                    key={run.run_id || `${run.goal}:${run.started_at}`}
+                    className={clsx("surface-list-item surface-list-button", run.run_id === selectedRunId && "is-selected", `tone-${statusTone(run.final_status)}`)}
+                    onClick={() => void loadRunDetail(String(run.run_id || ""))}
+                    type="button"
+                  >
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(run.goal || run.final_summary || "Run", 72)}</span>
+                      <span className="mini-list-time">{formatDateTime(run.started_at)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(run.final_summary || "Recent operator run.", 180)}</p>
+                  </button>
+                ))}
+                {!controlData.recentRuns.length ? <p className="secondary-copy">No recent runs are available yet.</p> : null}
+              </div>
+            </section>
+
+            <section className="surface-card">
+              <div className="surface-card-header">
+                <h4>Replay</h4>
+                <span className="muted-label">{selectedRun?.steps?.length || 0} steps</span>
+              </div>
+              {runDetailBusy ? (
+                <p className="secondary-copy">Loading the selected run...</p>
+              ) : selectedRun ? (
+                <div className="surface-list">
+                  <article className={clsx("surface-list-item", `tone-${statusTone(selectedRun.final_status)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(selectedRun.goal || selectedRun.final_summary || "Selected run", 88)}</span>
+                      <span className="mini-list-time">{plainTextPreview(selectedRun.final_status || "run", 20)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(selectedRun.final_summary || selectedRun.result_message || "Run summary", 240)}</p>
+                  </article>
+                  {(selectedRun.steps || []).map((step) => (
+                    <article key={`${selectedRun.run_id || "run"}:${step.index}`} className={clsx("surface-list-item", `tone-${statusTone(step.status)}`)}>
+                      <div className="surface-list-head">
+                        <span className="surface-list-title">
+                          Step {typeof step.index === "number" ? step.index + 1 : "?"}: {plainTextPreview(step.tool || step.type || "step", 56)}
+                        </span>
+                        <span className="mini-list-time">{plainTextPreview(step.status || "unknown", 18)}</span>
+                      </div>
+                      <p className="surface-list-copy">{plainTextPreview(step.message || step.result_summary || "Recorded run step.", 220)}</p>
+                      {step.approval ? (
+                        <div className="surface-meta-row">
+                          <span className="evidence-chip">Approval</span>
+                          <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.approval.status || step.approval.required || "checkpoint"), 32)}</span>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                  {!selectedRun.steps?.length ? <p className="secondary-copy">This run does not have recorded steps yet.</p> : null}
+                </div>
+              ) : (
+                <p className="secondary-copy">Select a run from the left to inspect the replay timeline.</p>
+              )}
+            </section>
+          </div>
+        </div>
+      );
+    }
+    return null;
   }
 
   return (
@@ -3098,7 +4071,37 @@ export default function App() {
           <section className="sidebar-section sidebar-capability-section">
             <div className="sidebar-section-header">
               <SectionTitle icon="tools">Workspace</SectionTitle>
-              <span className="muted-label">{controlData.tools.length}</span>
+              <span className="muted-label">{activeSurface}</span>
+            </div>
+            <div className="workspace-nav">
+              {[
+                { id: "chat", label: "Chat", icon: "chat" as const, count: recentSessions.length },
+                {
+                  id: "automations",
+                  label: "Automations",
+                  icon: "automations" as const,
+                  count:
+                    (controlData.scheduled?.tasks?.length || 0) +
+                    (controlData.watches?.tasks?.length || 0) +
+                    (controlData.queue?.queued_tasks?.length || 0),
+                },
+                { id: "gmail", label: "Gmail", icon: "gmail" as const, count: emailConnected ? emailThreads.length || 0 : 0 },
+                { id: "workflows", label: "Workflows", icon: "workflows" as const, count: availableSkills.length + availableExtensions.length },
+                { id: "runs", label: "Runs", icon: "history" as const, count: controlData.recentRuns.length },
+              ].map((surface) => (
+                <button
+                  key={surface.id}
+                  className={clsx("workspace-nav-button", activeSurface === surface.id && "is-active")}
+                  onClick={() => setActiveSurface(surface.id as WorkspaceSurface)}
+                  type="button"
+                >
+                  <span className="workspace-nav-button-main">
+                    <UiIcon name={surface.icon} />
+                    <span>{surface.label}</span>
+                  </span>
+                  <span className="workspace-nav-button-count">{surface.count}</span>
+                </button>
+              ))}
             </div>
             <div className="sidebar-capability-list">
               <span className="sidebar-capability-chip">
@@ -3193,8 +4196,30 @@ export default function App() {
           </div>
         </header>
 
+        <nav className="surface-switcher" aria-label="Workspace surfaces">
+          {[
+            { id: "chat", label: "Conversation", icon: "chat" as const },
+            { id: "automations", label: "Automations", icon: "automations" as const },
+            { id: "gmail", label: "Gmail", icon: "gmail" as const },
+            { id: "workflows", label: "Workflows", icon: "workflows" as const },
+            { id: "runs", label: "Runs", icon: "history" as const },
+          ].map((surface) => (
+            <button
+              key={surface.id}
+              className={clsx("surface-switcher-button", activeSurface === surface.id && "is-active")}
+              onClick={() => setActiveSurface(surface.id as WorkspaceSurface)}
+              type="button"
+            >
+              <UiIcon name={surface.icon} />
+              <span>{surface.label}</span>
+            </button>
+          ))}
+        </nav>
+
         <section className="conversation-frame">
-          {bootState === "booting" ? (
+          {activeSurface !== "chat" ? (
+            renderWorkspaceSurface()
+          ) : bootState === "booting" ? (
             <div className="boot-state">
               <div className="boot-card">
                 <div className="spinner" />
@@ -3252,13 +4277,14 @@ export default function App() {
               )}
             </div>
           )}
-          {!emptyState && !loadingConversation && !isNearTranscriptBottom ? (
+          {activeSurface === "chat" && !emptyState && !loadingConversation && !isNearTranscriptBottom ? (
             <button className="jump-to-latest" onClick={() => scrollTranscriptToLatest()} type="button">
               {pendingNewMessageCount > 0 ? `Jump to latest (${pendingNewMessageCount})` : "Jump to latest"}
             </button>
           ) : null}
         </section>
 
+        {activeSurface === "chat" ? (
         <footer className="composer-shell">
           <textarea
             ref={textareaRef}
@@ -3361,6 +4387,7 @@ export default function App() {
             </button>
           </div>
         </footer>
+        ) : null}
       </main>
 
       <aside className="right-rail">
@@ -3373,6 +4400,29 @@ export default function App() {
             <>
               <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
               <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
+              <div className="approval-explainer">
+                <div className="inspector-stat">
+                  <span className="stat-label">Why approval is required</span>
+                  <p>
+                    {plainTextPreview(
+                      approvalTool?.policy?.summary ||
+                        pendingApproval.reason ||
+                        "This action crosses a tool boundary that requires an explicit operator confirmation.",
+                      180,
+                    )}
+                  </p>
+                </div>
+                <div className="approval-context-grid">
+                  <div className="inspector-stat">
+                    <span className="stat-label">Risk</span>
+                    <p>{plainTextPreview(approvalTool?.policy?.risk_level || "review", 48)}</p>
+                  </div>
+                  <div className="inspector-stat">
+                    <span className="stat-label">If approved</span>
+                    <p>{plainTextPreview(`The operator will resume the paused ${pendingApproval.tool || pendingApproval.kind || "action"} and continue the run.`, 120)}</p>
+                  </div>
+                </div>
+              </div>
               {pendingApproval?.target || pendingApproval?.step ? (
                 <div className="approval-context-grid">
                   {pendingApproval.target ? (
@@ -3465,6 +4515,11 @@ export default function App() {
                     </span>
                   ))}
                   {proposal.approval_required ? <span className="evidence-chip">Approval</span> : null}
+                </div>
+                <div className="surface-actions surface-actions-tight">
+                  <button className="ghost-button" onClick={() => handleUseTargetProposal(proposal)} type="button">
+                    Use in chat
+                  </button>
                 </div>
               </article>
             ))}

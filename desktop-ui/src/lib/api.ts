@@ -359,6 +359,12 @@ export type ScheduledTask = {
   scheduled_for?: string;
   next_run_at?: string;
   last_message?: string;
+  paused?: boolean;
+  available_actions?: {
+    pause?: boolean;
+    resume?: boolean;
+    delete?: boolean;
+  };
 };
 
 export type ScheduledPayload = {
@@ -371,11 +377,20 @@ export type WatchTask = {
   goal?: string;
   status?: string;
   condition_type?: string;
+  condition_label?: string;
   target?: string;
   match_text?: string;
   interval_seconds?: number;
   allow_repeat?: boolean;
   last_message?: string;
+  last_checked_at?: string;
+  last_triggered_at?: string;
+  trigger_count?: number;
+  available_actions?: {
+    pause?: boolean;
+    resume?: boolean;
+    delete?: boolean;
+  };
 };
 
 export type WatchPayload = {
@@ -394,6 +409,24 @@ export type RunEntry = {
   source?: string;
   session_id?: string;
   state_scope_id?: string;
+};
+
+export type RunStep = {
+  index?: number;
+  type?: string;
+  tool?: string;
+  status?: string;
+  prepared_args?: Record<string, unknown>;
+  result_summary?: string;
+  message?: string;
+  approval?: Record<string, unknown>;
+  browser_transition?: Record<string, unknown>;
+  recovery?: Record<string, unknown>;
+};
+
+export type RunDetail = RunEntry & {
+  steps?: RunStep[];
+  end_state?: Record<string, unknown>;
 };
 
 export type SessionListPayload = {
@@ -562,11 +595,24 @@ export type EmailDraftSummary = {
 export type EmailDraftsPayload = {
   ok?: boolean;
   items?: EmailDraftSummary[];
-  summary?: EmailDraftSummary;
-  draft?: Record<string, unknown>;
+  summary?: EmailDraftSummary | string;
+  draft?: (Record<string, unknown> & {
+    body?: string;
+    note?: string;
+    to?: string[];
+    cc?: string[];
+    subject?: string;
+    questions?: string[];
+    thread_snapshot?: EmailThreadSummary;
+  }) | null;
   message?: string;
   error?: string;
   paused?: boolean;
+  disposition?: string;
+  needs_context?: boolean;
+  confidence?: string;
+  questions?: string[];
+  thread?: EmailThreadSummary;
 };
 
 export type CommandExecutionResult = {
@@ -811,6 +857,10 @@ export async function listEmailDrafts(baseUrl: string, status = "", limit = 12):
   });
 }
 
+export async function getEmailDraft(baseUrl: string, draftId: string): Promise<EmailDraftsPayload> {
+  return request<EmailDraftsPayload>(baseUrl, `/email/drafts/${encodeURIComponent(draftId)}`);
+}
+
 export async function prepareEmailReplyDraft(
   baseUrl: string,
   payload: { thread_id: string; guidance?: string; user_context?: string },
@@ -902,6 +952,12 @@ export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8):
   });
 }
 
+export async function getRunDetail(baseUrl: string, runId: string, sessionId = ""): Promise<{ run?: RunDetail }> {
+  return request<{ run?: RunDetail }>(baseUrl, `/runs/${encodeURIComponent(runId)}`, undefined, {
+    session_id: sessionId || undefined,
+  });
+}
+
 export async function getQueueState(baseUrl: string): Promise<QueuePayload> {
   return request<QueuePayload>(baseUrl, "/queue");
 }
@@ -912,6 +968,63 @@ export async function getScheduledState(baseUrl: string): Promise<ScheduledPaylo
 
 export async function getWatchState(baseUrl: string): Promise<WatchPayload> {
   return request<WatchPayload>(baseUrl, "/watches");
+}
+
+export async function createScheduledAutomation(
+  baseUrl: string,
+  payload: { goal: string; run_at: string; recurrence?: string },
+): Promise<{ result?: Record<string, unknown>; scheduled?: ScheduledPayload; queue?: QueuePayload }> {
+  return request<{ result?: Record<string, unknown>; scheduled?: ScheduledPayload; queue?: QueuePayload }>(baseUrl, "/automations/scheduled", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateScheduledAutomation(
+  baseUrl: string,
+  scheduledId: string,
+  action: "pause" | "resume" | "delete",
+): Promise<{ result?: Record<string, unknown>; scheduled?: ScheduledPayload; queue?: QueuePayload }> {
+  return request<{ result?: Record<string, unknown>; scheduled?: ScheduledPayload; queue?: QueuePayload }>(
+    baseUrl,
+    `/automations/scheduled/${encodeURIComponent(scheduledId)}/${action}`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export async function createWatchAutomation(
+  baseUrl: string,
+  payload: {
+    goal: string;
+    condition_type: string;
+    target: string;
+    match_text?: string;
+    interval_seconds?: number;
+    allow_repeat?: boolean;
+  },
+): Promise<{ result?: Record<string, unknown>; watches?: WatchPayload; queue?: QueuePayload }> {
+  return request<{ result?: Record<string, unknown>; watches?: WatchPayload; queue?: QueuePayload }>(baseUrl, "/automations/watches", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateWatchAutomation(
+  baseUrl: string,
+  watchId: string,
+  action: "pause" | "resume" | "delete",
+): Promise<{ result?: Record<string, unknown>; watches?: WatchPayload; queue?: QueuePayload }> {
+  return request<{ result?: Record<string, unknown>; watches?: WatchPayload; queue?: QueuePayload }>(
+    baseUrl,
+    `/automations/watches/${encodeURIComponent(watchId)}/${action}`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
 }
 
 export async function approvePending(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {

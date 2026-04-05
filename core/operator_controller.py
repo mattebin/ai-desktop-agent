@@ -35,6 +35,15 @@ class OperatorController:
     def schedule_goal(self, goal: str, run_at: str, recurrence: str = "once") -> Dict[str, Any]:
         return self.manager.schedule_goal(goal, run_at, recurrence=recurrence)
 
+    def pause_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        return self.manager.pause_scheduled_task(scheduled_id)
+
+    def resume_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        return self.manager.resume_scheduled_task(scheduled_id)
+
+    def delete_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        return self.manager.delete_scheduled_task(scheduled_id)
+
     def create_watch(
         self,
         goal: str,
@@ -52,6 +61,15 @@ class OperatorController:
             interval_seconds=interval_seconds,
             allow_repeat=allow_repeat,
         )
+
+    def pause_watch(self, watch_id: str) -> Dict[str, Any]:
+        return self.manager.pause_watch(watch_id)
+
+    def resume_watch(self, watch_id: str) -> Dict[str, Any]:
+        return self.manager.resume_watch(watch_id)
+
+    def delete_watch(self, watch_id: str) -> Dict[str, Any]:
+        return self.manager.delete_watch(watch_id)
 
     def start_next(self) -> Dict[str, Any]:
         return self.manager.start_next(auto_trigger=False)
@@ -71,6 +89,9 @@ class OperatorController:
     def get_recent_runs(self, limit: int = 6, *, session_id: str = "", state_scope_id: str = "") -> list[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit or 6), 25))
         return self.manager.agent.history_store.get_recent_runs(limit=safe_limit, session_id=session_id, state_scope_id=state_scope_id)
+
+    def get_run(self, run_id: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
+        return self.manager.agent.history_store.get_run(run_id, session_id=session_id, state_scope_id=state_scope_id)
 
     def get_alerts(self, limit: int = 12, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         safe_limit = max(1, min(int(limit or 12), 40))
@@ -95,6 +116,9 @@ class OperatorController:
 
     def list_email_drafts(self, *, status: str = "", limit: int = 24) -> Dict[str, Any]:
         return self.manager.agent.list_email_drafts(status=status, limit=limit)
+
+    def get_email_draft(self, draft_id: str) -> Dict[str, Any]:
+        return self.manager.agent.get_email_draft(draft_id)
 
     def prepare_email_reply_draft(self, *, thread_id: str, guidance: str = "", user_context: str = "") -> Dict[str, Any]:
         return self.manager.agent.prepare_email_reply_draft(thread_id=thread_id, guidance=guidance, user_context=user_context)

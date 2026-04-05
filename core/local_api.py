@@ -827,6 +827,14 @@ class LocalOperatorApiServer:
                     limit = self._query_limit(parsed, default=8, maximum=40)
                     self._respond_ok(server_ref.controller.read_email_thread(thread_id, max_messages=limit))
                     return
+                if len(email_segments) == 3 and email_segments[0] == "email" and email_segments[1] == "drafts":
+                    draft_id = unquote(email_segments[2])
+                    payload = server_ref.controller.get_email_draft(draft_id)
+                    if payload.get("ok", False):
+                        self._respond_ok(payload)
+                    else:
+                        self._respond_error(404, payload.get("error", "Draft not found."))
+                    return
 
                 if path == "/snapshot":
                     session_id, state_scope_id = self._session_filters(parsed=parsed)
@@ -842,6 +850,16 @@ class LocalOperatorApiServer:
                     limit = self._query_limit(parsed, default=6, maximum=25)
                     session_id, state_scope_id = self._session_filters(parsed=parsed)
                     self._respond_ok({"items": server_ref.controller.get_recent_runs(limit=limit, session_id=session_id, state_scope_id=state_scope_id)})
+                    return
+
+                run_segments = self._path_segments(path)
+                if len(run_segments) == 2 and run_segments[0] == "runs":
+                    session_id, state_scope_id = self._session_filters(parsed=parsed)
+                    payload = server_ref.controller.get_run(unquote(run_segments[1]), session_id=session_id, state_scope_id=state_scope_id)
+                    if payload:
+                        self._respond_ok({"run": payload})
+                    else:
+                        self._respond_error(404, "Run not found.")
                     return
 
                 if path == "/alerts":
@@ -941,6 +959,72 @@ class LocalOperatorApiServer:
                         self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id))})
                     else:
                         self._respond_error(400, result.get("message", "Unable to replace the current goal."))
+                    return
+
+                if path == "/automations/scheduled":
+                    result = server_ref.controller.schedule_goal(
+                        str(body.get("goal", "")).strip(),
+                        str(body.get("run_at", body.get("scheduled_for", ""))).strip(),
+                        recurrence=str(body.get("recurrence", "once")).strip() or "once",
+                    )
+                    if result.get("ok"):
+                        self._respond_ok({"result": result, "scheduled": _scheduled_payload(server_ref.controller.get_scheduled_state()), "queue": _queue_payload(server_ref.controller.get_queue_state())})
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to create the scheduled automation."))
+                    return
+
+                if path == "/automations/watches":
+                    try:
+                        interval_seconds = int(body.get("interval_seconds", 10) or 10)
+                    except (TypeError, ValueError):
+                        interval_seconds = 10
+                    result = server_ref.controller.create_watch(
+                        str(body.get("goal", "")).strip(),
+                        str(body.get("condition_type", "")).strip(),
+                        str(body.get("target", "")).strip(),
+                        str(body.get("match_text", "")).strip(),
+                        interval_seconds=interval_seconds,
+                        allow_repeat=bool(body.get("allow_repeat", False)),
+                    )
+                    if result.get("ok"):
+                        self._respond_ok({"result": result, "watches": _watch_payload(server_ref.controller.get_watch_state()), "queue": _queue_payload(server_ref.controller.get_queue_state())})
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to create the watch automation."))
+                    return
+
+                automation_segments = self._path_segments(path)
+                if len(automation_segments) == 4 and automation_segments[0] == "automations" and automation_segments[1] == "scheduled":
+                    scheduled_id = unquote(automation_segments[2])
+                    action = automation_segments[3]
+                    if action == "pause":
+                        result = server_ref.controller.pause_scheduled_task(scheduled_id)
+                    elif action == "resume":
+                        result = server_ref.controller.resume_scheduled_task(scheduled_id)
+                    elif action == "delete":
+                        result = server_ref.controller.delete_scheduled_task(scheduled_id)
+                    else:
+                        result = {"ok": False, "message": "Unsupported scheduled automation action."}
+                    if result.get("ok"):
+                        self._respond_ok({"result": result, "scheduled": _scheduled_payload(server_ref.controller.get_scheduled_state()), "queue": _queue_payload(server_ref.controller.get_queue_state())})
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to update the scheduled automation."))
+                    return
+
+                if len(automation_segments) == 4 and automation_segments[0] == "automations" and automation_segments[1] == "watches":
+                    watch_id = unquote(automation_segments[2])
+                    action = automation_segments[3]
+                    if action == "pause":
+                        result = server_ref.controller.pause_watch(watch_id)
+                    elif action == "resume":
+                        result = server_ref.controller.resume_watch(watch_id)
+                    elif action == "delete":
+                        result = server_ref.controller.delete_watch(watch_id)
+                    else:
+                        result = {"ok": False, "message": "Unsupported watch action."}
+                    if result.get("ok"):
+                        self._respond_ok({"result": result, "watches": _watch_payload(server_ref.controller.get_watch_state()), "queue": _queue_payload(server_ref.controller.get_queue_state())})
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to update the watch automation."))
                     return
 
                 if path == "/tasks/stop":

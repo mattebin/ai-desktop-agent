@@ -943,6 +943,24 @@ class ExecutionManager:
                 return task
         return None
 
+    def _find_scheduled_task_locked(self, scheduled_id: str) -> Dict[str, Any] | None:
+        lookup = _trim_text(scheduled_id, limit=60)
+        if not lookup:
+            return None
+        for task in self._scheduled_tasks:
+            if _trim_text(task.get("scheduled_id", ""), limit=60) == lookup:
+                return task
+        return None
+
+    def _find_watch_locked(self, watch_id: str) -> Dict[str, Any] | None:
+        lookup = _trim_text(watch_id, limit=60)
+        if not lookup:
+            return None
+        for watch in self._watches:
+            if _trim_text(watch.get("watch_id", ""), limit=60) == lookup:
+                return watch
+        return None
+
     def _canonical_task_locked(self, task: Dict[str, Any] | None) -> Dict[str, Any] | None:
         if not isinstance(task, dict):
             return None
@@ -2766,6 +2784,140 @@ class ExecutionManager:
             "message": f"Scheduled goal for {scheduled_task.get('next_run_at', '')} ({recurrence_value}).",
         }
 
+    def pause_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(scheduled_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a scheduled task to pause."}
+        with self._lock:
+            scheduled_task = self._find_scheduled_task_locked(safe_id)
+            if scheduled_task is None:
+                return {"ok": False, "message": "Scheduled task not found."}
+            status = _normalize_schedule_status(scheduled_task.get("status", "scheduled"))
+            if status == "paused":
+                return {"ok": True, "scheduled_id": safe_id, "status": "paused", "message": "That scheduled task is already paused."}
+            if status != "scheduled":
+                return {"ok": False, "message": "Only future scheduled tasks can be paused right now."}
+            scheduled_task["status"] = "paused"
+            scheduled_task["paused"] = True
+            scheduled_task["updated_at"] = _iso_timestamp()
+            scheduled_task["last_message"] = "Paused the scheduled task before its next run."
+            scheduled_task["control_event"] = "paused"
+            scheduled_task["control_reason"] = scheduled_task["last_message"]
+            scheduled_task["resume_available"] = True
+            self._persist_scheduled_locked()
+        return {"ok": True, "scheduled_id": safe_id, "status": "paused", "message": "Paused the scheduled task."}
+
+    def resume_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(scheduled_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a scheduled task to resume."}
+        auto_start = False
+        with self._lock:
+            scheduled_task = self._find_scheduled_task_locked(safe_id)
+            if scheduled_task is None:
+                return {"ok": False, "message": "Scheduled task not found."}
+            status = _normalize_schedule_status(scheduled_task.get("status", "scheduled"))
+            if status == "scheduled":
+                return {"ok": True, "scheduled_id": safe_id, "status": "scheduled", "message": "That scheduled task is already active."}
+            if status != "paused":
+                return {"ok": False, "message": "Only paused scheduled tasks can be resumed."}
+            scheduled_task["status"] = "scheduled"
+            scheduled_task["paused"] = False
+            scheduled_task["updated_at"] = _iso_timestamp()
+            scheduled_task["last_message"] = "Resumed the scheduled task."
+            scheduled_task["control_event"] = "resumed"
+            scheduled_task["control_reason"] = scheduled_task["last_message"]
+            scheduled_task["resume_available"] = False
+            promoted, auto_start = self._promote_due_scheduled_tasks_locked()
+            if promoted:
+                self._persist_all_locked()
+            else:
+                self._persist_scheduled_locked()
+        if auto_start:
+            self.start_next(auto_trigger=True)
+        return {
+            "ok": True,
+            "scheduled_id": safe_id,
+            "status": "scheduled",
+            "queued": bool(promoted),
+            "message": "Resumed the scheduled task." if not promoted else "Resumed the scheduled task and queued it immediately because it was already due.",
+        }
+
+    def delete_scheduled_task(self, scheduled_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(scheduled_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a scheduled task to delete."}
+        with self._lock:
+            scheduled_task = self._find_scheduled_task_locked(safe_id)
+            if scheduled_task is None:
+                return {"ok": False, "message": "Scheduled task not found."}
+            linked_task = self._find_task_locked(scheduled_task.get("linked_task_id", ""))
+            linked_status = _normalize_status(linked_task.get("status", "")) if linked_task else ""
+            if linked_status in {"running", "queued", "deferred", "paused"}:
+                return {"ok": False, "message": "That scheduled task still has a live queued or running task attached. Resolve it before deleting the schedule."}
+            self._scheduled_tasks = [
+                item for item in self._scheduled_tasks if _trim_text(item.get("scheduled_id", ""), limit=60) != safe_id
+            ]
+            self._persist_scheduled_locked()
+        return {"ok": True, "scheduled_id": safe_id, "message": "Deleted the scheduled task."}
+
+    def pause_watch(self, watch_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(watch_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a watch to pause."}
+        with self._lock:
+            watch = self._find_watch_locked(safe_id)
+            if watch is None:
+                return {"ok": False, "message": "Watch not found."}
+            status = str(watch.get("status", "watching")).strip().lower() or "watching"
+            if status == "paused":
+                return {"ok": True, "watch_id": safe_id, "status": "paused", "message": "That watch is already paused."}
+            if status not in {"watching", "triggered"}:
+                return {"ok": False, "message": "Only active watches can be paused right now."}
+            watch["status"] = "paused"
+            watch["updated_at"] = _iso_timestamp()
+            watch["last_message"] = "Paused the watch."
+            self._persist_watches_locked()
+        return {"ok": True, "watch_id": safe_id, "status": "paused", "message": "Paused the watch."}
+
+    def resume_watch(self, watch_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(watch_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a watch to resume."}
+        auto_start = False
+        with self._lock:
+            watch = self._find_watch_locked(safe_id)
+            if watch is None:
+                return {"ok": False, "message": "Watch not found."}
+            status = str(watch.get("status", "watching")).strip().lower() or "watching"
+            if status == "watching":
+                return {"ok": True, "watch_id": safe_id, "status": "watching", "message": "That watch is already active."}
+            if status != "paused":
+                return {"ok": False, "message": "Only paused watches can be resumed."}
+            watch["status"] = "watching"
+            watch["updated_at"] = _iso_timestamp()
+            watch["last_message"] = "Resumed the watch."
+            changed, auto_start = self._process_watches_locked(force_check=True)
+            if changed:
+                self._persist_all_locked()
+            else:
+                self._persist_watches_locked()
+        if auto_start:
+            self.start_next(auto_trigger=True)
+        return {"ok": True, "watch_id": safe_id, "status": "watching", "message": "Resumed the watch."}
+
+    def delete_watch(self, watch_id: str) -> Dict[str, Any]:
+        safe_id = _trim_text(watch_id, limit=60)
+        if not safe_id:
+            return {"ok": False, "message": "Select a watch to delete."}
+        with self._lock:
+            watch = self._find_watch_locked(safe_id)
+            if watch is None:
+                return {"ok": False, "message": "Watch not found."}
+            self._watches = [item for item in self._watches if _trim_text(item.get("watch_id", ""), limit=60) != safe_id]
+            self._persist_watches_locked()
+        return {"ok": True, "watch_id": safe_id, "message": "Deleted the watch."}
+
     def start_next(self, *, auto_trigger: bool = False) -> Dict[str, Any]:
         with self._lock:
             if self._maybe_finalize_stalled_active_task_locked():
@@ -3257,6 +3409,17 @@ class ExecutionManager:
             "progress": self._task_progress_payload_locked(task),
         }
 
+    def _scheduled_actions_locked(self, task: Dict[str, Any]) -> Dict[str, bool]:
+        status = _normalize_schedule_status(task.get("status", "scheduled"))
+        linked_task = self._find_task_locked(task.get("linked_task_id", ""))
+        linked_status = _normalize_status(linked_task.get("status", "")) if linked_task else ""
+        has_live_link = linked_status in {"running", "queued", "deferred", "paused"}
+        return {
+            "pause": status == "scheduled",
+            "resume": status == "paused",
+            "delete": not has_live_link,
+        }
+
     def _scheduled_summary_locked(self, task: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "scheduled_id": _trim_text(task.get("scheduled_id", ""), limit=60),
@@ -3277,6 +3440,7 @@ class ExecutionManager:
             "approval_reason": _trim_text(task.get("approval_reason", ""), limit=180),
             "paused": bool(task.get("paused", False)),
             "control": self._task_control_payload_locked(task),
+            "available_actions": self._scheduled_actions_locked(task),
         }
 
     def _queue_snapshot_locked(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
@@ -3308,8 +3472,20 @@ class ExecutionManager:
             "counts": counts,
         }
 
+    def _watch_actions_locked(self, watch: Dict[str, Any]) -> Dict[str, bool]:
+        status = str(watch.get("status", "watching")).strip().lower() or "watching"
+        return {
+            "pause": status in {"watching", "triggered"},
+            "resume": status == "paused",
+            "delete": True,
+        }
+
     def _watch_snapshot_locked(self) -> Dict[str, Any]:
-        tasks = [watch_summary(watch) for watch in list(reversed(self._watches[-10:]))]
+        tasks = []
+        for watch in list(reversed(self._watches[-10:])):
+            payload = watch_summary(watch)
+            payload["available_actions"] = self._watch_actions_locked(watch)
+            tasks.append(payload)
         counts = watch_counts(self._watches)
         return {
             "tasks": tasks,
