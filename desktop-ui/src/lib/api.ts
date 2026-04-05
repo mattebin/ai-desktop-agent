@@ -927,3 +927,24 @@ export async function rejectPending(baseUrl: string, sessionId = ""): Promise<Ap
     body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
   });
 }
+
+export async function stopTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+  return request<ApprovalResult>(baseUrl, "/tasks/stop", {
+    method: "POST",
+    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+  });
+}
+
+export async function resumeTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+  return request<ApprovalResult>(baseUrl, "/tasks/resume", {
+    method: "POST",
+    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+  });
+}
+
+export async function retryTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+  return request<ApprovalResult>(baseUrl, "/tasks/retry", {
+    method: "POST",
+    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+  });
+}

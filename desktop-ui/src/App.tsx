@@ -5,6 +5,40 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import clsx from "clsx";
 import {
+  Activity,
+  AlertTriangle,
+  BellRing,
+  Bot,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
+  Command,
+  Eye,
+  GitBranchPlus,
+  GitCommitHorizontal,
+  History,
+  ImageIcon,
+  LoaderCircle,
+  Mail,
+  Menu,
+  MessagesSquare,
+  MonitorSmartphone,
+  MoonStar,
+  PanelRightClose,
+  PanelRightOpen,
+  PauseCircle,
+  Play,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  SquarePen,
+  SunMedium,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
+import {
   AlertItem,
   approvePending,
   BrowserState,
@@ -43,6 +77,7 @@ import {
   openSessionEventStream,
   rejectPending,
   resolveDesktopEvidenceArtifactPreviewUrl,
+  resumeTask,
   RunFocus,
   RunEntry,
   sendSessionMessage,
@@ -52,7 +87,9 @@ import {
   SkillSummary,
   StatusPayload,
   StreamEvent,
+  stopTask,
   ToolSummary,
+  retryTask,
   type PendingApproval,
   type QueuePayload,
   type ScheduledPayload,
@@ -114,6 +151,7 @@ const DRAFTS_STORAGE_KEY = "ai-operator:drafts";
 const NEW_SESSION_DRAFT_KEY = "__new__";
 const TRANSCRIPT_BOTTOM_THRESHOLD = 120;
 const COMPOSER_MAX_HEIGHT = 180;
+const RECENT_SESSION_LIMIT = 6;
 
 const STREAM_EVENTS = [
   "stream.hello",
@@ -287,6 +325,50 @@ function sessionPreviewText(session: SessionSummary): string {
       180,
     ) || "Ready for a new request."
   );
+}
+
+function formatSessionStamp(value?: string): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function partitionSessionsForSidebar(
+  sessions: SessionSummary[],
+  selectedSessionId: string,
+  limit = RECENT_SESSION_LIMIT,
+): { recent: SessionSummary[]; history: SessionSummary[] } {
+  const ordered = sessions.slice();
+  if (!ordered.length) {
+    return { recent: [], history: [] };
+  }
+  const selectedIndex = ordered.findIndex((session) => session.session_id === selectedSessionId);
+  const recent = ordered.slice(0, limit);
+
+  if (selectedIndex >= limit) {
+    const selected = ordered[selectedIndex];
+    const promoted = [selected, ...recent.slice(0, Math.max(limit - 1, 0))];
+    const promotedIds = new Set(promoted.map((session) => session.session_id));
+    return {
+      recent: promoted,
+      history: ordered.filter((session) => !promotedIds.has(session.session_id)),
+    };
+  }
+
+  const recentIds = new Set(recent.map((session) => session.session_id));
+  return {
+    recent,
+    history: ordered.filter((session) => !recentIds.has(session.session_id)),
+  };
 }
 
 function desktopRuntimeLabel(runtimeStatus?: DesktopRuntimeStatus | null): string {
@@ -687,147 +769,85 @@ function proposalLabel(proposal?: DesktopTargetProposal | null): string {
   );
 }
 
-function UiIcon({
-  name,
-  className,
-}: {
-  name:
-    | "brand"
-    | "menu"
-    | "refresh"
-    | "theme-light"
-    | "theme-dark"
-    | "new"
-    | "chat"
-    | "approval"
-    | "task"
-    | "alert"
-    | "activity"
-    | "evidence"
-    | "details";
-  className?: string;
-}) {
-  const common = {
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.8,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    className: clsx("ui-icon", className),
-    "aria-hidden": true,
-  };
+type IconName =
+  | "brand"
+  | "menu"
+  | "refresh"
+  | "theme-light"
+  | "theme-dark"
+  | "new"
+  | "chat"
+  | "approval"
+  | "task"
+  | "alert"
+  | "activity"
+  | "evidence"
+  | "details"
+  | "history"
+  | "tools"
+  | "gmail"
+  | "desktop"
+  | "run"
+  | "stop"
+  | "handoff"
+  | "commit"
+  | "search";
 
-  switch (name) {
-    case "brand":
-      return (
-        <svg {...common}>
-          <path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z" />
-          <path d="M8.5 10.5 12 8l3.5 2.5v3L12 16l-3.5-2.5v-3Z" />
-        </svg>
-      );
-    case "menu":
-      return (
-        <svg {...common}>
-          <path d="M5 7h14" />
-          <path d="M5 12h14" />
-          <path d="M5 17h14" />
-        </svg>
-      );
-    case "refresh":
-      return (
-        <svg {...common}>
-          <path d="M20 11a8 8 0 1 0 2 5.5" />
-          <path d="M20 4v7h-7" />
-        </svg>
-      );
-    case "theme-light":
-      return (
-        <svg {...common}>
-          <circle cx="12" cy="12" r="4" />
-          <path d="M12 2.5v2.5" />
-          <path d="M12 19v2.5" />
-          <path d="m4.9 4.9 1.8 1.8" />
-          <path d="m17.3 17.3 1.8 1.8" />
-          <path d="M2.5 12H5" />
-          <path d="M19 12h2.5" />
-          <path d="m4.9 19.1 1.8-1.8" />
-          <path d="m17.3 6.7 1.8-1.8" />
-        </svg>
-      );
-    case "theme-dark":
-      return (
-        <svg {...common}>
-          <path d="M20 14.3A7.5 7.5 0 0 1 9.7 4 8.5 8.5 0 1 0 20 14.3Z" />
-        </svg>
-      );
-    case "new":
-      return (
-        <svg {...common}>
-          <path d="M12 5v14" />
-          <path d="M5 12h14" />
-        </svg>
-      );
-    case "chat":
-      return (
-        <svg {...common}>
-          <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5v-6Z" />
-        </svg>
-      );
-    case "approval":
-      return (
-        <svg {...common}>
-          <path d="M12 3 6 5.8v5.4c0 4 2.6 7.7 6 9 3.4-1.3 6-5 6-9V5.8L12 3Z" />
-          <path d="m9.5 12 1.8 1.8 3.2-3.6" />
-        </svg>
-      );
-    case "task":
-      return (
-        <svg {...common}>
-          <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" />
-        </svg>
-      );
-    case "alert":
-      return (
-        <svg {...common}>
-          <path d="M12 4a4 4 0 0 0-4 4v2.6c0 .7-.2 1.4-.6 2L6 15h12l-1.4-2.4a4 4 0 0 1-.6-2V8a4 4 0 0 0-4-4Z" />
-          <path d="M10 18a2 2 0 0 0 4 0" />
-        </svg>
-      );
-    case "activity":
-      return (
-        <svg {...common}>
-          <path d="M3 12h4l2-5 4 10 2-5h6" />
-        </svg>
-      );
-    case "evidence":
-      return (
-        <svg {...common}>
-          <rect x="4" y="5" width="16" height="14" rx="2.5" />
-          <path d="m8 14 2.5-2.5 2 2 2.5-3 3 3.5" />
-          <circle cx="9" cy="9.5" r="1" />
-        </svg>
-      );
-    case "details":
-      return (
-        <svg {...common}>
-          <rect x="4" y="5" width="16" height="14" rx="2.5" />
-          <path d="M10 9h6" />
-          <path d="M10 12h6" />
-          <path d="M10 15h4" />
-          <path d="M7.5 9h.01" />
-          <path d="M7.5 12h.01" />
-          <path d="M7.5 15h.01" />
-        </svg>
-      );
+const ICONS = {
+  brand: Bot,
+  menu: Menu,
+  refresh: RefreshCw,
+  "theme-light": SunMedium,
+  "theme-dark": MoonStar,
+  new: SquarePen,
+  chat: MessagesSquare,
+  approval: ShieldCheck,
+  task: Workflow,
+  alert: BellRing,
+  activity: Activity,
+  evidence: ImageIcon,
+  details: PanelRightOpen,
+  history: History,
+  tools: Command,
+  gmail: Mail,
+  desktop: MonitorSmartphone,
+  run: Play,
+  stop: Square,
+  handoff: GitBranchPlus,
+  commit: GitCommitHorizontal,
+  search: Search,
+} satisfies Record<IconName, LucideIcon>;
+
+function UiIcon({ name, className }: { name: IconName; className?: string }) {
+  const Icon = ICONS[name];
+  return <Icon aria-hidden className={clsx("ui-icon", className)} strokeWidth={1.85} />;
+}
+
+function StatusGlyph({ status, className }: { status?: string; className?: string }) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "running" || normalized === "queued") {
+    return <LoaderCircle aria-hidden className={clsx("status-glyph", "is-running", className)} strokeWidth={1.9} />;
   }
+  if (normalized === "paused" || normalized === "needs_attention") {
+    return <PauseCircle aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
+  }
+  if (normalized === "completed") {
+    return <CheckCircle2 aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
+  }
+  if (normalized === "failed" || normalized === "blocked" || normalized === "stopped" || normalized === "incomplete") {
+    return <AlertTriangle aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
+  }
+  if (normalized === "idle") {
+    return <Clock3 aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
+  }
+  return <CircleDot aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
 }
 
 function SectionTitle({
   icon,
   children,
 }: {
-  icon: Parameters<typeof UiIcon>[0]["name"];
+  icon: IconName;
   children: React.ReactNode;
 }) {
   return (
@@ -856,7 +876,7 @@ function CompactMenu({
   children,
 }: {
   label: string;
-  icon: Parameters<typeof UiIcon>[0]["name"];
+  icon: IconName;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -955,7 +975,7 @@ function CompactMenuButton({
   children,
   onClick,
 }: {
-  icon: Parameters<typeof UiIcon>[0]["name"];
+  icon: IconName;
   children: React.ReactNode;
   onClick: () => void;
 }) {
@@ -1364,6 +1384,107 @@ function MessageBubble({ message }: { message: SessionMessage }) {
   );
 }
 
+type TranscriptItem =
+  | { type: "message"; key: string; message: SessionMessage }
+  | { type: "activity-group"; key: string; messages: SessionMessage[] };
+
+function activityClusterTitle(message: SessionMessage): string {
+  const kind = String(message.kind || "").toLowerCase();
+  if (kind === "approval_needed") {
+    return "Approval checkpoint";
+  }
+  if (kind === "approval") {
+    return "Approval update";
+  }
+  if (kind === "status") {
+    return String(message.status || "Operator activity").trim() || "Operator activity";
+  }
+  return "Operator activity";
+}
+
+function activityClusterTone(message: SessionMessage): ActivityTone {
+  const kind = String(message.kind || "").toLowerCase();
+  if (kind === "approval_needed") {
+    return "warning";
+  }
+  return statusTone(message.status);
+}
+
+function buildTranscriptItems(messages: SessionMessage[]): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let activityBuffer: SessionMessage[] = [];
+
+  function flushActivityBuffer() {
+    if (!activityBuffer.length) {
+      return;
+    }
+    const first = activityBuffer[0];
+    const last = activityBuffer[activityBuffer.length - 1];
+    items.push({
+      type: "activity-group",
+      key: `activity:${messageStableKey(first)}:${messageStableKey(last)}:${activityBuffer.length}`,
+      messages: activityBuffer,
+    });
+    activityBuffer = [];
+  }
+
+  messages.forEach((message) => {
+    if (messageDisplayKind(message) === "activity") {
+      activityBuffer.push(message);
+      return;
+    }
+    flushActivityBuffer();
+    items.push({
+      type: "message",
+      key: messageStableKey(message),
+      message,
+    });
+  });
+
+  flushActivityBuffer();
+  return items;
+}
+
+function ActivityCluster({ messages }: { messages: SessionMessage[] }) {
+  const [expanded, setExpanded] = useState(messages.length <= 3);
+  const hiddenCount = Math.max(0, messages.length - 3);
+  const visibleMessages = expanded ? messages : messages.slice(-3);
+  const latest = messages[messages.length - 1];
+
+  return (
+    <section className="activity-cluster">
+      <div className="activity-cluster-header">
+        <div className="activity-cluster-title">
+          <StatusGlyph className={clsx(`tone-${activityClusterTone(latest)}`)} status={latest.status || latest.kind} />
+          <span>{messages.length > 1 ? `${messages.length} operator updates` : activityClusterTitle(latest)}</span>
+        </div>
+        <div className="activity-cluster-meta">
+          {hiddenCount > 0 ? (
+            <button className="ghost-button activity-cluster-toggle" onClick={() => setExpanded((current) => !current)} type="button">
+              {expanded ? "Collapse" : `Show ${hiddenCount} earlier`}
+            </button>
+          ) : null}
+          <span className="mini-list-time">{formatTime(latest.created_at)}</span>
+        </div>
+      </div>
+      <div className="activity-cluster-list">
+        {visibleMessages.map((message) => (
+          <article
+            key={`${messageStableKey(message)}:${message.created_at || ""}`}
+            className={clsx("activity-cluster-item", `tone-${activityClusterTone(message)}`)}
+          >
+            <div className="activity-cluster-item-header">
+              <span className="activity-cluster-item-title">{activityClusterTitle(message)}</span>
+              {message.created_at ? <span className="mini-list-time">{formatTime(message.created_at)}</span> : null}
+            </div>
+            <p className="activity-cluster-item-detail">{plainTextPreview(message.content || message.status || "Operator activity", 240)}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 const MemoMessageBubble = React.memo(
   MessageBubble,
   (previous, next) =>
@@ -1601,9 +1722,11 @@ export default function App() {
     extensions: [],
   });
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
+  const [taskActionBusy, setTaskActionBusy] = useState<"" | "run" | "stop" | "handoff" | "commit">("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(SLASH_COMMANDS);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
@@ -2262,6 +2385,8 @@ export default function App() {
   }, [apiBaseUrl, selectedSessionId, bootState]);
 
   const filteredSessions = sessions.filter((session) => sessionMatchesQuery(session, deferredQuery));
+  const { recent: recentSessions, history: historicalSessions } = partitionSessionsForSidebar(filteredSessions, selectedSessionId);
+  const showHistorySection = Boolean(historyOpen || deferredQuery.trim());
 
   const pendingApproval = sessionDetail?.pending_approval?.kind
     ? sessionDetail.pending_approval
@@ -2311,6 +2436,7 @@ export default function App() {
   const title = sessionDetail?.title || "New conversation";
   const showConversationSkeleton = loadingConversation && !messages.length;
   const emptyState = !messages.length && !loadingConversation;
+  const transcriptItems = buildTranscriptItems(messages);
   const slashCommandHint = activeCommandSuggestion
     ? `/${activeCommandSuggestion.command.name}${
         activeCommandSuggestion.command.argumentHint ? ` ${activeCommandSuggestion.command.argumentHint}` : ""
@@ -2333,6 +2459,30 @@ export default function App() {
       : pendingApproval?.kind
         ? "Add context or resolve the approval..."
         : "Message the operator...";
+  const emailService = infrastructure.email as Record<string, unknown> | undefined;
+  const emailConnected = Boolean(emailService && String(emailService.active || "").toLowerCase() === "connected");
+  const topbarPrimaryLabel =
+    String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
+    String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
+      ? taskActionBusy === "stop"
+        ? "Stopping..."
+        : "Stop"
+      : String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "paused" ||
+          String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "needs_attention"
+        ? taskActionBusy === "run"
+          ? "Resuming..."
+          : "Resume"
+        : ["completed", "failed", "blocked", "stopped", "incomplete"].includes(
+              String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase(),
+            )
+          ? taskActionBusy === "run"
+            ? "Retrying..."
+            : "Retry"
+          : draft.trim()
+            ? sending
+              ? "Running..."
+              : "Run"
+            : "Run";
 
   async function handleNewChat() {
     if (!apiBaseUrl) {
@@ -2681,6 +2831,74 @@ export default function App() {
     }
   }
 
+  function applyOperatorMutationResult(result: { session?: SessionDetail; status?: StatusPayload } | null | undefined) {
+    if (result?.session) {
+      const nextSession = result.session;
+      setSessionDetail((current) =>
+        current?.session_id === nextSession.session_id ? mergeSessionDetail(current, nextSession as SessionDetail) : nextSession,
+      );
+      setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
+      setSessions((current) => upsertSession(current, nextSession as SessionSummary));
+    }
+    if (result?.status) {
+      setStatus(result.status);
+    }
+  }
+
+  async function handlePrimaryTaskAction() {
+    if (!apiBaseUrl || !selectedSessionId || taskActionBusy) {
+      return;
+    }
+
+    const normalizedStatus = String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase();
+
+    if (normalizedStatus === "running" || normalizedStatus === "queued") {
+      setTaskActionBusy("stop");
+      try {
+        const result = await stopTask(apiBaseUrl, selectedSessionId);
+        applyOperatorMutationResult(result);
+        addLocalActivity("Run stopped", plainTextPreview(result.result?.message || "Stopped the active run.", 180), "warning");
+        scheduleConversationRefresh(selectedSessionId, { includeConversation: true, includeControls: true });
+      } finally {
+        setTaskActionBusy("");
+      }
+      return;
+    }
+
+    if (normalizedStatus === "paused" || normalizedStatus === "needs_attention") {
+      setTaskActionBusy("run");
+      try {
+        const result = await resumeTask(apiBaseUrl, selectedSessionId);
+        applyOperatorMutationResult(result);
+        addLocalActivity("Run resumed", plainTextPreview(result.result?.message || "Resumed the active run.", 180), "success");
+        scheduleConversationRefresh(selectedSessionId, { includeConversation: true, includeControls: true });
+      } finally {
+        setTaskActionBusy("");
+      }
+      return;
+    }
+
+    if (["completed", "failed", "blocked", "stopped", "incomplete"].includes(normalizedStatus)) {
+      setTaskActionBusy("run");
+      try {
+        const result = await retryTask(apiBaseUrl, selectedSessionId);
+        applyOperatorMutationResult(result);
+        addLocalActivity("Run retried", plainTextPreview(result.result?.message || "Started a retry for this run.", 180), "info");
+        scheduleConversationRefresh(selectedSessionId, { includeConversation: true, includeControls: true });
+      } finally {
+        setTaskActionBusy("");
+      }
+      return;
+    }
+
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+    if (draft.trim()) {
+      await handleSendMessage();
+      return;
+    }
+    addLocalActivity("Ready to run", "Focus is back in the composer. Add a message or use a slash command to start.", "info");
+  }
+
   async function handleViewEvidenceArtifact(preview: EvidenceSummary | null | undefined, sourceLabel: string) {
     if (!apiBaseUrl || !preview?.evidence_id) {
       return;
@@ -2759,99 +2977,17 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-top">
-          <div className="sidebar-brand">
-            <div className="brand-mark">
-              <UiIcon name="brand" />
-            </div>
-            <div>
-              <div className="eyebrow">AI Operator</div>
-              <h1>Local operator</h1>
-              <p className="sidebar-subtitle">Chat-first desktop control surface</p>
-            </div>
-          </div>
-          <div className="sidebar-actions">
-            <button className="sidebar-primary-button" onClick={() => void handleNewChat()} disabled={sending} type="button">
-              <UiIcon name="new" />
-              <span>New chat</span>
-            </button>
-            <CompactMenu label="Workspace" icon="menu">
-              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
-                {detailsOpen ? "Hide details" : "Show details"}
-              </CompactMenuButton>
-              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
-                {bootState === "ready" ? "Refresh data" : "Retry startup"}
-              </CompactMenuButton>
-              <CompactMenuButton
-                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
-                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
-              >
-                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
-              </CompactMenuButton>
-            </CompactMenu>
-          </div>
-        </div>
-
-        <label className="search-box">
-          <span className="search-box-label">
-            <SectionTitle icon="chat">Conversations</SectionTitle>
-          </span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter title, status, summary..."
-          />
-        </label>
-
-        <div className="session-list">
-          {filteredSessions.map((session) => (
-            <button
-              key={session.session_id}
-              className={clsx("session-card", session.session_id === selectedSessionId && "is-selected")}
-              onClick={() => startTransition(() => setSelectedSessionId(session.session_id))}
-            >
-              <div className="session-card-header">
-                <span className="session-title">{session.title || "Untitled conversation"}</span>
-                <span className={clsx("status-pill", `tone-${statusTone(session.status)}`)}>{session.status || "idle"}</span>
+          <div className="sidebar-header">
+            <div className="sidebar-brand">
+              <div className="brand-mark">
+                <UiIcon name="brand" />
               </div>
-              <p className="session-preview">{sessionPreviewText(session)}</p>
-              <div className="session-card-footer">
-                <span>{formatDateTime(session.updated_at) || "Just now"}</span>
-                {session.pending_approval?.kind ? <span className="approval-dot">Needs approval</span> : <span>{session.message_count || 0} msgs</span>}
+              <div>
+                <div className="eyebrow">AI Operator</div>
+                <h1>Local operator</h1>
+                <p className="sidebar-subtitle">Chat-first desktop control surface</p>
               </div>
-            </button>
-          ))}
-          {!filteredSessions.length ? <div className="empty-sidebar">No conversations match this filter.</div> : null}
-        </div>
-      </aside>
-
-      <main className="chat-layout">
-        <header className="chat-header">
-          <div className="chat-header-main">
-            <div className="chat-title-row">
-              <h2>{title}</h2>
-              <span className={clsx("status-pill", `tone-${statusTone(sessionDetail?.status || status?.status)}`)}>
-                {sessionDetail?.status || status?.status || "idle"}
-              </span>
             </div>
-            <p className="chat-subtitle">
-              {pendingApproval?.kind
-                ? plainTextPreview(approvalSummary(pendingApproval), 220)
-                : plainTextPreview(
-                    activeTask?.last_message || status?.current_step || sessionDetail?.summary || "Start a conversation or continue an existing task.",
-                    220,
-                  )}
-            </p>
-            <div className="chat-meta-row">
-              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
-              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
-              {runPhase !== "idle" ? <span className="meta-pill">Phase {runPhase.replace(/_/g, " ")}</span> : null}
-              {runFocusLocked ? <span className="meta-pill">Run focus locked</span> : null}
-              {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
-              {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
-              <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
-            </div>
-          </div>
-          <div className="chat-header-actions">
             <CompactMenu label="View" icon="menu">
               <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
                 {detailsOpen ? "Hide details" : "Show details"}
@@ -2866,6 +3002,194 @@ export default function App() {
                 {themeMode === "light" ? "Use dark theme" : "Use light theme"}
               </CompactMenuButton>
             </CompactMenu>
+          </div>
+          <div className="sidebar-actions">
+            <button className="sidebar-primary-button sidebar-primary-button-wide" onClick={() => void handleNewChat()} disabled={sending} type="button">
+              <UiIcon name="new" />
+              <span>New chat</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="sidebar-main">
+          <label className="search-box search-box-compact">
+            <span className="search-box-label">
+              <UiIcon name="search" />
+              <span>Search conversations</span>
+            </span>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Filter title, summary, status..."
+            />
+          </label>
+
+          <section className="sidebar-section">
+            <div className="sidebar-section-header">
+              <SectionTitle icon="chat">Recent</SectionTitle>
+              <span className="muted-label">{recentSessions.length}</span>
+            </div>
+            <div className="session-list session-list-recent">
+              {recentSessions.map((session) => (
+                <button
+                  key={session.session_id}
+                  className={clsx("session-row", session.session_id === selectedSessionId && "is-selected")}
+                  onClick={() => startTransition(() => setSelectedSessionId(session.session_id))}
+                  type="button"
+                >
+                  <div className="session-row-main">
+                    <div className="session-row-titleline">
+                      <StatusGlyph status={session.status} />
+                      <span className="session-row-title">{session.title || "Untitled conversation"}</span>
+                    </div>
+                    <span className="session-row-time">{formatSessionStamp(session.updated_at)}</span>
+                  </div>
+                  <div className="session-row-preview">{sessionPreviewText(session)}</div>
+                  <div className="session-row-meta">
+                    {session.pending_approval?.kind ? <span className="session-row-flag">Approval</span> : null}
+                    <span>{session.message_count || 0} msgs</span>
+                  </div>
+                </button>
+              ))}
+              {!recentSessions.length ? <div className="empty-sidebar">No recent conversations match this filter.</div> : null}
+            </div>
+          </section>
+
+          <section className="sidebar-section">
+            <div className="sidebar-section-header">
+              <SectionTitle icon="history">History</SectionTitle>
+              <button
+                className="ghost-button sidebar-inline-button"
+                onClick={() => setHistoryOpen((current) => !current)}
+                type="button"
+              >
+                {showHistorySection ? "Hide" : `View all${historicalSessions.length ? ` (${historicalSessions.length})` : ""}`}
+              </button>
+            </div>
+            {showHistorySection ? (
+              <div className="session-list session-list-history">
+                {historicalSessions.length ? (
+                  historicalSessions.map((session) => (
+                    <button
+                      key={session.session_id}
+                      className={clsx("session-row is-history", session.session_id === selectedSessionId && "is-selected")}
+                      onClick={() => startTransition(() => setSelectedSessionId(session.session_id))}
+                      type="button"
+                    >
+                      <div className="session-row-main">
+                        <div className="session-row-titleline">
+                          <StatusGlyph status={session.status} />
+                          <span className="session-row-title">{session.title || "Untitled conversation"}</span>
+                        </div>
+                        <span className="session-row-time">{formatSessionStamp(session.updated_at)}</span>
+                      </div>
+                      <div className="session-row-preview">{sessionPreviewText(session)}</div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-sidebar">No older conversations to show right now.</div>
+                )}
+              </div>
+            ) : (
+              <p className="secondary-copy sidebar-section-copy">Keep the sidebar focused on the latest work, and expand history only when you need it.</p>
+            )}
+          </section>
+
+          <section className="sidebar-section sidebar-capability-section">
+            <div className="sidebar-section-header">
+              <SectionTitle icon="tools">Workspace</SectionTitle>
+              <span className="muted-label">{controlData.tools.length}</span>
+            </div>
+            <div className="sidebar-capability-list">
+              <span className="sidebar-capability-chip">
+                <UiIcon name="desktop" />
+                <span>{desktopRuntimeLabel(desktopRuntimeStatus) || "Desktop runtime"}</span>
+              </span>
+              <span className="sidebar-capability-chip">
+                <UiIcon name="gmail" />
+                <span>{emailConnected ? "Gmail connected" : "Gmail ready"}</span>
+              </span>
+              <span className="sidebar-capability-chip">
+                <UiIcon name="tools" />
+                <span>{controlData.tools.length} tools</span>
+              </span>
+              <span className="sidebar-capability-chip">
+                <UiIcon name="chat" />
+                <span>{slashCommands.length} commands</span>
+              </span>
+            </div>
+          </section>
+        </div>
+      </aside>
+
+      <main className="chat-layout">
+        <header className="chat-header">
+          <div className="chat-header-main">
+            <div className="chat-header-kicker">
+              <span className="eyebrow">Current task</span>
+              <span className={clsx("connection-pill", `stream-${streamState}`)}>{streamNote}</span>
+            </div>
+            <div className="chat-title-row">
+              <div className="chat-title-stack">
+                <div className="chat-title-line">
+                  <StatusGlyph status={sessionDetail?.status || status?.status} />
+                  <h2>{title}</h2>
+                  <span className={clsx("status-pill", `tone-${statusTone(sessionDetail?.status || status?.status)}`)}>
+                    {sessionDetail?.status || status?.status || "idle"}
+                  </span>
+                </div>
+                <p className="chat-subtitle">
+                  {pendingApproval?.kind
+                    ? plainTextPreview(approvalSummary(pendingApproval), 220)
+                    : plainTextPreview(
+                        activeTask?.last_message || status?.current_step || sessionDetail?.summary || "Start a conversation or continue an existing task.",
+                        220,
+                      )}
+                </p>
+              </div>
+            </div>
+            <div className="chat-meta-row">
+              {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
+              {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
+              {runPhase !== "idle" ? <span className="meta-pill">Phase {runPhase.replace(/_/g, " ")}</span> : null}
+              {runFocusLocked ? <span className="meta-pill">Run focus locked</span> : null}
+              {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
+              {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
+            </div>
+          </div>
+          <div className="chat-header-actions">
+            <button
+              className="send-button topbar-primary-action"
+              onClick={() => void handlePrimaryTaskAction()}
+              disabled={bootState !== "ready" || Boolean(taskActionBusy) || Boolean(pendingApproval?.kind && approving)}
+              type="button"
+            >
+              <UiIcon
+                name={
+                  String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
+                  String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
+                    ? "stop"
+                    : "run"
+                }
+              />
+              <span>{topbarPrimaryLabel}</span>
+            </button>
+            <button className="ghost-button topbar-action" onClick={() => void handleRefresh()} type="button">
+              <UiIcon name="refresh" />
+              <span>{bootState === "ready" ? "Refresh" : "Retry"}</span>
+            </button>
+            <button className="ghost-button topbar-action" disabled title="Future handoff flow" type="button">
+              <UiIcon name="handoff" />
+              <span>Handoff</span>
+            </button>
+            <button className="ghost-button topbar-action" disabled title="Future commit flow" type="button">
+              <UiIcon name="commit" />
+              <span>Commit</span>
+            </button>
+            <button className="ghost-button topbar-action" onClick={() => setDetailsOpen((current) => !current)} type="button">
+              <UiIcon name="details" />
+              <span>{detailsOpen ? "Hide context" : "Context"}</span>
+            </button>
           </div>
         </header>
 
@@ -2919,12 +3243,13 @@ export default function App() {
             </div>
           ) : (
             <div className="transcript" onScroll={handleTranscriptScroll} ref={transcriptRef}>
-              {messages.map((message) => (
-                <MemoMessageBubble
-                  key={messageStableKey(message)}
-                  message={message}
-                />
-              ))}
+              {transcriptItems.map((item) =>
+                item.type === "activity-group" ? (
+                  <ActivityCluster key={item.key} messages={item.messages} />
+                ) : (
+                  <MemoMessageBubble key={item.key} message={item.message} />
+                ),
+              )}
             </div>
           )}
           {!emptyState && !loadingConversation && !isNearTranscriptBottom ? (
@@ -3014,7 +3339,23 @@ export default function App() {
             </div>
           ) : null}
           <div className="composer-footer">
-            <span className="composer-hint">{composerHint}</span>
+            <div className="composer-footer-main">
+              <span className="composer-hint">{composerHint}</span>
+              <div className="composer-capability-row">
+                <span className="composer-capability-pill">
+                  <UiIcon name="tools" />
+                  Slash commands
+                </span>
+                <span className="composer-capability-pill">
+                  <UiIcon name="desktop" />
+                  Desktop evidence
+                </span>
+                <span className="composer-capability-pill">
+                  <UiIcon name="gmail" />
+                  Gmail
+                </span>
+              </div>
+            </div>
             <button className="send-button" onClick={() => void handleSendMessage()} disabled={bootState !== "ready" || sending || !draft.trim()}>
               {sending ? "Sending..." : bootState !== "ready" ? "Unavailable" : "Send"}
             </button>
@@ -3023,7 +3364,7 @@ export default function App() {
       </main>
 
       <aside className="right-rail">
-        <section className="rail-card">
+        <section className="rail-card rail-card-approval">
           <div className="rail-card-header">
             <h3><SectionTitle icon="approval">Approval</SectionTitle></h3>
             {pendingApproval?.kind ? <span className="approval-dot">Needed</span> : <span className="muted-label">Clear</span>}
@@ -3032,6 +3373,22 @@ export default function App() {
             <>
               <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
               <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
+              {pendingApproval?.target || pendingApproval?.step ? (
+                <div className="approval-context-grid">
+                  {pendingApproval.target ? (
+                    <div className="inspector-stat">
+                      <span className="stat-label">Target</span>
+                      <p>{plainTextPreview(String(pendingApproval.target), 96)}</p>
+                    </div>
+                  ) : null}
+                  {pendingApproval.step ? (
+                    <div className="inspector-stat">
+                      <span className="stat-label">Step</span>
+                      <p>{plainTextPreview(String(pendingApproval.step), 96)}</p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <EvidencePreviewCard
                 title="Linked evidence"
                 preview={pendingApprovalEvidence}
@@ -3065,38 +3422,21 @@ export default function App() {
               {activeTask?.status || status?.status || "idle"}
             </span>
           </div>
-          <div className="stat-stack">
-            <div>
+          <div className="stat-stack stat-stack-compact">
+            <div className="inspector-stat">
               <span className="stat-label">Current step</span>
               <p>{plainTextPreview(status?.current_step || activeTask?.last_message || "Waiting for your next request.", 140)}</p>
             </div>
-            <div>
+            <div className="inspector-stat">
               <span className="stat-label">Workflow</span>
               <p>{plainTextPreview(status?.browser?.workflow_name || status?.browser?.task_name || "No browser workflow active.", 120)}</p>
             </div>
-            <div>
+            <div className="inspector-stat">
               <span className="stat-label">Page</span>
               <p>{plainTextPreview(status?.browser?.current_title || status?.browser?.current_url || "No live browser page.", 140)}</p>
             </div>
           </div>
-          <div className="rail-evidence-stack">
-            <EvidencePreviewCard
-              title="Selected evidence"
-              preview={selectedDesktopEvidence}
-              onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
-              artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
-              emptyText="No desktop evidence is selected for the current task."
-            />
-            {distinctCheckpointEvidence ? (
-              <EvidencePreviewCard
-                title="Checkpoint evidence"
-                preview={distinctCheckpointEvidence}
-                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
-                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
-              />
-            ) : null}
-          </div>
-          <div className="mini-list">
+          <div className="mini-list inspector-mini-list">
             <article className={clsx("mini-list-item", `tone-${proposalTone(activeTargetProposalContext?.state)}`)}>
               <div className="mini-list-title">
                 Target proposals
@@ -3133,36 +3473,78 @@ export default function App() {
 
         <section className="rail-card">
           <div className="rail-card-header">
-            <h3><SectionTitle icon="alert">Recent alerts</SectionTitle></h3>
-            <span className="muted-label">{alerts.length}</span>
+            <h3><SectionTitle icon="evidence">Evidence</SectionTitle></h3>
+            <span className="muted-label">{controlData.desktopEvidence.length}</span>
           </div>
-          <div className="mini-list">
-            {alerts.slice(0, 4).map((alert) => (
-              <article key={alert.alert_id || `${alert.created_at}:${alert.title}`} className={clsx("mini-list-item", `tone-${statusTone(alert.severity)}`)}>
-                <div className="mini-list-title">{plainTextPreview(alert.title || alert.type || "Alert", 52)}</div>
-                <div className="mini-list-detail">{plainTextPreview(alert.message || "Operator alert", 120)}</div>
-              </article>
-            ))}
-            {!alerts.length ? <p className="secondary-copy">No recent alerts for this conversation.</p> : null}
+          <div className="rail-evidence-stack rail-evidence-stack-tight">
+            <EvidencePreviewCard
+              title="Selected evidence"
+              preview={selectedDesktopEvidence}
+              onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+              artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
+              emptyText="No desktop evidence is selected for the current task."
+            />
+            {distinctCheckpointEvidence ? (
+              <EvidencePreviewCard
+                title="Checkpoint evidence"
+                preview={distinctCheckpointEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+              />
+            ) : null}
+            <div className="mini-list inspector-mini-list">
+              {controlData.desktopEvidence.slice(0, 3).map((item) => (
+                <article
+                  key={item.evidence_id || item.timestamp || item.summary}
+                  className={clsx("mini-list-item", item.is_partial ? "tone-warning" : "tone-neutral")}
+                >
+                  <div className="mini-list-title">
+                    {plainTextPreview(item.active_window_title || item.summary || "Evidence", 46)}
+                    <span className="mini-list-time">{formatTime(item.timestamp)}</span>
+                  </div>
+                  <div className="mini-list-detail">{plainTextPreview(evidenceSummaryText(item), 120)}</div>
+                </article>
+              ))}
+            </div>
           </div>
         </section>
 
         <section className="rail-card rail-card-grow">
           <div className="rail-card-header">
-            <h3><SectionTitle icon="activity">Live activity</SectionTitle></h3>
-            <span className="muted-label">{activity.length}</span>
+            <h3><SectionTitle icon="tools">Context</SectionTitle></h3>
+            <button className="ghost-button sidebar-inline-button" onClick={() => setDetailsOpen(true)} type="button">
+              Open details
+            </button>
           </div>
-          <div className="mini-list">
-            {activity.slice(0, 8).map((entry) => (
-              <article key={entry.id} className={clsx("mini-list-item", `tone-${entry.tone}`)}>
-                <div className="mini-list-title">
-                  {plainTextPreview(entry.label, 48)}
-                  <span className="mini-list-time">{formatTime(entry.timestamp)}</span>
-                </div>
-                <div className="mini-list-detail">{plainTextPreview(entry.detail, 140)}</div>
-              </article>
-            ))}
-            {!activity.length ? <p className="secondary-copy">Live operator activity will appear here.</p> : null}
+          <div className="context-inspector-grid">
+            <article className="mini-list-item tone-info">
+              <div className="mini-list-title">
+                Runtime
+                <span className="mini-list-time">{plainTextPreview(status?.runtime?.reasoning_effort || "default", 18)}</span>
+              </div>
+              <div className="mini-list-detail">{plainTextPreview(status?.runtime?.active_model || "Runtime metadata not loaded yet.", 120)}</div>
+            </article>
+            <article className={clsx("mini-list-item", emailConnected ? "tone-success" : "tone-neutral")}>
+              <div className="mini-list-title">
+                Gmail
+                <span className="mini-list-time">{emailConnected ? "connected" : "ready"}</span>
+              </div>
+              <div className="mini-list-detail">{plainTextPreview(backendServiceDetail(emailService), 120)}</div>
+            </article>
+            <article className="mini-list-item tone-neutral">
+              <div className="mini-list-title">
+                Tools
+                <span className="mini-list-time">{controlData.tools.length}</span>
+              </div>
+              <div className="mini-list-detail">Slash commands, desktop controls, runtime tools, and Gmail are available from chat.</div>
+            </article>
+            <article className="mini-list-item tone-neutral">
+              <div className="mini-list-title">
+                Extensions
+                <span className="mini-list-time">{controlData.extensions.length}</span>
+              </div>
+              <div className="mini-list-detail">{plainTextPreview(controlData.extensions[0]?.description || "Local extensions appear here when loaded.", 120)}</div>
+            </article>
           </div>
         </section>
       </aside>
@@ -3293,6 +3675,44 @@ export default function App() {
                     </article>
                   ))}
                   {!(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No active watches.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Recent alerts</h4>
+                  <span className="muted-label">{alerts.length}</span>
+                </div>
+                <div className="mini-list">
+                  {alerts.slice(0, 8).map((alert) => (
+                    <article key={alert.alert_id || `${alert.created_at}:${alert.title}`} className={clsx("mini-list-item", `tone-${statusTone(alert.severity)}`)}>
+                      <div className="mini-list-title">
+                        {plainTextPreview(alert.title || alert.type || "Alert", 48)}
+                        <span className="mini-list-time">{formatTime(alert.created_at)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(alert.message || "Operator alert", 150)}</div>
+                    </article>
+                  ))}
+                  {!alerts.length ? <p className="secondary-copy">No recent alerts for this conversation.</p> : null}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Live activity</h4>
+                  <span className="muted-label">{activity.length}</span>
+                </div>
+                <div className="mini-list">
+                  {activity.slice(0, 12).map((entry) => (
+                    <article key={entry.id} className={clsx("mini-list-item", `tone-${entry.tone}`)}>
+                      <div className="mini-list-title">
+                        {plainTextPreview(entry.label, 48)}
+                        <span className="mini-list-time">{formatTime(entry.timestamp)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(entry.detail, 160)}</div>
+                    </article>
+                  ))}
+                  {!activity.length ? <p className="secondary-copy">Live operator activity will appear here.</p> : null}
                 </div>
               </section>
 
@@ -3462,13 +3882,28 @@ export default function App() {
                     <p>{artifactViewer.error || artifactStateMessage(artifactViewer.artifact)}</p>
                   </div>
                 )}
+                <section className="artifact-metadata-card">
+                  <div className="artifact-metadata-header">
+                    <span className="evidence-preview-title">Artifact metadata</span>
+                    {artifactViewer.artifact?.summary ? (
+                      <span className="muted-label">{plainTextPreview(artifactViewer.artifact.summary, 60)}</span>
+                    ) : null}
+                  </div>
+                  <div className="artifact-metadata-chips">
+                    {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
+                    {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
+                    {artifactViewer.artifact?.artifact_type ? <span className="evidence-chip">{artifactViewer.artifact.artifact_type}</span> : null}
+                    {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
+                  </div>
+                  <p className="artifact-metadata-copy">{plainTextPreview(artifactStateMessage(artifactViewer.artifact), 220) || "Metadata is available for this retained artifact."}</p>
+                </section>
               </div>
 
               <footer className="artifact-viewer-footer">
-                {artifactViewer.artifact?.evidence_id ? <span className="evidence-reference">Ref {artifactViewer.artifact.evidence_id}</span> : null}
-                {artifactViewer.artifact?.artifact_name ? <span className="evidence-chip evidence-chip-soft">{artifactViewer.artifact.artifact_name}</span> : null}
-                {artifactViewer.artifact?.artifact_type ? <span className="evidence-chip">{artifactViewer.artifact.artifact_type}</span> : null}
-                {artifactViewer.artifact?.availability_state ? <span className="evidence-chip">{artifactViewer.artifact.availability_state}</span> : null}
+                <span className="secondary-copy">Retained artifacts stay attached to their desktop evidence reference.</span>
+                <button className="ghost-button" onClick={closeArtifactViewer} type="button">
+                  Close
+                </button>
               </footer>
             </section>
           </div>
