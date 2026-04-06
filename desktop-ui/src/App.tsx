@@ -4416,129 +4416,131 @@ export default function App() {
             </div>
           </section>
 
-          <section className="sidebar-section">
-            <div className="sidebar-section-header">
-              <SectionTitle icon="history">History</SectionTitle>
-              <button
-                className="ghost-button sidebar-inline-button"
-                onClick={() => setHistoryOpen((current) => !current)}
-                type="button"
-              >
-                {showHistorySection ? "Hide" : `View all${historicalSessions.length ? ` (${historicalSessions.length})` : ""}`}
-              </button>
-            </div>
-            {showHistorySection ? (
-              <div className="session-list session-list-history">
-                {historicalSessions.length ? (
-                  historicalSessions.map((session) => (
-                    <button
-                      key={session.session_id}
-                      className={clsx("session-row is-history", session.session_id === selectedSessionId && "is-selected")}
-                      onClick={() => startTransition(() => setSelectedSessionId(session.session_id))}
-                      type="button"
-                    >
-                      <div className="session-row-main">
-                        <div className="session-row-titleline">
-                          <StatusGlyph status={session.status} />
-                          <span className="session-row-title">{session.title || "Untitled conversation"}</span>
+          <div className="sidebar-bottom">
+            <section className="sidebar-section">
+              <div className="sidebar-section-header">
+                <SectionTitle icon="history">History</SectionTitle>
+                <button
+                  className="ghost-button sidebar-inline-button"
+                  onClick={() => setHistoryOpen((current) => !current)}
+                  type="button"
+                >
+                  {showHistorySection ? "Hide" : `View all${historicalSessions.length ? ` (${historicalSessions.length})` : ""}`}
+                </button>
+              </div>
+              {showHistorySection ? (
+                <div className="session-list session-list-history">
+                  {historicalSessions.length ? (
+                    historicalSessions.map((session) => (
+                      <button
+                        key={session.session_id}
+                        className={clsx("session-row is-history", session.session_id === selectedSessionId && "is-selected")}
+                        onClick={() => startTransition(() => setSelectedSessionId(session.session_id))}
+                        type="button"
+                      >
+                        <div className="session-row-main">
+                          <div className="session-row-titleline">
+                            <StatusGlyph status={session.status} />
+                            <span className="session-row-title">{session.title || "Untitled conversation"}</span>
+                          </div>
+                          <span className="session-row-time">{formatSessionStamp(session.updated_at)}</span>
                         </div>
-                        <span className="session-row-time">{formatSessionStamp(session.updated_at)}</span>
-                      </div>
-                      <div className="session-row-preview">{sessionPreviewText(session)}</div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="empty-sidebar">No older conversations to show right now.</div>
-                )}
-              </div>
-            ) : (
-              <p className="secondary-copy sidebar-section-copy">Keep the sidebar focused on the latest work, and expand history only when you need it.</p>
-            )}
-          </section>
-
-          <section className="sidebar-section sidebar-capability-section">
-            <div className="sidebar-section-header">
-              <SectionTitle icon="tools">Workspace</SectionTitle>
-              <span className="muted-label">{activeSurface}</span>
-            </div>
-            <div className="workspace-nav">
-              {[
-                { id: "chat", label: "Chat", icon: "chat" as const, count: recentSessions.length },
-                {
-                  id: "automations",
-                  label: "Automations",
-                  icon: "automations" as const,
-                  count: automationCounts.scheduled + automationCounts.watch + automationCounts.queue,
-                },
-                { id: "gmail", label: "Gmail", icon: "gmail" as const, count: emailConnected ? emailThreads.length || 0 : 0 },
-                { id: "workflows", label: "Workflows", icon: "workflows" as const, count: availableSkills.length + availableExtensions.length },
-                { id: "runs", label: "Runs", icon: "history" as const, count: controlData.recentRuns.length },
-              ].map((surface) => (
-                <button
-                  key={surface.id}
-                  className={clsx("workspace-nav-button", activeSurface === surface.id && "is-active")}
-                  onClick={() => setActiveSurface(surface.id as WorkspaceSurface)}
-                  type="button"
-                >
-                  <span className="workspace-nav-button-main">
-                    <UiIcon name={surface.icon} />
-                    <span>{surface.label}</span>
-                  </span>
-                  <span className="workspace-nav-button-count">{surface.count}</span>
-                </button>
-              ))}
-            </div>
-            <div className="sidebar-capability-list">
-              <span className="sidebar-capability-chip">
-                <UiIcon name="desktop" />
-                <span>{desktopRuntimeLabel(desktopRuntimeStatus) || "Desktop runtime"}</span>
-              </span>
-              <span className="sidebar-capability-chip">
-                <UiIcon name="gmail" />
-                <span>{emailConnected ? "Gmail connected" : "Gmail ready"}</span>
-              </span>
-            </div>
-          </section>
-
-          <section className="sidebar-section sidebar-capability-section sidebar-section-experimental">
-            <div className="sidebar-section-header">
-              <SectionTitle icon="lab">Experimental</SectionTitle>
-              <button className="ghost-button sidebar-inline-button" onClick={() => setExperimentalOpen((current) => !current)} type="button">
-                {experimentalOpen || activeSurface === "lab" ? "Hide" : "Open"}
-              </button>
-            </div>
-            {experimentalOpen || activeSurface === "lab" ? (
-              <div className="workspace-nav experimental-nav">
-                <button
-                  className={clsx("workspace-nav-button", activeSurface === "lab" && "is-active")}
-                  onClick={() => {
-                    setExperimentalOpen(true);
-                    setActiveSurface("lab");
-                  }}
-                  type="button"
-                >
-                  <span className="workspace-nav-button-main">
-                    <UiIcon name="lab" />
-                    <span>Lab shell</span>
-                  </span>
-                  <span className="workspace-nav-button-count">
-                    {labStatus?.armed ? "armed" : "off"}
-                  </span>
-                </button>
-                <div className="sidebar-capability-list">
-                  <span className="sidebar-capability-chip sidebar-capability-chip-warning">
-                    <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.85} />
-                    <span>Explicit opt-in required</span>
-                  </span>
+                        <div className="session-row-preview">{sessionPreviewText(session)}</div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-sidebar">No older conversations to show right now.</div>
+                  )}
                 </div>
-                <p className="secondary-copy sidebar-section-copy">
-                  Disposable workspace, fail-closed policy, and approval-gated shell execution.
-                </p>
+              ) : (
+                <p className="secondary-copy sidebar-section-copy">Keep the sidebar focused on the latest work, and expand history only when you need it.</p>
+              )}
+            </section>
+
+            <section className="sidebar-section sidebar-capability-section">
+              <div className="sidebar-section-header">
+                <SectionTitle icon="tools">Workspace</SectionTitle>
+                <span className="muted-label">{activeSurface}</span>
               </div>
-            ) : (
-              <p className="secondary-copy sidebar-section-copy">Keep the lab lane tucked away until you explicitly need experimental shell access.</p>
-            )}
-          </section>
+              <div className="workspace-nav">
+                {[
+                  { id: "chat", label: "Chat", icon: "chat" as const, count: recentSessions.length },
+                  {
+                    id: "automations",
+                    label: "Automations",
+                    icon: "automations" as const,
+                    count: automationCounts.scheduled + automationCounts.watch + automationCounts.queue,
+                  },
+                  { id: "gmail", label: "Gmail", icon: "gmail" as const, count: emailConnected ? emailThreads.length || 0 : 0 },
+                  { id: "workflows", label: "Workflows", icon: "workflows" as const, count: availableSkills.length + availableExtensions.length },
+                  { id: "runs", label: "Runs", icon: "history" as const, count: controlData.recentRuns.length },
+                ].map((surface) => (
+                  <button
+                    key={surface.id}
+                    className={clsx("workspace-nav-button", activeSurface === surface.id && "is-active")}
+                    onClick={() => setActiveSurface(surface.id as WorkspaceSurface)}
+                    type="button"
+                  >
+                    <span className="workspace-nav-button-main">
+                      <UiIcon name={surface.icon} />
+                      <span>{surface.label}</span>
+                    </span>
+                    <span className="workspace-nav-button-count">{surface.count}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="sidebar-capability-list">
+                <span className="sidebar-capability-chip">
+                  <UiIcon name="desktop" />
+                  <span>{desktopRuntimeLabel(desktopRuntimeStatus) || "Desktop runtime"}</span>
+                </span>
+                <span className="sidebar-capability-chip">
+                  <UiIcon name="gmail" />
+                  <span>{emailConnected ? "Gmail connected" : "Gmail ready"}</span>
+                </span>
+              </div>
+            </section>
+
+            <section className="sidebar-section sidebar-capability-section sidebar-section-experimental">
+              <div className="sidebar-section-header">
+                <SectionTitle icon="lab">Experimental</SectionTitle>
+                <button className="ghost-button sidebar-inline-button" onClick={() => setExperimentalOpen((current) => !current)} type="button">
+                  {experimentalOpen || activeSurface === "lab" ? "Hide" : "Open"}
+                </button>
+              </div>
+              {experimentalOpen || activeSurface === "lab" ? (
+                <div className="workspace-nav experimental-nav">
+                  <button
+                    className={clsx("workspace-nav-button", activeSurface === "lab" && "is-active")}
+                    onClick={() => {
+                      setExperimentalOpen(true);
+                      setActiveSurface("lab");
+                    }}
+                    type="button"
+                  >
+                    <span className="workspace-nav-button-main">
+                      <UiIcon name="lab" />
+                      <span>Lab shell</span>
+                    </span>
+                    <span className="workspace-nav-button-count">
+                      {labStatus?.armed ? "armed" : "off"}
+                    </span>
+                  </button>
+                  <div className="sidebar-capability-list">
+                    <span className="sidebar-capability-chip sidebar-capability-chip-warning">
+                      <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.85} />
+                      <span>Explicit opt-in required</span>
+                    </span>
+                  </div>
+                  <p className="secondary-copy sidebar-section-copy">
+                    Disposable workspace, fail-closed policy, and approval-gated shell execution.
+                  </p>
+                </div>
+              ) : (
+                <p className="secondary-copy sidebar-section-copy">Keep the lab lane tucked away until you explicitly need experimental shell access.</p>
+              )}
+            </section>
+          </div>
         </div>
       </aside>
 

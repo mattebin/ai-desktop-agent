@@ -316,6 +316,19 @@ a {
   color: var(--muted);
 }
 
+.search-box-label,
+.section-title,
+.sidebar-primary-button,
+.workspace-nav-button-main {
+  min-width: 0;
+}
+
+.search-box-label > span:last-child,
+.section-title > span:last-child,
+.workspace-nav-button-main > span:last-child {
+  min-width: 0;
+}
+
 .search-box input,
 .composer-shell textarea {
   width: 100%;
@@ -1590,6 +1603,8 @@ body {
 
 .sidebar-main {
   flex: 1 1 auto;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .sidebar-brand {
@@ -1606,13 +1621,21 @@ body {
 }
 
 .sidebar-actions {
-  display: block;
+  display: flex;
+  width: 100%;
 }
 
 .sidebar-primary-button-wide {
   width: 100%;
   justify-content: center;
   min-height: 40px;
+}
+
+.sidebar-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 2px;
 }
 
 .sidebar-section {
@@ -1627,6 +1650,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .sidebar-inline-button {
@@ -1657,10 +1682,12 @@ body {
 
 .session-list-recent {
   gap: 6px;
+  max-height: clamp(220px, 34vh, 420px);
+  overflow-y: auto;
 }
 
 .session-list-history {
-  max-height: 240px;
+  max-height: clamp(120px, 20vh, 220px);
   gap: 6px;
 }
 
@@ -1764,7 +1791,7 @@ body {
 }
 
 .sidebar-capability-section {
-  margin-top: auto;
+  margin-top: 0;
 }
 
 .sidebar-capability-list {
@@ -2190,6 +2217,8 @@ body {
   align-items: center;
   justify-content: space-between;
   text-align: left;
+  gap: 10px;
+  min-width: 0;
 }
 
 .workspace-nav-button:hover,
@@ -2210,6 +2239,8 @@ body {
 .workspace-nav-button-count {
   font-size: 0.74rem;
   color: var(--muted-soft);
+  flex: 0 0 auto;
+  padding-left: 8px;
 }
 
 .surface-switcher {
@@ -2391,6 +2422,19 @@ body {
   gap: 10px;
 }
 
+.sidebar-main::-webkit-scrollbar,
+.session-list-recent::-webkit-scrollbar,
+.session-list-history::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sidebar-main::-webkit-scrollbar-thumb,
+.session-list-recent::-webkit-scrollbar-thumb,
+.session-list-history::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted-soft) 44%, transparent);
+  border-radius: 999px;
+}
+
 .sidebar-capability-chip-warning {
   border-color: rgba(245, 158, 11, 0.26);
   background: color-mix(in srgb, var(--surface-soft) 76%, rgba(245, 158, 11, 0.16));
@@ -2511,7 +2555,8 @@ html {
 }
 
 .sidebar-main {
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .icon-button {
