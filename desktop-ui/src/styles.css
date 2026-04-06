@@ -368,6 +368,10 @@ a {
   padding-right: 4px;
 }
 
+.sidebar .session-list {
+  flex: 0 0 auto;
+}
+
 .session-card {
   border: 1px solid transparent;
   background: var(--surface-muted);
@@ -1601,10 +1605,18 @@ body {
   min-height: 0;
 }
 
+.sidebar-top {
+  flex: 0 0 auto;
+}
+
 .sidebar-main {
   flex: 1 1 auto;
   overflow-y: auto;
   padding-right: 2px;
+}
+
+.sidebar-main > * {
+  flex: 0 0 auto;
 }
 
 .sidebar-brand {
@@ -1636,6 +1648,7 @@ body {
   flex-direction: column;
   gap: 12px;
   padding-top: 2px;
+  flex: 0 0 auto;
 }
 
 .sidebar-section {
@@ -1643,6 +1656,7 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  flex: 0 0 auto;
 }
 
 .sidebar-section-header {
@@ -1652,6 +1666,7 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   row-gap: 6px;
+  flex: 0 0 auto;
 }
 
 .sidebar-inline-button {
@@ -1661,6 +1676,7 @@ body {
 
 .sidebar-section-copy {
   font-size: 0.82rem;
+  display: block;
 }
 
 .search-box-compact {
@@ -1684,11 +1700,13 @@ body {
   gap: 6px;
   max-height: clamp(220px, 34vh, 420px);
   overflow-y: auto;
+  flex: 0 0 auto;
 }
 
 .session-list-history {
   max-height: clamp(120px, 20vh, 220px);
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .session-row {
@@ -1796,6 +1814,7 @@ body {
 
 .sidebar-capability-list {
   flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .sidebar-capability-chip,
@@ -2198,6 +2217,7 @@ body {
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .workspace-nav-button,
@@ -2420,6 +2440,7 @@ body {
 
 .experimental-nav {
   gap: 10px;
+  flex: 0 0 auto;
 }
 
 .sidebar-main::-webkit-scrollbar,
