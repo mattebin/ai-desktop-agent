@@ -2784,6 +2784,9 @@ class TaskState:
         email_draft = self._latest_pending_email_draft()
         lab_shell = self._latest_pending_lab_shell_result()
         applied_changes = self._collect_applied_changes(limit=2)
+        operator_intelligence = getattr(self, "_operator_intelligence_context", {})
+        if not isinstance(operator_intelligence, dict):
+            operator_intelligence = {}
         recent_notes = self._normalize_values(self.memory_notes[-6:], limit=6, text_limit=240)
         recovery_notes = self._normalize_values(
             list(browser_activity.get("recovery_notes", []))
@@ -2965,6 +2968,7 @@ class TaskState:
             "review_bundle": review_bundle,
             "pending_approval": pending_approval,
             "behavior": behavior,
+            "intelligence": operator_intelligence,
             "action_policy": behavior.get("action_policy", {}),
             "human_control": behavior.get("human_control", {}),
             "session_memory": session_memory,
@@ -3004,6 +3008,40 @@ class TaskState:
             lines.append(f"Task control reason: {task_control.get('reason', '')}")
         if task_control.get("replacement_goal"):
             lines.append(f"Replacement goal: {task_control.get('replacement_goal', '')}")
+
+        intelligence = control_snapshot.get("intelligence", {}) if isinstance(control_snapshot.get("intelligence", {}), dict) else {}
+        environment = intelligence.get("environment", {}) if isinstance(intelligence.get("environment", {}), dict) else {}
+        if environment:
+            lines.append(
+                "Environment: "
+                + ", ".join(
+                    filter(
+                        None,
+                        [
+                            str(environment.get("os", "")).strip(),
+                            f"profile={environment.get('execution_profile', '')}" if environment.get("execution_profile") else "",
+                            f"shells={','.join(environment.get('available_shells', []))}" if isinstance(environment.get("available_shells", []), list) and environment.get("available_shells", []) else "",
+                            "gmail=connected" if environment.get("gmail_authenticated") else ("gmail=available" if environment.get("gmail_enabled") else "gmail=off"),
+                            "lab=armed" if environment.get("lab_armed") else "lab=disarmed",
+                        ],
+                    )
+                )
+            )
+        last_outcome = intelligence.get("last_outcome", {}) if isinstance(intelligence.get("last_outcome", {}), dict) else {}
+        if last_outcome.get("status"):
+            lines.append(
+                f"Latest outcome: {last_outcome.get('status', '')} via {last_outcome.get('tool', '')}: {last_outcome.get('summary', '')}"
+            )
+        retry = intelligence.get("retry", {}) if isinstance(intelligence.get("retry", {}), dict) else {}
+        if retry.get("action") and retry.get("action") != "none":
+            lines.append(f"Retry policy: {retry.get('action', '')} ({retry.get('explanation', '')})")
+        memory_hints = intelligence.get("memory_hints", {}) if isinstance(intelligence.get("memory_hints", {}), dict) else {}
+        prefer = memory_hints.get("prefer", []) if isinstance(memory_hints.get("prefer", []), list) else []
+        avoid = memory_hints.get("avoid", []) if isinstance(memory_hints.get("avoid", []), list) else []
+        if prefer:
+            lines.append(f"What worked recently: {prefer[0].get('summary', '')}")
+        if avoid:
+            lines.append(f"Avoid repeating: {avoid[0].get('summary', '')}")
 
         if self.last_summary:
             lines.append(f"Rolling summary: {self.last_summary}")

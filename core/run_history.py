@@ -272,6 +272,43 @@ def _step_summary(step: Dict[str, Any], result: Dict[str, Any]) -> str:
     return _trim_text(message, limit=220)
 
 
+def _evaluation_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    evaluation = result.get("evaluation", {}) if isinstance(result.get("evaluation", {}), dict) else {}
+    retry = evaluation.get("retry", {}) if isinstance(evaluation.get("retry", {}), dict) else {}
+    payload = {
+        "domain": _trim_text(evaluation.get("domain", ""), limit=40),
+        "status": _trim_text(evaluation.get("status", ""), limit=40),
+        "reason": _trim_text(evaluation.get("reason", ""), limit=80),
+        "summary": _trim_text(evaluation.get("summary", ""), limit=220),
+        "confidence": _trim_text(evaluation.get("confidence", ""), limit=20),
+        "progress_made": bool(evaluation.get("progress_made", False)),
+        "expected_change": _trim_text(evaluation.get("expected_change", ""), limit=140),
+        "observed_change": _trim_text(evaluation.get("observed_change", ""), limit=140),
+        "attempt_number": _safe_int(evaluation.get("attempt_number", 0)),
+        "action_signature": _trim_text(evaluation.get("action_signature", ""), limit=220),
+        "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=220),
+        "retry": {
+            "action": _trim_text(retry.get("action", ""), limit=40),
+            "attempt_number": _safe_int(retry.get("attempt_number", 0)),
+            "max_attempts": _safe_int(retry.get("max_attempts", 0)),
+            "exhausted": bool(retry.get("exhausted", False)),
+            "stop_run": bool(retry.get("stop_run", False)),
+            "explanation": _trim_text(retry.get("explanation", ""), limit=220),
+        },
+    }
+    filtered: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if value in ("", None, 0, False):
+            continue
+        if isinstance(value, dict):
+            nested = {nested_key: nested_value for nested_key, nested_value in value.items() if nested_value not in ("", None, 0, False)}
+            if nested:
+                filtered[key] = nested
+            continue
+        filtered[key] = value
+    return filtered
+
+
 def _step_entry(step: Dict[str, Any], *, index: int) -> Dict[str, Any]:
     result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
     tool_name = str(step.get("tool", step.get("type", "unknown"))).strip() or "unknown"
@@ -299,6 +336,10 @@ def _step_entry(step: Dict[str, Any], *, index: int) -> Dict[str, Any]:
     lab_shell = _lab_shell_payload(result)
     if lab_shell:
         entry["lab_shell"] = lab_shell
+
+    evaluation = _evaluation_payload(result)
+    if evaluation:
+        entry["evaluation"] = evaluation
 
     message = _trim_text(step.get("message", ""), limit=220)
     if message:
@@ -333,6 +374,16 @@ def _end_state(task_state) -> Dict[str, Any]:
         "desktop_outcome_reason": _trim_text(desktop_outcome.get("reason", ""), limit=60),
         "desktop_outcome_status": _trim_text(desktop_outcome.get("status", ""), limit=40),
     }
+    intelligence = control_snapshot.get("intelligence", {}) if isinstance(control_snapshot.get("intelligence", {}), dict) else {}
+    last_outcome = intelligence.get("last_outcome", {}) if isinstance(intelligence.get("last_outcome", {}), dict) else {}
+    retry = intelligence.get("retry", {}) if isinstance(intelligence.get("retry", {}), dict) else {}
+    if last_outcome:
+        payload["last_outcome_status"] = _trim_text(last_outcome.get("status", ""), limit=40)
+        payload["last_outcome_reason"] = _trim_text(last_outcome.get("reason", ""), limit=80)
+        payload["last_outcome_summary"] = _trim_text(last_outcome.get("summary", ""), limit=220)
+    if retry:
+        payload["retry_action"] = _trim_text(retry.get("action", ""), limit=40)
+        payload["retry_exhausted"] = bool(retry.get("exhausted", False))
     return {
         key: value
         for key, value in payload.items()

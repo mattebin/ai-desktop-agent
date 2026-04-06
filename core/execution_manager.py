@@ -26,6 +26,12 @@ from core.capability_profiles import (
     profile_metadata,
 )
 from core.lab_shell import execute_lab_command, lab_status_snapshot
+from core.operator_intelligence import (
+    apply_outcome_evaluation,
+    build_environment_awareness,
+    capture_action_context,
+    refresh_operator_intelligence_context,
+)
 from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID
 from core.state import MAX_TASK_GOAL_CHARS, MAX_TASK_REPLACEMENT_GOAL_CHARS, TaskState
@@ -2681,6 +2687,20 @@ class ExecutionManager:
             )
             state.set_execution_profile(SANDBOXED_FULL_ACCESS_LAB_PROFILE)
             state.status = "running"
+            setattr(state, "_operator_memory_store", self.agent.operator_memory_store)
+            environment_awareness = build_environment_awareness(
+                settings={**self.agent.settings, "_settings_version": getattr(self.agent, "_settings_version", "")},
+                email_status=self.agent.get_email_status(),
+                execution_profile=SANDBOXED_FULL_ACCESS_LAB_PROFILE,
+                lab_armed=self._lab_armed,
+            )
+            setattr(
+                state,
+                "_environment_awareness",
+                environment_awareness,
+            )
+            self.agent.operator_memory_store.remember_environment(environment_awareness)
+            refresh_operator_intelligence_context(state)
             self.agent.save_task_state(state, state_scope_id=scope_id)
             self._set_current_state_locked(state)
             live_task["status"] = "running"
@@ -2690,6 +2710,7 @@ class ExecutionManager:
             self._active_task_id = live_task.get("task_id", "")
             self._persist_all_locked()
 
+            before_context = capture_action_context(state, "lab_run_shell", {"command": command_text, "shell_kind": shell_kind})
             lab_result = execute_lab_command(
                 command_text,
                 shell_kind=shell_kind,
@@ -2713,6 +2734,7 @@ class ExecutionManager:
                     "recorded_at": _iso_timestamp(),
                 }
             )
+            apply_outcome_evaluation(state, "lab_run_shell", args_payload, lab_result, before_context=before_context)
             state.update_memory_from_tool("lab_run_shell", lab_result)
             state.add_note(state.summarize_result_for_memory("lab_run_shell", lab_result))
             self._refresh_summary(state)
@@ -4041,6 +4063,12 @@ class ExecutionManager:
                 result_message = self._last_result_message or snapshot.get("rolling_summary", "")
             snapshot["result_message"] = result_message
             snapshot["runtime"] = self.agent.get_runtime_config()
+            get_environment_awareness = getattr(self.agent, "get_environment_awareness", None)
+            if isinstance(snapshot.get("runtime", {}), dict) and callable(get_environment_awareness):
+                snapshot["runtime"]["environment_awareness"] = get_environment_awareness(
+                    execution_profile=str(snapshot.get("execution_profile", "")).strip(),
+                    lab_armed=self._lab_armed,
+                )
             snapshot["queue"] = queue_snapshot
             snapshot["active_task"] = queue_snapshot.get("active_task", {})
             snapshot["queued_tasks"] = queue_snapshot.get("queued_tasks", [])

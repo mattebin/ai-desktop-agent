@@ -8,6 +8,12 @@ from core.config import get_settings_snapshot, load_settings
 from core.email_service import get_email_service
 from core.llm_client import HostedLLMClient
 from core.loop import run_task_loop
+from core.operator_intelligence import (
+    DEFAULT_OPERATOR_MEMORY_PATH,
+    OperatorMemoryStore,
+    build_environment_awareness,
+    refresh_operator_intelligence_context,
+)
 from core.run_history import DEFAULT_RUN_HISTORY_PATH, RunHistoryStore
 from core.session_store import DEFAULT_SESSION_STATE_PATH, DEFAULT_STATE_SCOPE_ID, SessionStore
 from core.state import TaskState
@@ -28,6 +34,8 @@ class Agent:
         run_history_path = self.settings.get("run_history_path", DEFAULT_RUN_HISTORY_PATH)
         max_runs = int(self.settings.get("max_run_history_entries", 25))
         self.history_store = RunHistoryStore(run_history_path, max_runs=max_runs)
+        operator_memory_path = self.settings.get("operator_memory_path", str(DEFAULT_OPERATOR_MEMORY_PATH))
+        self.operator_memory_store = OperatorMemoryStore(operator_memory_path)
 
     def refresh_runtime_settings_if_needed(self, *, force: bool = False) -> bool:
         settings_snapshot = get_settings_snapshot(force=force)
@@ -60,11 +68,23 @@ class Agent:
         }
         runtime["tool_policy"] = self.tools.tool_policy_snapshot()
         runtime["email"] = self.email.status_snapshot()
+        runtime["environment_awareness"] = self.get_environment_awareness()
         runtime["capability_profiles"] = {
             SAFE_BOUNDED_PROFILE: profile_metadata(SAFE_BOUNDED_PROFILE, settings=self.settings),
             SANDBOXED_FULL_ACCESS_LAB_PROFILE: profile_metadata(SANDBOXED_FULL_ACCESS_LAB_PROFILE, settings=self.settings),
         }
         return runtime
+
+    def get_environment_awareness(self, *, execution_profile: str = "", lab_armed: bool = False) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        settings_with_version = dict(self.settings)
+        settings_with_version["_settings_version"] = self._settings_version
+        return build_environment_awareness(
+            settings=settings_with_version,
+            email_status=self.email.status_snapshot(),
+            execution_profile=execution_profile,
+            lab_armed=lab_armed,
+        )
 
     def get_email_status(self) -> Dict[str, Any]:
         self.refresh_runtime_settings_if_needed()
@@ -139,6 +159,15 @@ class Agent:
             state_scope_id=normalized_scope_id,
         )
         state.state_scope_id = normalized_scope_id
+        setattr(state, "_operator_memory_store", self.operator_memory_store)
+        environment_awareness = self.get_environment_awareness(execution_profile=getattr(state, "execution_profile", ""))
+        setattr(
+            state,
+            "_environment_awareness",
+            environment_awareness,
+        )
+        self.operator_memory_store.remember_environment(environment_awareness)
+        refresh_operator_intelligence_context(state)
 
         if requested_goal:
             state.goal = requested_goal
@@ -205,6 +234,17 @@ class Agent:
         state.state_scope_id = normalized_scope_id
         step_start_index = len(state.steps) if history_start_index is None else max(0, int(history_start_index))
         started_at = time.time()
+        setattr(state, "_operator_memory_store", self.operator_memory_store)
+        environment_awareness = self.get_environment_awareness(
+            execution_profile=getattr(state, "execution_profile", ""),
+            lab_armed=bool(getattr(self, "_lab_armed", False)),
+        )
+        setattr(
+            state,
+            "_environment_awareness",
+            environment_awareness,
+        )
+        self.operator_memory_store.remember_environment(environment_awareness)
         self.session_store.save(state, scope_id=normalized_scope_id)
         if callable(progress_callback):
             try:

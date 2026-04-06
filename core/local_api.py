@@ -1073,32 +1073,44 @@ class LocalOperatorApiServer:
 
                 if path == "/approval/approve":
                     session_id, state_scope_id = self._session_filters(body=body)
-                    before_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                    before_snapshot = (
+                        server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                        if session_id
+                        else None
+                    )
                     result = server_ref.controller.approve_pending(session_id=session_id, state_scope_id=state_scope_id)
+                    after_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
                     session_update = server_ref.chat_manager.record_approval_action(
                         True,
                         result,
                         session_id=session_id,
                         before_snapshot=before_snapshot,
+                        after_snapshot=after_snapshot,
                     )
                     if result.get("ok"):
-                        self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)), "session": session_update.get("session", {})})
+                        self._respond_ok({"result": result, "status": _status_payload(after_snapshot), "session": session_update.get("session", {})})
                     else:
                         self._respond_error(400, result.get("message", "Unable to approve pending action."))
                     return
 
                 if path == "/approval/reject":
                     session_id, state_scope_id = self._session_filters(body=body)
-                    before_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                    before_snapshot = (
+                        server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                        if session_id
+                        else None
+                    )
                     result = server_ref.controller.reject_pending(session_id=session_id, state_scope_id=state_scope_id)
+                    after_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
                     session_update = server_ref.chat_manager.record_approval_action(
                         False,
                         result,
                         session_id=session_id,
                         before_snapshot=before_snapshot,
+                        after_snapshot=after_snapshot,
                     )
                     if result.get("ok"):
-                        self._respond_ok({"result": result, "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)), "session": session_update.get("session", {})})
+                        self._respond_ok({"result": result, "status": _status_payload(after_snapshot), "session": session_update.get("session", {})})
                     else:
                         self._respond_error(400, result.get("message", "Unable to reject pending action."))
                     return
@@ -1114,14 +1126,20 @@ class LocalOperatorApiServer:
                     )
                     if execution.get("kind") == "operator_request":
                         action = str(execution.get("action", "")).strip()
-                        before_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                        before_snapshot = (
+                            server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
+                            if session_id
+                            else None
+                        )
                         if action == "approve":
                             result = server_ref.controller.approve_pending(session_id=session_id, state_scope_id=state_scope_id)
+                            after_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
                             session_update = server_ref.chat_manager.record_approval_action(
                                 True,
                                 result,
                                 session_id=session_id,
                                 before_snapshot=before_snapshot,
+                                after_snapshot=after_snapshot,
                             )
                             execution = {
                                 "kind": "operator_action",
@@ -1131,16 +1149,18 @@ class LocalOperatorApiServer:
                                 "tone": "success" if result.get("ok") else "warning",
                                 "clear_draft": True,
                                 "result": result,
-                                "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)),
+                                "status": _status_payload(after_snapshot),
                                 "session": session_update.get("session", {}),
                             }
                         elif action == "reject":
                             result = server_ref.controller.reject_pending(session_id=session_id, state_scope_id=state_scope_id)
+                            after_snapshot = server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)
                             session_update = server_ref.chat_manager.record_approval_action(
                                 False,
                                 result,
                                 session_id=session_id,
                                 before_snapshot=before_snapshot,
+                                after_snapshot=after_snapshot,
                             )
                             execution = {
                                 "kind": "operator_action",
@@ -1150,7 +1170,7 @@ class LocalOperatorApiServer:
                                 "tone": "warning",
                                 "clear_draft": True,
                                 "result": result,
-                                "status": _status_payload(server_ref.controller.get_snapshot(session_id=session_id, state_scope_id=state_scope_id)),
+                                "status": _status_payload(after_snapshot),
                                 "session": session_update.get("session", {}),
                             }
                     self._respond_ok({"execution": execution})

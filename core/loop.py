@@ -3,6 +3,12 @@
 import re
 import time
 
+from core.operator_intelligence import (
+    apply_outcome_evaluation,
+    capture_action_context,
+    guard_repeated_failed_action,
+    refresh_operator_intelligence_context,
+)
 from core.safety import stop_requested
 from core.tool_runtime import ToolRuntime
 
@@ -284,7 +290,7 @@ def _finalize_control_request(llm, task_state, request, *, session_store=None, p
     }
 
 
-def _record_tool_result(task_state, tool_name, args, result):
+def _record_tool_result(task_state, tool_name, args, result, *, before_context=None):
     step_status = "paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed")
     target_proposals = _desktop_active_target_proposals(task_state) if tool_name.startswith("desktop_") else {}
     step = {
@@ -297,6 +303,7 @@ def _record_tool_result(task_state, tool_name, args, result):
         "target_proposals": target_proposals if isinstance(target_proposals, dict) else {},
     }
     task_state.add_step(step)
+    apply_outcome_evaluation(task_state, tool_name, args, result, before_context=before_context)
     task_state.update_memory_from_tool(tool_name, result)
     task_state.add_note(task_state.summarize_result_for_memory(tool_name, result))
 
@@ -324,6 +331,47 @@ def _finalize_guarded_completion(llm, task_state, note: str, *, tool_name="", ar
     return {
         "ok": True,
         "status": "completed",
+        "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
+        "steps": task_state.steps,
+    }
+
+
+def _maybe_finalize_operator_retry_stop(
+    llm,
+    task_state,
+    tool_name: str,
+    result: dict,
+    *,
+    session_store=None,
+    progress_callback=None,
+):
+    evaluation = result.get("evaluation", {}) if isinstance(result.get("evaluation", {}), dict) else {}
+    retry = evaluation.get("retry", {}) if isinstance(evaluation.get("retry", {}), dict) else {}
+    if not bool(retry.get("stop_run", False)):
+        return None
+    if result.get("paused", False):
+        return None
+
+    summary = str(retry.get("explanation", "") or evaluation.get("summary", "") or result.get("summary", "") or result.get("error", "")).strip()
+    if not summary:
+        summary = f"Stopped after the latest {tool_name} outcome because the bounded retry budget is exhausted."
+    task_state.add_step(
+        {
+            "type": "system",
+            "status": "blocked",
+            "tool": "operator_intelligence",
+            "message": summary,
+        }
+    )
+    task_state.add_note(summary)
+    recent_notes = task_state.memory_notes[-6:]
+    if recent_notes:
+        task_state.set_summary(" | ".join(recent_notes))
+    task_state.status = "blocked" if str(evaluation.get("status", "")).strip() == "blocked" else "incomplete"
+    _persist_session_state(session_store, task_state)
+    return {
+        "ok": False,
+        "status": task_state.status,
         "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
         "steps": task_state.steps,
     }
@@ -593,6 +641,7 @@ def _execute_desktop_tool_step(
     session_store=None,
     progress_callback=None,
 ):
+    before_context = capture_action_context(task_state, tool_name, seed_args)
     args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
     guarded_result = _maybe_guard_desktop_action(tool_runtime, task_state, planner_goal, tool_name, args)
     if guarded_result is not None:
@@ -602,7 +651,7 @@ def _execute_desktop_tool_step(
             detail=f"Blocked bounded tool step before execution: {tool_name}.",
             tool_name=tool_name,
         )
-        _record_tool_result(task_state, tool_name, args, guarded_result)
+        _record_tool_result(task_state, tool_name, args, guarded_result, before_context=before_context)
         _emit_progress(
             progress_callback,
             "tool_result_recorded",
@@ -623,7 +672,7 @@ def _execute_desktop_tool_step(
         tool_name=tool_name,
     )
     result = tool_runtime.execute(tool_name, args)
-    _record_tool_result(task_state, tool_name, args, result)
+    _record_tool_result(task_state, tool_name, args, result, before_context=before_context)
     _emit_progress(
         progress_callback,
         "tool_result_recorded",
@@ -1457,8 +1506,9 @@ def _maybe_bootstrap_browser_open(tool_runtime, task_state, planner_goal: str, s
         return False
 
     args = tool_runtime.prepare_args("browser_open_page", {"url": goal_url}, task_state, planning_goal=planner_goal)
+    before_context = capture_action_context(task_state, "browser_open_page", args)
     result = tool_runtime.execute("browser_open_page", args)
-    _record_tool_result(task_state, "browser_open_page", args, result)
+    _record_tool_result(task_state, "browser_open_page", args, result, before_context=before_context)
     _persist_session_state(session_store, task_state)
     return True
 
@@ -1943,8 +1993,9 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         return None
 
     args = tool_runtime.prepare_args(tool_name, {}, task_state, planning_goal=planner_goal)
+    before_context = capture_action_context(task_state, tool_name, args)
     result = tool_runtime.execute(tool_name, args)
-    _record_tool_result(task_state, tool_name, args, result)
+    _record_tool_result(task_state, tool_name, args, result, before_context=before_context)
     _persist_session_state(session_store, task_state)
 
     if result.get("paused", False):
@@ -2006,6 +2057,7 @@ def run_task_loop(
     _emit_progress(progress_callback, "loop_entered", detail="Entered the bounded operator loop.")
 
     for _ in range(max_iterations):
+        refresh_operator_intelligence_context(task_state)
         if callable(control_callback):
             control_result = _finalize_control_request(
                 llm,
@@ -2159,14 +2211,19 @@ def run_task_loop(
                 progress_callback=progress_callback,
             )
         else:
+            generic_guard = guard_repeated_failed_action(task_state, tool_name, args)
+            before_context = capture_action_context(task_state, tool_name, args)
             _emit_progress(
                 progress_callback,
                 "tool_step_attempted",
                 detail=f"Attempting bounded tool step: {tool_name}.",
                 tool_name=tool_name,
             )
-            result = tool_runtime.execute(tool_name, args)
-            _record_tool_result(task_state, tool_name, args, result)
+            if generic_guard:
+                result = generic_guard
+            else:
+                result = tool_runtime.execute(tool_name, args)
+            _record_tool_result(task_state, tool_name, args, result, before_context=before_context)
             _emit_progress(
                 progress_callback,
                 "tool_result_recorded",
@@ -2174,6 +2231,16 @@ def run_task_loop(
                 tool_name=tool_name,
                 result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
             )
+        operator_retry_stop = _maybe_finalize_operator_retry_stop(
+            llm,
+            task_state,
+            tool_name,
+            result,
+            session_store=session_store,
+            progress_callback=progress_callback,
+        )
+        if operator_retry_stop is not None:
+            return operator_retry_stop
         if result.get("paused", False):
             if tool_name.startswith("desktop_"):
                 task_state.set_desktop_run_outcome(

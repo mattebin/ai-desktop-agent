@@ -334,7 +334,10 @@ class LocalOperatorApiEventStream:
             headers["Last-Event-ID"] = self.last_event_id
         request = Request(url=self.url, method="GET", headers=headers)
         try:
-            self._response = urlopen(request, timeout=self.timeout_seconds)
+            # SSE streams are long-lived and already self-regulate via heartbeats.
+            # A short socket read timeout makes healthy streams look broken when the
+            # server is busy bootstrapping an initial snapshot or between frames.
+            self._response = urlopen(request, timeout=max(60.0, self.timeout_seconds))
         except HTTPError as exc:
             raw_error = exc.read()
             message = "Local API event stream failed."

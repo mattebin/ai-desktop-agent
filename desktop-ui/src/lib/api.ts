@@ -137,6 +137,58 @@ export type RunFocus = {
   detail?: string;
 };
 
+export type OutcomeRetry = {
+  action?: string;
+  attempt_number?: number;
+  max_attempts?: number;
+  exhausted?: boolean;
+  stop_run?: boolean;
+  explanation?: string;
+};
+
+export type OutcomeEvaluation = {
+  domain?: string;
+  tool?: string;
+  status?: string;
+  reason?: string;
+  summary?: string;
+  confidence?: string;
+  progress_made?: boolean;
+  expected_change?: string;
+  observed_change?: string;
+  attempt_number?: number;
+  action_signature?: string;
+  target_signature?: string;
+  retry?: OutcomeRetry;
+};
+
+export type OperatorMemoryHint = {
+  tool?: string;
+  status?: string;
+  reason?: string;
+  summary?: string;
+  recorded_at?: string;
+  target_signature?: string;
+  retry_action?: string;
+};
+
+export type OperatorIntelligence = {
+  last_outcome?: OutcomeEvaluation;
+  recent_outcomes?: OutcomeEvaluation[];
+  retry?: OutcomeRetry;
+  memory_hints?: {
+    prefer?: OperatorMemoryHint[];
+    avoid?: OperatorMemoryHint[];
+  };
+  execution_memory?: {
+    attempted_actions?: number;
+    success_count?: number;
+    failure_count?: number;
+    recent_recoveries?: string[];
+  };
+  environment?: Record<string, unknown>;
+};
+
 export type BrowserState = {
   task_name?: string;
   task_step?: string;
@@ -234,6 +286,7 @@ export type RuntimeConfig = {
     notes?: string[];
   };
   email?: EmailStatusPayload;
+  environment_awareness?: Record<string, unknown>;
 };
 
 export type ToolPolicySummary = {
@@ -326,6 +379,7 @@ export type StatusPayload = {
   runtime?: RuntimeConfig;
   infrastructure?: Record<string, unknown>;
   desktop?: DesktopState;
+  intelligence?: OperatorIntelligence;
   execution_profile?: string;
   lab?: LabStatusPayload;
 };
@@ -425,6 +479,7 @@ export type RunStep = {
   browser_transition?: Record<string, unknown>;
   recovery?: Record<string, unknown>;
   lab_shell?: Record<string, unknown>;
+  evaluation?: OutcomeEvaluation;
 };
 
 export type RunDetail = RunEntry & {

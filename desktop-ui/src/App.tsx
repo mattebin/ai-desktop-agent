@@ -776,19 +776,27 @@ function sessionMatchesQuery(session: SessionSummary, query: string): boolean {
 
 function statusTone(status?: string): ActivityTone {
   const normalized = String(status || "").toLowerCase();
-  if (normalized === "completed") {
+  if (normalized === "completed" || normalized === "success" || normalized === "partial_success") {
     return "success";
   }
-  if (normalized === "paused" || normalized === "needs_attention") {
+  if (normalized === "paused" || normalized === "needs_attention" || normalized === "uncertain") {
     return "warning";
   }
-  if (normalized === "failed" || normalized === "blocked" || normalized === "stopped" || normalized === "incomplete") {
+  if (normalized === "failed" || normalized === "failure" || normalized === "blocked" || normalized === "stopped" || normalized === "incomplete" || normalized === "no_progress") {
     return "error";
   }
   if (normalized === "running" || normalized === "queued") {
     return "info";
   }
   return "neutral";
+}
+
+function outcomeLabel(status?: string): string {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) {
+    return "unknown";
+  }
+  return normalized.replace(/_/g, " ");
 }
 
 function approvalSummary(pending?: PendingApproval | null): string {
@@ -2872,6 +2880,16 @@ export default function App() {
   const selectedTargetProposalContext = status?.desktop?.selected_target_proposals || null;
   const checkpointTargetProposalContext = status?.desktop?.checkpoint_target_proposals || null;
   const runtimePolicy = status?.runtime?.tool_policy || null;
+  const operatorIntelligence = (status?.intelligence || {}) as StatusPayload["intelligence"];
+  const lastOutcome = (operatorIntelligence?.last_outcome || null) as NonNullable<StatusPayload["intelligence"]>["last_outcome"] | null;
+  const outcomeRetry = (operatorIntelligence?.retry || null) as NonNullable<StatusPayload["intelligence"]>["retry"] | null;
+  const preferredHints = Array.isArray(operatorIntelligence?.memory_hints?.prefer) ? operatorIntelligence?.memory_hints?.prefer || [] : [];
+  const avoidedHints = Array.isArray(operatorIntelligence?.memory_hints?.avoid) ? operatorIntelligence?.memory_hints?.avoid || [] : [];
+  const executionMemory = (operatorIntelligence?.execution_memory || {}) as NonNullable<StatusPayload["intelligence"]>["execution_memory"];
+  const environmentAwareness =
+    ((operatorIntelligence?.environment as Record<string, unknown> | undefined) ||
+      (status?.runtime?.environment_awareness as Record<string, unknown> | undefined) ||
+      {}) as Record<string, unknown>;
   const infrastructure = (status?.infrastructure || {}) as Record<string, unknown>;
   const infrastructureServices = [
     { key: "scheduler", label: "Scheduler", service: infrastructure.scheduler },
@@ -4245,6 +4263,14 @@ export default function App() {
                         <span className="mini-list-time">{plainTextPreview(step.status || "unknown", 18)}</span>
                       </div>
                       <p className="surface-list-copy">{plainTextPreview(step.result_summary || step.message || "Recorded lab shell step.", 220)}</p>
+                      {step.evaluation ? (
+                        <div className="surface-meta-row">
+                          <span className="evidence-chip">{plainTextPreview(outcomeLabel(step.evaluation.status), 20)}</span>
+                          {step.evaluation.retry?.action ? (
+                            <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.evaluation.retry.action || ""), 24)}</span>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </article>
                   ))}
                 </div>
@@ -4322,6 +4348,17 @@ export default function App() {
                         <div className="surface-meta-row">
                           <span className="evidence-chip">Approval</span>
                           <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.approval.status || step.approval.required || "checkpoint"), 32)}</span>
+                        </div>
+                      ) : null}
+                      {step.evaluation ? (
+                        <div className="surface-meta-row">
+                          <span className="evidence-chip">{plainTextPreview(outcomeLabel(step.evaluation.status), 20)}</span>
+                          {step.evaluation.observed_change ? (
+                            <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.evaluation.observed_change || ""), 28)}</span>
+                          ) : null}
+                          {step.evaluation.retry?.action ? (
+                            <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.evaluation.retry.action || ""), 24)}</span>
+                          ) : null}
                         </div>
                       ) : null}
                     </article>
@@ -4965,6 +5002,41 @@ export default function App() {
               </div>
             ) : (
               <div className="context-inspector-grid">
+                <article className={clsx("mini-list-item", `tone-${statusTone(lastOutcome?.status)}`)}>
+                  <div className="mini-list-title">
+                    Outcome
+                    <span className="mini-list-time">{plainTextPreview(outcomeLabel(lastOutcome?.status), 18)}</span>
+                  </div>
+                  <div className="mini-list-detail">
+                    {plainTextPreview(
+                      String(
+                        lastOutcome?.summary ||
+                          "The operator will record whether the latest action really worked, partially worked, or stayed uncertain.",
+                      ),
+                      140,
+                    )}
+                  </div>
+                  {lastOutcome?.observed_change ? (
+                    <div className="evidence-preview-meta">
+                      <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(lastOutcome.observed_change || ""), 28)}</span>
+                    </div>
+                  ) : null}
+                </article>
+                <article className={clsx("mini-list-item", outcomeRetry?.exhausted ? "tone-warning" : "tone-neutral")}>
+                  <div className="mini-list-title">
+                    Retry policy
+                    <span className="mini-list-time">{plainTextPreview(String(outcomeRetry?.action || "observe"), 18)}</span>
+                  </div>
+                  <div className="mini-list-detail">
+                    {plainTextPreview(
+                      String(
+                        outcomeRetry?.explanation ||
+                          "When results look uncertain or repeated failures stack up, the operator now stops, retries with variation, or asks for context instead of hammering the same move.",
+                      ),
+                      140,
+                    )}
+                  </div>
+                </article>
                 <article className="mini-list-item tone-info">
                   <div className="mini-list-title">
                     Runtime
@@ -4988,10 +5060,44 @@ export default function App() {
                 </article>
                 <article className="mini-list-item tone-neutral">
                   <div className="mini-list-title">
-                    Extensions
-                    <span className="mini-list-time">{controlData.extensions.length}</span>
+                    Memory
+                    <span className="mini-list-time">{executionMemory?.attempted_actions || 0}</span>
                   </div>
-                  <div className="mini-list-detail">{plainTextPreview(controlData.extensions[0]?.description || "Local extensions appear here when loaded.", 120)}</div>
+                  <div className="mini-list-detail">
+                    {plainTextPreview(
+                      String(
+                        preferredHints[0]?.summary ||
+                          avoidedHints[0]?.summary ||
+                          `Recent successes ${executionMemory?.success_count || 0}, failures ${executionMemory?.failure_count || 0}.`,
+                      ),
+                      140,
+                    )}
+                  </div>
+                  <div className="evidence-preview-meta">
+                    {preferredHints[0]?.tool ? <span className="evidence-chip evidence-chip-soft">Prefer {plainTextPreview(String(preferredHints[0].tool || ""), 20)}</span> : null}
+                    {avoidedHints[0]?.tool ? <span className="evidence-chip">Avoid {plainTextPreview(String(avoidedHints[0].tool || ""), 20)}</span> : null}
+                  </div>
+                </article>
+                <article className="mini-list-item tone-neutral">
+                  <div className="mini-list-title">
+                    Environment
+                    <span className="mini-list-time">{plainTextPreview(String(environmentAwareness.execution_profile || "bounded"), 18)}</span>
+                  </div>
+                  <div className="mini-list-detail">
+                    {plainTextPreview(
+                      [
+                        String(environmentAwareness.os || ""),
+                        Array.isArray(environmentAwareness.available_shells)
+                          ? String((environmentAwareness.available_shells as string[]).join(", "))
+                          : "",
+                        environmentAwareness.gmail_authenticated ? "Gmail connected" : environmentAwareness.gmail_enabled ? "Gmail available" : "",
+                        environmentAwareness.lab_armed ? "Lab armed" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" | ") || "Environment awareness is available for the current run.",
+                      140,
+                    )}
+                  </div>
                 </article>
               </div>
             )}

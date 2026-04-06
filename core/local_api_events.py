@@ -427,6 +427,9 @@ def _compact_infrastructure(infrastructure: Dict[str, Any] | None) -> Dict[str, 
 def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     latest_run = snapshot.get("latest_run", {}) if isinstance(snapshot.get("latest_run", {}), dict) else {}
+    intelligence = snapshot.get("intelligence", {}) if isinstance(snapshot.get("intelligence", {}), dict) else {}
+    last_outcome = intelligence.get("last_outcome", {}) if isinstance(intelligence.get("last_outcome", {}), dict) else {}
+    retry = intelligence.get("retry", {}) if isinstance(intelligence.get("retry", {}), dict) else {}
     return {
         "status": _trim_text(snapshot.get("status", "idle"), limit=40),
         "running": bool(snapshot.get("running", False)),
@@ -440,6 +443,18 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
         "pending_approval": _compact_pending(snapshot.get("pending_approval", {})),
         "browser": _compact_browser(snapshot.get("browser", {})),
         "desktop": _compact_desktop(snapshot.get("desktop", {})),
+        "intelligence": {
+            "last_outcome": {
+                "tool": _trim_text(last_outcome.get("tool", ""), limit=60),
+                "status": _trim_text(last_outcome.get("status", ""), limit=40),
+                "summary": _trim_text(last_outcome.get("summary", ""), limit=180),
+            },
+            "retry": {
+                "action": _trim_text(retry.get("action", ""), limit=40),
+                "exhausted": bool(retry.get("exhausted", False)),
+                "explanation": _trim_text(retry.get("explanation", ""), limit=180),
+            },
+        },
         "runtime": _compact_runtime(snapshot.get("runtime", {})),
         "infrastructure": _compact_infrastructure(snapshot.get("infrastructure", {})),
         "lifecycle": _compact_lifecycle(snapshot.get("lifecycle", {})),
@@ -622,6 +637,7 @@ class LocalApiEventStream:
             ),
             "browser": _json_fingerprint(snapshot.get("browser", {})),
             "desktop": _json_fingerprint(snapshot.get("desktop", {})),
+            "intelligence": _json_fingerprint(snapshot.get("intelligence", {})),
             "pending": _json_fingerprint(snapshot.get("pending_approval", {})),
             "runtime": _json_fingerprint(snapshot.get("runtime", {})),
             "infrastructure": _json_fingerprint(snapshot.get("infrastructure", {})),
@@ -914,6 +930,9 @@ class LocalApiEventStream:
         safe_session_id = _trim_text(session_id, limit=80)
         safe_scope_id = _trim_text(state_scope_id, limit=120)
         requested_last_event_id = _trim_text(last_event_id, limit=80)
+        replay_status = "fresh" if not requested_last_event_id else "pending"
+        replay_events: List[Dict[str, Any]] = []
+        state: Dict[str, Any] = {}
         with self._condition:
             channel = self._ensure_channel_locked(safe_session_id, safe_scope_id)
             primed_state: Dict[str, Any] | None = None
@@ -922,16 +941,9 @@ class LocalApiEventStream:
                     primed_state = self._prime_reconnect_messages_locked(channel)
                 except Exception:
                     primed_state = None
-            state = self._bootstrap_channel_locked(channel, state=primed_state if isinstance(primed_state, dict) and primed_state else None)
-            replay_status, replay_events = self._replay_after_locked(channel, requested_last_event_id)
             channel.subscribers += 1
-            current_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
-            last_seen_sequence = current_sequence
-            if replay_status == "ok":
-                parsed_sequence = self._event_sequence(requested_last_event_id, expected_channel_id=channel.channel_id)
-                last_seen_sequence = parsed_sequence or current_sequence
-                if replay_events:
-                    last_seen_sequence = self._event_sequence(replay_events[-1].get("event_id", ""), expected_channel_id=channel.channel_id)
+            channel.last_access_at = time.monotonic()
+            last_seen_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
 
         try:
             yield self._connection_event(
@@ -945,6 +957,23 @@ class LocalApiEventStream:
                     "replay_status": replay_status,
                 },
             )
+
+            with self._condition:
+                channel = self._channels.get(self._channel_key(safe_session_id, safe_scope_id))
+                if channel is None:
+                    channel = self._ensure_channel_locked(safe_session_id, safe_scope_id)
+                state = self._bootstrap_channel_locked(channel, state=primed_state if isinstance(primed_state, dict) and primed_state else None)
+                replay_status, replay_events = self._replay_after_locked(channel, requested_last_event_id)
+                current_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
+                last_seen_sequence = current_sequence
+                if replay_status == "ok":
+                    parsed_sequence = self._event_sequence(requested_last_event_id, expected_channel_id=channel.channel_id)
+                    last_seen_sequence = parsed_sequence or current_sequence
+                    if replay_events:
+                        last_seen_sequence = self._event_sequence(
+                            replay_events[-1].get("event_id", ""),
+                            expected_channel_id=channel.channel_id,
+                        )
 
             if replay_status == "ok":
                 for event in replay_events:

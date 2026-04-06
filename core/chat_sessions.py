@@ -1190,7 +1190,15 @@ class ChatSessionManager:
                 "reply_mode": route.get("mode", "operator"),
             }
 
-    def record_approval_action(self, approved: bool, result: Dict[str, Any], *, session_id: str = "", before_snapshot: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def record_approval_action(
+        self,
+        approved: bool,
+        result: Dict[str, Any],
+        *,
+        session_id: str = "",
+        before_snapshot: Dict[str, Any] | None = None,
+        after_snapshot: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             target_session = self._find_session_locked(session_id) if session_id else None
             if target_session is None and isinstance(before_snapshot, dict):
@@ -1213,7 +1221,11 @@ class ChatSessionManager:
                 content=result.get("message", "Approval action processed."),
                 status=_trim_text(result.get("status", ""), limit=40),
             )
-            snapshot = self.controller.get_snapshot(session_id=target_session.get("session_id", ""))
+            snapshot = (
+                after_snapshot
+                if isinstance(after_snapshot, dict) and after_snapshot
+                else self.controller.get_snapshot(session_id=target_session.get("session_id", ""))
+            )
             self._sync_session_locked(target_session, snapshot)
             self._persist_locked()
             return {
