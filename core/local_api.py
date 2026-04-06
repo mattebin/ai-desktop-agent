@@ -138,6 +138,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "run_focus": snapshot.get("run_focus", {}),
         "current_step": _trim_text(snapshot.get("current_step", ""), limit=140),
         "goal": _trim_text(snapshot.get("goal", ""), limit=240),
+        "execution_profile": _trim_text(snapshot.get("execution_profile", ""), limit=80),
         "result_status": _trim_text(snapshot.get("result_status", ""), limit=80),
         "result_message": _trim_text(snapshot.get("result_message", ""), limit=280),
         "mode": _trim_text(behavior.get("mode", ""), limit=80),
@@ -198,6 +199,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "latest_processes": [_compact_process_preview(item) for item in list(desktop.get("latest_processes", []))[:4] if isinstance(item, dict)],
             "recent_context_evidence": [_compact_evidence_payload(item) for item in list(desktop.get("recent_context_evidence", []))[:3] if isinstance(item, dict)],
         },
+        "lab": snapshot.get("lab", {}),
         "queue_counts": queue.get("counts", {}),
         "latest_alert": snapshot.get("latest_alert", {}),
         "latest_run": snapshot.get("latest_run", {}),
@@ -881,6 +883,11 @@ class LocalOperatorApiServer:
                     self._respond_ok(_watch_payload(server_ref.controller.get_watch_state()))
                     return
 
+                if path == "/lab/status":
+                    session_id, _state_scope_id = self._session_filters(parsed=parsed)
+                    self._respond_ok(server_ref.controller.get_lab_status(session_id=session_id))
+                    return
+
                 if path == "/desktop/evidence":
                     limit = self._query_limit(parsed, default=8, maximum=24)
                     self._respond_ok(_desktop_evidence_payload(limit=limit))
@@ -1147,6 +1154,38 @@ class LocalOperatorApiServer:
                                 "session": session_update.get("session", {}),
                             }
                     self._respond_ok({"execution": execution})
+                    return
+
+                if path == "/lab/arm":
+                    session_id, _state_scope_id = self._session_filters(body=body)
+                    result = server_ref.controller.arm_lab_mode(
+                        confirmation=str(body.get("confirmation", "")).strip(),
+                        session_id=session_id,
+                    )
+                    if result.get("ok"):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to arm lab mode."))
+                    return
+
+                if path == "/lab/disarm":
+                    session_id, _state_scope_id = self._session_filters(body=body)
+                    result = server_ref.controller.disarm_lab_mode(session_id=session_id)
+                    self._respond_ok(result)
+                    return
+
+                if path == "/lab/commands/run":
+                    session_id, _state_scope_id = self._session_filters(body=body)
+                    result = server_ref.controller.run_lab_command(
+                        str(body.get("command", "")).strip(),
+                        shell_kind=str(body.get("shell_kind", "powershell")).strip() or "powershell",
+                        approval_status=str(body.get("approval_status", "")).strip(),
+                        session_id=session_id,
+                    )
+                    if result.get("ok", False):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to run lab command."))
                     return
 
                 if path == "/email/connect":

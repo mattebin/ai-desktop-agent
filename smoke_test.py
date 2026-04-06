@@ -3646,7 +3646,10 @@ if (
     or 'data-theme="dark"' not in desktop_styles_source
 ):
     raise SystemExit("Desktop UI is missing the expected theme-toggle implementation.")
-if 'Model {runtimeModel}' not in desktop_app_source or 'Reasoning {runtimeEffortLabel}' not in desktop_app_source:
+if (
+    ('Model {runtimeModel}' not in desktop_app_source or 'Reasoning {runtimeEffortLabel}' not in desktop_app_source)
+    and ('Model {effectiveRuntimeModel}' not in desktop_app_source or 'Reasoning {effectiveRuntimeEffortLabel}' not in desktop_app_source)
+):
     raise SystemExit("Desktop UI is missing the expected live runtime model indicator.")
 if 'desktopRuntimeStatus' not in desktop_app_source or 'Detached backend' not in desktop_app_source:
     raise SystemExit("Desktop UI is missing the expected desktop runtime visibility wiring.")

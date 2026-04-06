@@ -18,6 +18,14 @@ from core.alerts import (
 )
 from core.desktop_capture_service import DesktopCaptureService
 from core.file_watch_backend import FILE_WATCH_SUPPORTED_CONDITIONS, create_file_watch_backend
+from core.capability_profiles import (
+    SAFE_BOUNDED_PROFILE,
+    SANDBOXED_FULL_ACCESS_LAB_PROFILE,
+    lab_state_scope_id,
+    normalize_execution_profile,
+    profile_metadata,
+)
+from core.lab_shell import execute_lab_command, lab_status_snapshot
 from core.scheduler_backend import create_scheduler_backend
 from core.session_store import DEFAULT_STATE_SCOPE_ID
 from core.state import MAX_TASK_GOAL_CHARS, MAX_TASK_REPLACEMENT_GOAL_CHARS, TaskState
@@ -479,6 +487,8 @@ class ExecutionManager:
                 state_scope_id=self._state_scope_id,
                 clear_pending_for_new_goal=False,
             )
+        self._lab_armed = False
+        self._lab_last_status: Dict[str, Any] = {}
         self._last_result: Dict[str, Any] = {}
         self._last_result_message: str = ""
         self._recent_file_watch_events: List[Dict[str, Any]] = []
@@ -1504,6 +1514,20 @@ class ExecutionManager:
             if isinstance(result, dict) and result.get("approval_required", False):
                 return step
         return None
+
+    def _latest_paused_lab_shell_step(self, state: TaskState):
+        for step in reversed(state.steps):
+            if step.get("tool") != "lab_run_shell":
+                continue
+            if step.get("status") != "paused":
+                continue
+            result = step.get("result", {})
+            if isinstance(result, dict) and result.get("approval_required", False):
+                return step
+        return None
+
+    def _lab_scope_id_locked(self, session_id: str = "") -> str:
+        return lab_state_scope_id(session_id)
 
     def _record_manual_history(
         self,
@@ -2570,6 +2594,180 @@ class ExecutionManager:
     def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         return self.enqueue_goal(goal, source="goal_run", start_if_idle=True, session_id=session_id, state_scope_id=state_scope_id)
 
+    def arm_lab_mode(self, *, confirmation: str = "", session_id: str = "") -> Dict[str, Any]:
+        confirmation_text = " ".join(str(confirmation or "").strip().upper().split())
+        if confirmation_text != "ENABLE LAB":
+            return {
+                "ok": False,
+                "message": "Lab mode requires the exact confirmation phrase ENABLE LAB.",
+                "lab": self.get_lab_status(session_id=session_id),
+            }
+        with self._lock:
+            self._lab_armed = True
+            payload = self.get_lab_status(session_id=session_id)
+        return {
+            "ok": True,
+            "message": "Armed the experimental sandboxed full access lab mode.",
+            "lab": payload,
+        }
+
+    def disarm_lab_mode(self, *, session_id: str = "") -> Dict[str, Any]:
+        with self._lock:
+            self._lab_armed = False
+            payload = self.get_lab_status(session_id=session_id)
+        return {
+            "ok": True,
+            "message": "Disarmed the experimental lab mode.",
+            "lab": payload,
+        }
+
+    def get_lab_status(self, *, session_id: str = "") -> Dict[str, Any]:
+        normalized_session_id = self._normalize_session_id(session_id)
+        scope_id = self._lab_scope_id_locked(normalized_session_id)
+        base = lab_status_snapshot(settings=self.agent.settings, armed=self._lab_armed)
+        snapshot = self.get_snapshot(state_scope_id=scope_id)
+        recent_runs = self.agent.history_store.get_recent_runs(limit=8, state_scope_id=scope_id)
+        return {
+            **base,
+            "session_id": normalized_session_id,
+            "state_scope_id": scope_id,
+            "status": snapshot.get("status", "idle"),
+            "run_phase": snapshot.get("run_phase", "idle"),
+            "pending_approval": snapshot.get("pending_approval", {}),
+            "active_task": snapshot.get("active_task", {}),
+            "current_step": snapshot.get("current_step", ""),
+            "runtime": snapshot.get("runtime", {}),
+            "recent_runs": recent_runs,
+            "profile_metadata": profile_metadata(SANDBOXED_FULL_ACCESS_LAB_PROFILE, settings=self.agent.settings),
+            "last_status": dict(self._lab_last_status),
+        }
+
+    def run_lab_command(
+        self,
+        command: str,
+        *,
+        shell_kind: str = "powershell",
+        approval_status: str = "",
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        command_text = str(command or "").strip()
+        if not command_text:
+            return {"ok": False, "message": "Enter an experimental lab command before running it."}
+
+        normalized_session_id = self._normalize_session_id(session_id)
+        scope_id = self._lab_scope_id_locked(normalized_session_id)
+        started_at = time.time()
+        with self._lock:
+            if not self._lab_armed:
+                return {"ok": False, "message": "Arm lab mode with ENABLE LAB before running experimental shell commands."}
+            if self._is_running():
+                return {"ok": False, "message": "Wait for the current operator run to finish before using lab mode."}
+            existing_pending = self._find_pending_task_locked(state_scope_id=scope_id)
+            if existing_pending is not None:
+                return {"ok": False, "message": "Resolve the pending lab approval before starting another lab command."}
+
+            task = self._create_task_locked(
+                f"Experimental lab command: {command_text}",
+                source="lab_shell",
+                session_id=normalized_session_id,
+                state_scope_id=scope_id,
+            )
+            self._tasks.append(task)
+            self._tasks = self.queue_store._trim_tasks(self._tasks, self._active_task_id)
+            live_task = self._find_task_locked(task.get("task_id", "")) or task
+            state = TaskState(
+                f"Experimental lab command: {command_text}",
+                state_scope_id=scope_id,
+            )
+            state.set_execution_profile(SANDBOXED_FULL_ACCESS_LAB_PROFILE)
+            state.status = "running"
+            self.agent.save_task_state(state, state_scope_id=scope_id)
+            self._set_current_state_locked(state)
+            live_task["status"] = "running"
+            live_task["started_at"] = live_task.get("started_at") or _iso_timestamp()
+            live_task["ended_at"] = ""
+            live_task["last_message"] = "Evaluating experimental lab command."
+            self._active_task_id = live_task.get("task_id", "")
+            self._persist_all_locked()
+
+            lab_result = execute_lab_command(
+                command_text,
+                shell_kind=shell_kind,
+                approval_status=approval_status,
+                settings=self.agent.settings,
+            )
+            args_payload = {
+                "command": command_text,
+                "shell_kind": shell_kind,
+                "approval_status": approval_status,
+                "workspace_id": str((lab_result.get("environment", {}) if isinstance(lab_result.get("environment", {}), dict) else {}).get("workspace_id", "")).strip(),
+            }
+            tool_status = "paused" if lab_result.get("paused", False) else ("completed" if lab_result.get("ok", False) else "failed")
+            state.add_step(
+                {
+                    "type": "tool",
+                    "status": tool_status,
+                    "tool": "lab_run_shell",
+                    "args": args_payload,
+                    "result": lab_result,
+                    "recorded_at": _iso_timestamp(),
+                }
+            )
+            state.update_memory_from_tool("lab_run_shell", lab_result)
+            state.add_note(state.summarize_result_for_memory("lab_run_shell", lab_result))
+            self._refresh_summary(state)
+            if lab_result.get("paused", False):
+                state.status = "paused"
+                state.set_task_control(event="approval_needed", reason=str(lab_result.get("checkpoint_reason", "")).strip() or str(lab_result.get("message", "")).strip(), resume_available=False)
+            elif lab_result.get("ok", False):
+                state.status = "completed"
+                state.set_task_control(event="completed", reason=str(lab_result.get("summary", "")).strip(), resume_available=False)
+            else:
+                state.status = "blocked"
+                state.set_task_control(event="blocked", reason=str(lab_result.get("message", "")).strip() or str(lab_result.get("error", "")).strip(), resume_available=False)
+
+            self.agent.save_task_state(state, state_scope_id=scope_id)
+            self._set_current_state_locked(state)
+            result_payload = {
+                "ok": bool(lab_result.get("ok", False)),
+                "status": state.status,
+                "message": str(lab_result.get("summary", "") or lab_result.get("message", "") or lab_result.get("error", "")).strip(),
+                "steps": state.steps,
+            }
+            self._record_manual_history(
+                state,
+                started_at=started_at,
+                step_start_index=0,
+                result=result_payload,
+                source="lab_shell",
+                session_id=normalized_session_id,
+            )
+            self._update_task_after_manual_action_locked(
+                live_task,
+                status=state.status,
+                message=result_payload["message"] or "Recorded lab shell attempt.",
+                run_id=str(result_payload.get("run_id", "")),
+                approval_needed=bool(lab_result.get("approval_required", False)),
+                approval_reason=str(lab_result.get("checkpoint_reason", "")).strip() or str(lab_result.get("message", "")).strip(),
+                state=state,
+            )
+            self._set_last_result(result_payload)
+            self._lab_last_status = {
+                "command": command_text,
+                "decision": ((lab_result.get("policy", {}) if isinstance(lab_result.get("policy", {}), dict) else {}).get("decision", "")),
+                "status": state.status,
+                "workspace_id": args_payload.get("workspace_id", ""),
+                "summary": result_payload["message"],
+                "run_id": str(result_payload.get("run_id", "")),
+            }
+            self._persist_all_locked()
+            return {
+                "ok": True,
+                "result": lab_result,
+                "status": self.get_snapshot(state_scope_id=scope_id),
+                "lab": self.get_lab_status(session_id=normalized_session_id),
+            }
+
     def stop_task(self, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         auto_start = False
         with self._lock:
@@ -3032,7 +3230,80 @@ class ExecutionManager:
 
             started_at = time.time()
             history_start_index = len(state.steps)
-            if kind == "review_bundle":
+            if kind == "lab_shell_command":
+                step = self._latest_paused_lab_shell_step(state)
+                if step is None:
+                    return {"ok": False, "message": "No paused lab command is available to approve."}
+
+                result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+                resume_args = result.get("checkpoint_resume_args", {}) if isinstance(result.get("checkpoint_resume_args", {}), dict) else {}
+                command_text = str(resume_args.get("command", result.get("command", ""))).strip()
+                shell_kind = str(resume_args.get("shell_kind", result.get("shell_kind", "powershell"))).strip() or "powershell"
+                workspace_id = str(resume_args.get("workspace_id", "")).strip()
+                send_result = execute_lab_command(
+                    command_text,
+                    shell_kind=shell_kind,
+                    approval_status="approved",
+                    settings=self.agent.settings,
+                    workspace_id=workspace_id,
+                )
+                tool_status = "completed" if send_result.get("ok", False) else "failed"
+                state.add_step(
+                    {
+                        "type": "tool",
+                        "status": tool_status,
+                        "tool": "lab_run_shell",
+                        "args": {
+                            "command": command_text,
+                            "shell_kind": shell_kind,
+                            "approval_status": "approved",
+                            "workspace_id": workspace_id,
+                        },
+                        "result": send_result,
+                        "recorded_at": _iso_timestamp(),
+                    }
+                )
+                note = str(send_result.get("summary", "") or send_result.get("message", "") or "Executed the approved experimental lab command.").strip()
+                state.add_note(note)
+                self._refresh_summary(state)
+                state.status = "completed" if send_result.get("ok", False) else "blocked"
+                state.set_task_control(event="approved", reason=note, resume_available=False)
+                self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                self._set_current_state_locked(state)
+                reply_message = self._render_authoritative_manual_reply_locked(state, note)
+                result_payload = {
+                    "ok": True,
+                    "status": state.status,
+                    "message": reply_message,
+                    "steps": state.steps,
+                }
+                self._record_manual_history(
+                    state,
+                    started_at=started_at,
+                    step_start_index=history_start_index,
+                    result=result_payload,
+                    source="control_action",
+                    session_id=session_id_value,
+                )
+                self._update_task_after_manual_action_locked(
+                    active_task,
+                    status=state.status,
+                    message=result_payload["message"],
+                    run_id=str(result_payload.get("run_id", "")),
+                    state=state,
+                )
+                self._set_last_result(result_payload)
+                self._lab_last_status = {
+                    "command": command_text,
+                    "decision": ((send_result.get("policy", {}) if isinstance(send_result.get("policy", {}), dict) else {}).get("decision", "")),
+                    "status": state.status,
+                    "workspace_id": workspace_id,
+                    "summary": result_payload["message"],
+                    "run_id": str(result_payload.get("run_id", "")),
+                }
+                self._persist_all_locked()
+                auto_start = self._has_queued_tasks_locked()
+            elif kind == "review_bundle":
                 step = self._latest_review_bundle_step(state)
                 if step is None:
                     return {"ok": False, "message": "No review bundle is available to approve."}
@@ -3268,6 +3539,64 @@ class ExecutionManager:
                     control_event="rejected",
                 )
                 self._set_last_result(result_payload)
+                self._persist_all_locked()
+                auto_start = self._has_queued_tasks_locked()
+            elif kind == "lab_shell_command":
+                step = self._latest_paused_lab_shell_step(state)
+                if step is None:
+                    return {"ok": False, "message": "No paused lab command is available to reject."}
+
+                result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+                if isinstance(result, dict):
+                    result["approval_status"] = "rejected"
+                    step["result"] = result
+                message = "Rejected the experimental lab command before execution."
+                state.add_step(
+                    {
+                        "type": "system",
+                        "status": "rejected",
+                        "message": message,
+                        "tool": "lab_run_shell",
+                    }
+                )
+                state.add_note(message)
+                self._refresh_summary(state)
+                state.status = "blocked"
+                state.set_task_control(event="rejected", reason=message, resume_available=False)
+                self.agent.save_task_state(state, state_scope_id=state.state_scope_id)
+                self._set_current_state_locked(state)
+                reply_message = self._render_authoritative_manual_reply_locked(state, message)
+                result_payload = {
+                    "ok": True,
+                    "status": state.status,
+                    "message": reply_message,
+                    "steps": state.steps,
+                }
+                self._record_manual_history(
+                    state,
+                    started_at=started_at,
+                    step_start_index=history_start_index,
+                    result=result_payload,
+                    source="control_action",
+                    session_id=session_id_value,
+                )
+                self._update_task_after_manual_action_locked(
+                    active_task,
+                    status="blocked",
+                    message=reply_message,
+                    run_id=str(result_payload.get("run_id", "")),
+                    state=state,
+                    control_event="rejected",
+                )
+                self._set_last_result(result_payload)
+                self._lab_last_status = {
+                    "command": str(result.get("command", "")).strip(),
+                    "decision": ((result.get("policy", {}) if isinstance(result.get("policy", {}), dict) else {}).get("decision", "")),
+                    "status": state.status,
+                    "workspace_id": str((result.get("environment", {}) if isinstance(result.get("environment", {}), dict) else {}).get("workspace_id", "")).strip(),
+                    "summary": result_payload["message"],
+                    "run_id": str(result_payload.get("run_id", "")),
+                }
                 self._persist_all_locked()
                 auto_start = self._has_queued_tasks_locked()
             elif kind == "review_bundle":

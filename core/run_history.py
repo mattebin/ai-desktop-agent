@@ -206,6 +206,63 @@ def _recovery_payload(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _lab_shell_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    if str(result.get("tool", "")).strip() not in {"", "lab_run_shell"} and "policy" not in result:
+        return {}
+
+    policy = result.get("policy", {}) if isinstance(result.get("policy", {}), dict) else {}
+    environment = result.get("environment", {}) if isinstance(result.get("environment", {}), dict) else {}
+    payload = {
+        "decision": _trim_text(policy.get("decision", ""), limit=40),
+        "risk_level": _trim_text(policy.get("risk_level", ""), limit=20),
+        "intent": _trim_text(policy.get("intent", ""), limit=40),
+        "summary": _trim_text(result.get("summary", "") or policy.get("summary", ""), limit=220),
+        "shell_kind": _trim_text(result.get("shell_kind", ""), limit=20),
+        "command": _trim_text(result.get("command", ""), limit=200),
+        "workspace_id": _trim_text(environment.get("workspace_id", ""), limit=80),
+        "lab_root": _trim_text(environment.get("lab_root", ""), limit=220),
+        "cwd": _trim_text(environment.get("cwd", ""), limit=220),
+        "sandbox": _trim_text(environment.get("sandbox", ""), limit=40),
+        "isolation_level": _trim_text(environment.get("isolation_level", ""), limit=40),
+        "network_isolation": _trim_text(environment.get("network_isolation", ""), limit=40),
+        "approval_required": bool(result.get("approval_required", False)),
+        "blocked": bool(result.get("blocked", False)),
+        "approval_status": _trim_text(result.get("approval_status", ""), limit=40),
+        "exit_code": _safe_int(result.get("exit_code", -1), -1),
+        "stdout_excerpt": _trim_text(result.get("stdout_excerpt", ""), limit=180),
+        "stderr_excerpt": _trim_text(result.get("stderr_excerpt", ""), limit=180),
+        "blocked_categories": _string_list(policy.get("blocked_categories", []), limit=6, text_limit=80),
+        "reasons": _string_list(policy.get("reasons", []), limit=4, text_limit=180),
+        "policy": {
+            "decision": _trim_text(policy.get("decision", ""), limit=40),
+            "risk_level": _trim_text(policy.get("risk_level", ""), limit=20),
+            "intent": _trim_text(policy.get("intent", ""), limit=40),
+            "summary": _trim_text(policy.get("summary", ""), limit=180),
+            "blocked_categories": _string_list(policy.get("blocked_categories", []), limit=6, text_limit=80),
+            "reasons": _string_list(policy.get("reasons", []), limit=4, text_limit=180),
+            "warnings": _string_list(policy.get("warnings", []), limit=4, text_limit=180),
+        },
+        "environment": {
+            "workspace_id": _trim_text(environment.get("workspace_id", ""), limit=80),
+            "lab_root": _trim_text(environment.get("lab_root", ""), limit=220),
+            "cwd": _trim_text(environment.get("cwd", ""), limit=220),
+            "sandbox": _trim_text(environment.get("sandbox", ""), limit=40),
+            "isolation_level": _trim_text(environment.get("isolation_level", ""), limit=40),
+            "network_isolation": _trim_text(environment.get("network_isolation", ""), limit=40),
+        },
+    }
+    filtered: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if value in ("", None, -1, False):
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        filtered[key] = value
+    return filtered
+
+
 def _step_summary(step: Dict[str, Any], result: Dict[str, Any]) -> str:
     if result:
         summary = str(result.get("summary", "") or result.get("error", "")).strip()
@@ -239,6 +296,10 @@ def _step_entry(step: Dict[str, Any], *, index: int) -> Dict[str, Any]:
     if recovery:
         entry["recovery"] = recovery
 
+    lab_shell = _lab_shell_payload(result)
+    if lab_shell:
+        entry["lab_shell"] = lab_shell
+
     message = _trim_text(step.get("message", ""), limit=220)
     if message:
         entry["message"] = message
@@ -254,6 +315,7 @@ def _end_state(task_state) -> Dict[str, Any]:
     desktop_outcome = desktop.get("run_outcome", {}) if isinstance(desktop.get("run_outcome", {}), dict) else {}
     payload = {
         "state_scope_id": _trim_text(getattr(task_state, "state_scope_id", ""), limit=120),
+        "execution_profile": _trim_text(getattr(task_state, "execution_profile", ""), limit=80),
         "status": _trim_text(getattr(task_state, "status", ""), limit=40),
         "summary": _trim_text(getattr(task_state, "last_summary", ""), limit=280),
         "mode": _trim_text(behavior.get("mode", ""), limit=80),

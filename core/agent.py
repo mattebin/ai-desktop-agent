@@ -3,6 +3,7 @@
 import time
 from typing import Any, Dict
 
+from core.capability_profiles import SAFE_BOUNDED_PROFILE, SANDBOXED_FULL_ACCESS_LAB_PROFILE, profile_metadata
 from core.config import get_settings_snapshot, load_settings
 from core.email_service import get_email_service
 from core.llm_client import HostedLLMClient
@@ -59,6 +60,10 @@ class Agent:
         }
         runtime["tool_policy"] = self.tools.tool_policy_snapshot()
         runtime["email"] = self.email.status_snapshot()
+        runtime["capability_profiles"] = {
+            SAFE_BOUNDED_PROFILE: profile_metadata(SAFE_BOUNDED_PROFILE, settings=self.settings),
+            SANDBOXED_FULL_ACCESS_LAB_PROFILE: profile_metadata(SANDBOXED_FULL_ACCESS_LAB_PROFILE, settings=self.settings),
+        }
         return runtime
 
     def get_email_status(self) -> Dict[str, Any]:

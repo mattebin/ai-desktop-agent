@@ -38,6 +38,7 @@ CONDITIONAL_APPROVAL_TOOLS = {
     "email_connect_gmail",
     "email_prepare_reply_draft",
     "email_prepare_forward_draft",
+    "lab_run_shell",
 }
 
 EXPLICIT_APPROVAL_TOOLS = {
@@ -57,7 +58,7 @@ EXPLICIT_APPROVAL_TOOLS = {
 }
 
 FILE_MUTATION_TOOLS = {"apply_approved_edits"}
-SHELL_HAZARD_TOOLS = {"run_shell", "desktop_run_command"}
+SHELL_HAZARD_TOOLS = {"run_shell", "desktop_run_command", "lab_run_shell"}
 PROCESS_CONTROL_TOOLS = {"desktop_start_process", "desktop_stop_process"}
 DESTRUCTIVE_SHELL_PATTERNS = (
     r"\brm\b",
@@ -142,6 +143,11 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         summary = "This bounded action may proceed automatically, but risky transitions still require approval."
         if name == "run_shell":
             summary = "Use only for safe read-only inspection. Do not execute destructive or mutating shell commands."
+        if name == "lab_run_shell":
+            summary = (
+                "Experimental lab-only shell lane. Commands stay in a disposable workspace, use layered policy checks, "
+                "block catastrophic categories, and pause for explicit approval on mutable or uncertain actions."
+            )
         if name == "email_connect_gmail":
             summary = "This opens the Google OAuth sign-in flow for Gmail and stores local credentials."
         if name in {"email_prepare_reply_draft", "email_prepare_forward_draft"}:
@@ -158,10 +164,16 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
                 if name == "email_connect_gmail"
                 else "local_draft"
                 if name.startswith("email_")
+                else "lab_workspace"
+                if name == "lab_run_shell"
                 else "local_shell"
             ),
             "summary": summary,
-            "planner_note": "Conditional approval: continue only inside the safe policy and pause before risky transitions.",
+            "planner_note": (
+                "Conditional approval: continue only inside the safe policy and pause before risky transitions."
+                if name != "lab_run_shell"
+                else "Experimental lab tool: use only in sandboxed_full_access_lab mode, keep execution inside the disposable lab workspace, and never bypass a block."
+            ),
             "shell_hazard": _shell_hazard((args or {}).get("command", "")) if name in SHELL_HAZARD_TOOLS else "",
         }
 
@@ -216,7 +228,8 @@ def build_tool_policy_snapshot(tool_names: Iterable[str]) -> Dict[str, Any]:
     return {
         "summary": (
             "Read-only inspection may proceed automatically. Browser transitions and shell work stay conditional. "
-            "Desktop mutations, process control, command execution, file edits, and email sending require explicit approval."
+            "Desktop mutations, process control, command execution, file edits, and email sending require explicit approval. "
+            "Experimental lab shell access remains separately gated and fail-closed."
         ),
         "read_only_tools": read_only,
         "conditional_approval_tools": conditional,

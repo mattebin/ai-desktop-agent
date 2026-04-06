@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
+
+from tools.desktop_backends import run_bounded_command
 
 
 BLOCKED_COMMAND_TERMS = [
@@ -15,6 +16,14 @@ BLOCKED_COMMAND_TERMS = [
     "erase ",
     "format ",
 ]
+SAFE_SHELL_CHAIN_PATTERN = re.compile(r"(?:&&|\|\||;)")
+SAFE_SHELL_HOST_PATH_PATTERN = re.compile(r"(?i)(?:[a-z]:\\|\\\\|%userprofile%|%appdata%|\$env:(?:userprofile|appdata|localappdata|programdata|windir|systemroot|temp|tmp))")
+SAFE_SHELL_NESTED_PATTERN = re.compile(
+    r"(?i)\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash(?:\.exe)?|wscript(?:\.exe)?|cscript(?:\.exe)?|mshta(?:\.exe)?|rundll32(?:\.exe)?|invoke-expression|\biex\b|start-process)\b"
+)
+SAFE_SHELL_READONLY_PATTERN = re.compile(
+    r"(?i)^\s*(?:dir|tree|type|more|findstr|git\s+(?:status|diff|log|show)|get-childitem|ls|dir|pwd|get-location|get-item|test-path|get-content|type|cat|select-string|resolve-path|get-process|get-date)(?:\b.*)?$"
+)
 
 COMMAND_SUGGESTION_DEFAULT_MAX = 3
 PATCH_PLAN_DEFAULT_MAX_FILES = 4
@@ -1358,14 +1367,29 @@ def run_shell(args):
     lowered = command.lower()
     if any(term in lowered for term in BLOCKED_COMMAND_TERMS):
         return {"ok": False, "error": f"Blocked command: {command}"}
+    if SAFE_SHELL_CHAIN_PATTERN.search(command):
+        return {"ok": False, "error": "Blocked shell command chain. Use one read-only inspection command at a time."}
+    if SAFE_SHELL_HOST_PATH_PATTERN.search(command):
+        return {"ok": False, "error": "Blocked shell command that references host-specific paths or environment shortcuts."}
+    nested_match = SAFE_SHELL_NESTED_PATTERN.search(command)
+    if nested_match and nested_match.group(0).lower() not in {"type", "more"}:
+        return {"ok": False, "error": "Blocked nested shell or indirect execution helper in read-only shell mode."}
+    if not SAFE_SHELL_READONLY_PATTERN.match(command):
+        return {"ok": False, "error": "run_shell only allows compact read-only inspection commands."}
 
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    backend_result = run_bounded_command(
+        command=command,
+        cwd=str(Path.cwd()),
+        timeout_seconds=6.0,
+        shell_kind="powershell",
+    )
+    backend_data = backend_result.get("data", {}) if isinstance(backend_result.get("data", {}), dict) else {}
     return {
-        "ok": result.returncode == 0,
+        "ok": bool(backend_result.get("ok", False)),
         "command": command,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "returncode": result.returncode,
+        "stdout": str(backend_data.get("stdout_excerpt", "")).strip(),
+        "stderr": str(backend_data.get("stderr_excerpt", "")).strip(),
+        "returncode": int(backend_data.get("exit_code", -1) or -1),
     }
 
 

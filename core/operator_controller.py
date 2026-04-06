@@ -135,6 +135,30 @@ class OperatorController:
     def connect_gmail(self) -> Dict[str, Any]:
         return self.manager.agent.connect_gmail()
 
+    def arm_lab_mode(self, *, confirmation: str = "", session_id: str = "") -> Dict[str, Any]:
+        return self.manager.arm_lab_mode(confirmation=confirmation, session_id=session_id)
+
+    def disarm_lab_mode(self, *, session_id: str = "") -> Dict[str, Any]:
+        return self.manager.disarm_lab_mode(session_id=session_id)
+
+    def get_lab_status(self, *, session_id: str = "") -> Dict[str, Any]:
+        return self.manager.get_lab_status(session_id=session_id)
+
+    def run_lab_command(
+        self,
+        command: str,
+        *,
+        shell_kind: str = "powershell",
+        approval_status: str = "",
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        return self.manager.run_lab_command(
+            command,
+            shell_kind=shell_kind,
+            approval_status=approval_status,
+            session_id=session_id,
+        )
+
     def get_queue_state(self) -> Dict[str, Any]:
         return self.get_snapshot().get("queue", {})
 

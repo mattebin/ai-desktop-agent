@@ -2266,6 +2266,15 @@ body {
   grid-template-columns: 0.9fr 1.1fr 1fr;
 }
 
+.surface-grid-lab {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.surface-grid-lab > :last-child {
+  grid-column: 1 / -1;
+}
+
 .surface-card {
   border: 1px solid var(--border-soft);
   background: var(--surface-soft);
@@ -2373,6 +2382,40 @@ body {
   flex-wrap: wrap;
 }
 
+.sidebar-section-experimental {
+  border-top: 1px dashed var(--border-soft);
+  padding-top: 10px;
+}
+
+.experimental-nav {
+  gap: 10px;
+}
+
+.sidebar-capability-chip-warning {
+  border-color: rgba(245, 158, 11, 0.26);
+  background: color-mix(in srgb, var(--surface-soft) 76%, rgba(245, 158, 11, 0.16));
+}
+
+.lab-warning {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  background: color-mix(in srgb, var(--panel) 86%, rgba(245, 158, 11, 0.12));
+}
+
+.lab-warning strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.lab-warning p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .surface-actions-tight {
   margin-top: 10px;
 }
@@ -2429,7 +2472,8 @@ body {
 @media (max-width: 1120px) {
   .surface-grid-automations,
   .surface-grid-workflows,
-  .surface-grid-runs {
+  .surface-grid-runs,
+  .surface-grid-lab {
     grid-template-columns: 1fr;
   }
 }
@@ -2555,6 +2599,10 @@ html {
 
 .surface-grid-gmail {
   grid-template-columns: minmax(290px, 0.82fr) minmax(0, 1.18fr);
+}
+
+.surface-grid-lab {
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
 }
 
 .surface-card-header {

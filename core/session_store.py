@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.capability_profiles import DEFAULT_EXECUTION_PROFILE, normalize_execution_profile
 from tools.files import export_inspect_project_cache, import_inspect_project_cache
 
 
@@ -203,6 +204,7 @@ class SessionStore:
 
         return {
             "state_scope_id": self._normalize_scope_id(value.get("state_scope_id", DEFAULT_STATE_SCOPE_ID)),
+            "execution_profile": normalize_execution_profile(value.get("execution_profile", DEFAULT_EXECUTION_PROFILE)),
             "goal": _trim_text(value.get("goal", ""), limit=500),
             "status": _trim_text(value.get("status", ""), limit=40),
             "known_files": _normalize_string_list(value.get("known_files", []), limit=30),

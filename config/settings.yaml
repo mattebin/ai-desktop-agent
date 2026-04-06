@@ -41,6 +41,8 @@ local_api_event_max_channels: 24
 chat_session_state_path: "data/chat_sessions.json"
 max_chat_sessions: 16
 max_chat_messages_per_session: 40
+lab_shell_root: "data/lab_shell"
+lab_shell_timeout_seconds: 10
 
 gmail:
   enabled: false

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from core.backend_schemas import normalize_desktop_run_outcome, normalize_desktop_target_proposal_context
+from core.capability_profiles import DEFAULT_EXECUTION_PROFILE, normalize_execution_profile
 from core.browser_tasks import (
     browser_task_label,
     infer_browser_task_name,
@@ -226,6 +227,7 @@ class TaskState:
         provided_goal = str(goal).strip()[:MAX_TASK_GOAL_CHARS]
         self.goal = provided_goal
         self.state_scope_id = str(state_scope_id).strip()[:120] or "default"
+        self.execution_profile = DEFAULT_EXECUTION_PROFILE
         self.steps: List[Dict[str, Any]] = []
         self.status = "running"
 
@@ -365,6 +367,7 @@ class TaskState:
         restored_scope_id = str(session_state.get("state_scope_id", "")).strip()[:120]
         if restored_scope_id:
             self.state_scope_id = restored_scope_id
+        self.execution_profile = normalize_execution_profile(session_state.get("execution_profile", DEFAULT_EXECUTION_PROFILE))
         restored_goal = str(session_state.get("goal", "")).strip()[:MAX_TASK_GOAL_CHARS]
         if restored_goal:
             self.goal = restored_goal
@@ -457,6 +460,7 @@ class TaskState:
     def to_session_snapshot(self) -> Dict[str, Any]:
         return {
             "state_scope_id": self.state_scope_id[:120] or "default",
+            "execution_profile": normalize_execution_profile(self.execution_profile),
             "goal": str(self.goal).strip()[:MAX_TASK_GOAL_CHARS],
             "status": str(self.status).strip()[:40],
             "known_files": self._normalize_values(self.known_files, limit=30),
@@ -1764,6 +1768,64 @@ class TaskState:
             return result
         return {}
 
+    def _latest_pending_lab_shell_result(self) -> Dict[str, Any]:
+        for step in reversed(self.steps):
+            if step.get("tool") != "lab_run_shell":
+                continue
+            if step.get("status") != "paused":
+                return {}
+            result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+            if not result.get("approval_required", False):
+                continue
+            return result
+        return {}
+
+    def _collect_lab_shell_activity(self) -> Dict[str, Any]:
+        for step in reversed(self.steps):
+            if step.get("tool") != "lab_run_shell":
+                continue
+            result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+            policy = result.get("policy", {}) if isinstance(result.get("policy", {}), dict) else {}
+            environment = result.get("environment", {}) if isinstance(result.get("environment", {}), dict) else {}
+            return {
+                "command": str(result.get("command", "")).strip(),
+                "summary": str(result.get("summary", "")).strip() or str(result.get("message", "")).strip(),
+                "decision": str(policy.get("decision", "")).strip(),
+                "risk_level": str(policy.get("risk_level", "")).strip(),
+                "intent": str(policy.get("intent", "")).strip(),
+                "approval_required": bool(result.get("approval_required", False)),
+                "approval_status": str(result.get("approval_status", "")).strip(),
+                "blocked": bool(result.get("blocked", False)),
+                "workspace_id": str(environment.get("workspace_id", "")).strip(),
+                "lab_root": str(environment.get("lab_root", "")).strip(),
+                "cwd": str(environment.get("cwd", "")).strip(),
+                "shell_kind": str(result.get("shell_kind", "")).strip(),
+                "exit_code": str(result.get("exit_code", "")).strip(),
+                "stdout_excerpt": str(result.get("stdout_excerpt", "")).strip()[:220],
+                "stderr_excerpt": str(result.get("stderr_excerpt", "")).strip()[:220],
+                "blocked_categories": [str(item).strip() for item in list(policy.get("blocked_categories", []))[:4] if str(item).strip()],
+                "reasons": [str(item).strip() for item in list(policy.get("reasons", []))[:4] if str(item).strip()],
+            }
+        return {
+            "command": "",
+            "summary": "",
+            "decision": "",
+            "risk_level": "",
+            "intent": "",
+            "approval_required": False,
+            "approval_status": "",
+            "blocked": False,
+            "workspace_id": "",
+            "lab_root": "",
+            "cwd": "",
+            "shell_kind": "",
+            "exit_code": "",
+            "stdout_excerpt": "",
+            "stderr_excerpt": "",
+            "blocked_categories": [],
+            "reasons": [],
+        }
+
     def _collect_proposed_edits(self, limit: int = 3) -> Dict[str, Any]:
         for step in reversed(self.steps):
             if step.get("tool") != "draft_proposed_edits" or step.get("status") != "completed":
@@ -2371,6 +2433,15 @@ class TaskState:
             rc = result.get("returncode")
             if cmd:
                 self.add_note(f"Ran shell command: {cmd} (returncode={rc})")
+        elif tool_name == "lab_run_shell":
+            cmd = str(result.get("command", "")).strip()
+            workspace = result.get("environment", {}) if isinstance(result.get("environment", {}), dict) else {}
+            workspace_id = str(workspace.get("workspace_id", "")).strip()
+            if cmd:
+                detail = f"Lab shell command: {cmd}"
+                if workspace_id:
+                    detail += f" [workspace {workspace_id}]"
+                self.add_note(detail)
 
     def add_note(self, note: str, limit: int = 20):
         note = str(note).strip()
@@ -2383,6 +2454,9 @@ class TaskState:
 
     def set_summary(self, summary: str):
         self.last_summary = str(summary).strip()[:600]
+
+    def set_execution_profile(self, profile: str):
+        self.execution_profile = normalize_execution_profile(profile)
 
     def set_task_control(
         self,
@@ -2685,13 +2759,30 @@ class TaskState:
             rc = result.get("returncode", "?")
             return f"Ran shell command '{cmd}' with returncode {rc}"
 
+        if tool_name == "lab_run_shell":
+            policy = result.get("policy", {}) if isinstance(result.get("policy", {}), dict) else {}
+            command = str(result.get("command", "")).strip() or "lab shell command"
+            decision = str(policy.get("decision", "")).strip()
+            if result.get("blocked", False):
+                return f"Blocked lab shell command '{command}': {str(result.get('message', '') or result.get('error', 'policy blocked')).strip()}"
+            if result.get("paused", False):
+                return f"Paused lab shell command '{command}' pending approval"
+            if not result.get("ok", False):
+                return f"Lab shell command '{command}' failed: {str(result.get('message', '') or result.get('error', 'execution failed')).strip()}"
+            exit_code = result.get("exit_code", "?")
+            if decision:
+                return f"Executed lab shell command '{command}' ({decision}, exit={exit_code})"
+            return f"Executed lab shell command '{command}' (exit={exit_code})"
+
         return f"{tool_name}: completed."
 
     def get_control_snapshot(self) -> Dict[str, Any]:
         browser_activity = self._collect_browser_activity(limit=4)
         desktop_activity = self._collect_desktop_activity(limit=4)
+        lab_activity = self._collect_lab_shell_activity()
         review_bundle = self._collect_review_bundle(limit=3)
         email_draft = self._latest_pending_email_draft()
+        lab_shell = self._latest_pending_lab_shell_result()
         applied_changes = self._collect_applied_changes(limit=2)
         recent_notes = self._normalize_values(self.memory_notes[-6:], limit=6, text_limit=240)
         recovery_notes = self._normalize_values(
@@ -2718,6 +2809,7 @@ class TaskState:
             or browser_activity.get("workflow_step", "")
             or desktop_activity.get("checkpoint_tool", "")
             or desktop_activity.get("last_action", "")
+            or lab_activity.get("command", "")
         )
         if not current_step and self.steps:
             last_step = self.steps[-1]
@@ -2794,6 +2886,22 @@ class TaskState:
                 "scene_preview": {},
                 "target_files": [],
             }
+        elif lab_shell:
+            pending_approval = {
+                "kind": "lab_shell_command",
+                "reason": str(lab_shell.get("checkpoint_reason", "")).strip() or "Experimental lab command is waiting for explicit approval.",
+                "step": "execute experimental lab command",
+                "tool": "lab_run_shell",
+                "target": str(lab_shell.get("environment", {}).get("lab_root", "")).strip() if isinstance(lab_shell.get("environment", {}), dict) else "",
+                "summary": str(lab_shell.get("summary", "")).strip() or str(lab_shell.get("command", "")).strip(),
+                "approval_status": str(lab_shell.get("approval_status", "not approved")).strip() or "not approved",
+                "evidence_id": "",
+                "evidence_summary": "",
+                "evidence_preview": {},
+                "evidence_assessment": {},
+                "scene_preview": {},
+                "target_files": [],
+            }
         elif (
             self.status in {"running", "paused", "needs_attention"}
             and review_bundle.get("items")
@@ -2837,6 +2945,7 @@ class TaskState:
 
         return {
             "state_scope_id": self.state_scope_id,
+            "execution_profile": normalize_execution_profile(self.execution_profile),
             "goal": self.goal,
             "status": self.status,
             "rolling_summary": self.last_summary,
@@ -2845,12 +2954,14 @@ class TaskState:
                 self.status == "paused"
                 or browser_activity.get("checkpoint_pending")
                 or desktop_activity.get("checkpoint_pending")
+                or bool(lab_shell)
             ),
             "recent_notes": recent_notes,
             "recent_steps": recent_steps,
             "recovery_notes": recovery_notes,
             "browser": browser_activity,
             "desktop": desktop_activity,
+            "lab": lab_activity,
             "review_bundle": review_bundle,
             "pending_approval": pending_approval,
             "behavior": behavior,
@@ -2872,6 +2983,7 @@ class TaskState:
         lines: List[str] = []
         lines.append(f"Goal: {self.goal}")
         lines.append(f"Status: {self.status}")
+        lines.append(f"Execution profile: {normalize_execution_profile(self.execution_profile)}")
 
         control_snapshot = self.get_control_snapshot()
         behavior = control_snapshot.get("behavior", {})
@@ -2895,6 +3007,20 @@ class TaskState:
 
         if self.last_summary:
             lines.append(f"Rolling summary: {self.last_summary}")
+
+        lab_activity = control_snapshot.get("lab", {}) if isinstance(control_snapshot.get("lab", {}), dict) else {}
+        if lab_activity.get("command") or lab_activity.get("summary"):
+            lines.append("Lab shell context:")
+            if lab_activity.get("command"):
+                lines.append(f"- Latest command: {lab_activity.get('command', '')}")
+            if lab_activity.get("summary"):
+                lines.append(f"- Latest lab summary: {lab_activity.get('summary', '')}")
+            if lab_activity.get("decision"):
+                lines.append(f"- Policy decision: {lab_activity.get('decision', '')}")
+            if lab_activity.get("risk_level"):
+                lines.append(f"- Lab risk level: {lab_activity.get('risk_level', '')}")
+            if lab_activity.get("lab_root"):
+                lines.append(f"- Lab root: {lab_activity.get('lab_root', '')}")
 
         if self.memory_notes:
             lines.append("Memory notes:")

@@ -8,6 +8,7 @@ import {
   Activity,
   AlertTriangle,
   BellRing,
+  FlaskConical,
   Bot,
   CalendarClock,
   CheckCircle2,
@@ -65,6 +66,7 @@ import {
   getSkillCatalog,
   getSlashCommands,
   getEmailStatus,
+  getLabStatus,
   getRunDetail,
   getToolCatalog,
   isDesktopEvidenceArtifactImage,
@@ -76,6 +78,8 @@ import {
   getSessionMessages,
   getStatus,
   getWatchState,
+  LabCommandResult,
+  LabStatusPayload,
   listEmailDrafts,
   listEmailThreads,
   listSessions,
@@ -103,6 +107,9 @@ import {
   retryTask,
   updateScheduledAutomation,
   updateWatchAutomation,
+  armLabMode,
+  disarmLabMode,
+  runLabCommand,
   type PendingApproval,
   type QueuePayload,
   type ScheduledPayload,
@@ -141,7 +148,7 @@ type ControlSnapshot = {
   extensions: ExtensionSummary[];
 };
 
-type WorkspaceSurface = "chat" | "automations" | "gmail" | "workflows" | "runs";
+type WorkspaceSurface = "chat" | "automations" | "gmail" | "workflows" | "runs" | "lab";
 
 type AutomationComposerMode = "scheduled" | "watch";
 type AutomationListMode = "scheduled" | "watch" | "queue";
@@ -304,6 +311,31 @@ function formatEmailDraftsDetail(payload?: EmailDraftsPayload | null): string {
       return `${subject} [${status}] - ${recipients}`;
     })
     .join("\n");
+}
+
+function latestLabShellResultFromRun(run?: RunDetail | null): LabCommandResult | null {
+  const steps = Array.isArray(run?.steps) ? run?.steps || [] : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const candidate = steps[index]?.lab_shell;
+    if (candidate && typeof candidate === "object") {
+      return candidate as LabCommandResult;
+    }
+  }
+  return null;
+}
+
+function labDecisionTone(result?: LabCommandResult | null): ActivityTone {
+  const decision = String(result?.policy?.decision || "").trim().toLowerCase();
+  if (decision === "block") {
+    return "error";
+  }
+  if (decision === "approval_required") {
+    return "warning";
+  }
+  if (decision === "allow") {
+    return "success";
+  }
+  return "neutral";
 }
 
 function getInitialDrafts(): Record<string, string> {
@@ -812,6 +844,7 @@ type IconName =
   | "automations"
   | "workflows"
   | "extensions"
+  | "lab"
   | "run"
   | "stop"
   | "search";
@@ -836,6 +869,7 @@ const ICONS = {
   automations: CalendarClock,
   workflows: Sparkles,
   extensions: Puzzle,
+  lab: FlaskConical,
   run: Play,
   stop: Square,
   search: Search,
@@ -1642,6 +1676,16 @@ export default function App() {
   const [emailReplyContext, setEmailReplyContext] = useState("");
   const [emailForwardTo, setEmailForwardTo] = useState("");
   const [emailForwardNote, setEmailForwardNote] = useState("");
+  const [experimentalOpen, setExperimentalOpen] = useState(false);
+  const [labStatus, setLabStatus] = useState<LabStatusPayload | null>(null);
+  const [labLatestResult, setLabLatestResult] = useState<LabCommandResult | null>(null);
+  const [labCommand, setLabCommand] = useState("");
+  const [labShellKind, setLabShellKind] = useState<"powershell" | "cmd">("powershell");
+  const [labArmConfirmation, setLabArmConfirmation] = useState("");
+  const [labBusy, setLabBusy] = useState("");
+  const [labLoading, setLabLoading] = useState(false);
+  const [labSelectedRunId, setLabSelectedRunId] = useState("");
+  const [labSelectedRun, setLabSelectedRun] = useState<RunDetail | null>(null);
   const [workflowWorkspaceMode, setWorkflowWorkspaceMode] = useState<WorkflowWorkspaceMode>("skills");
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("evidence");
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -1788,6 +1832,10 @@ export default function App() {
       void refreshEmailPanel();
       return;
     }
+    if (activeSurface === "lab") {
+      void refreshLabPanel();
+      return;
+    }
     if (activeSurface !== "chat") {
       void refreshControlData(selectedSessionRef.current);
     }
@@ -1805,6 +1853,19 @@ export default function App() {
       void loadRunDetail(nextRunId);
     }
   }, [activeSurface, apiBaseUrl, controlData.recentRuns, selectedRunId]);
+
+  useEffect(() => {
+    if (activeSurface !== "lab" || !apiBaseUrl) {
+      return;
+    }
+    if (labSelectedRunId || !labStatus?.state_scope_id) {
+      return;
+    }
+    const nextRunId = String(labStatus.recent_runs?.[0]?.run_id || "").trim();
+    if (nextRunId) {
+      void loadLabRunDetail(nextRunId, labStatus.state_scope_id);
+    }
+  }, [activeSurface, apiBaseUrl, labStatus, labSelectedRunId]);
 
   function updateDraft(nextValue: string, sessionId = selectedSessionRef.current) {
     const nextKey = getDraftKey(sessionId);
@@ -2038,6 +2099,130 @@ export default function App() {
       }
     } finally {
       setEmailPanelLoading(false);
+    }
+  }
+
+  async function loadLabRunDetail(runId: string, stateScopeId = String(labStatus?.state_scope_id || "").trim()) {
+    if (!apiBaseUrl || !runId || !stateScopeId) {
+      return;
+    }
+    setLabBusy((current) => current || "run-detail");
+    try {
+      const payload = await getRunDetail(apiBaseUrl, runId, "", stateScopeId);
+      const run = payload.run || null;
+      setLabSelectedRunId(runId);
+      setLabSelectedRun(run);
+      const latest = latestLabShellResultFromRun(run);
+      if (latest) {
+        setLabLatestResult(latest);
+      }
+    } finally {
+      setLabBusy("");
+    }
+  }
+
+  async function refreshLabPanel(options: { loadLatestRun?: boolean } = {}) {
+    if (!apiBaseUrl) {
+      return;
+    }
+    setLabLoading(true);
+    try {
+      const payload = await getLabStatus(apiBaseUrl);
+      setLabStatus(payload);
+      const scopeId = String(payload.state_scope_id || "").trim();
+      const preferredRunId =
+        labSelectedRunId && (payload.recent_runs || []).some((item) => String(item.run_id || "").trim() === labSelectedRunId)
+          ? labSelectedRunId
+          : String(payload.recent_runs?.[0]?.run_id || "").trim();
+      if ((options.loadLatestRun ?? true) && preferredRunId && scopeId) {
+        await loadLabRunDetail(preferredRunId, scopeId);
+      } else if (!preferredRunId) {
+        setLabSelectedRunId("");
+        setLabSelectedRun(null);
+      }
+    } finally {
+      setLabLoading(false);
+    }
+  }
+
+  async function handleArmLabSurface() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    setLabBusy("arm");
+    try {
+      const payload = await armLabMode(apiBaseUrl, labArmConfirmation.trim());
+      setLabStatus(payload.lab || null);
+      setLabArmConfirmation("");
+      addLocalActivity("Lab armed", plainTextPreview(String(payload.message || "Armed the experimental lab mode."), 180), "warning");
+      await refreshLabPanel();
+    } finally {
+      setLabBusy("");
+    }
+  }
+
+  async function handleDisarmLabSurface() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    setLabBusy("disarm");
+    try {
+      const payload = await disarmLabMode(apiBaseUrl);
+      setLabStatus(payload.lab || null);
+      addLocalActivity("Lab disarmed", plainTextPreview(String(payload.message || "Disarmed the experimental lab mode."), 180), "info");
+      await refreshLabPanel({ loadLatestRun: false });
+    } finally {
+      setLabBusy("");
+    }
+  }
+
+  async function handleRunLabSurface() {
+    if (!apiBaseUrl || !labCommand.trim()) {
+      return;
+    }
+    setLabBusy("run");
+    try {
+      const payload = await runLabCommand(apiBaseUrl, {
+        command: labCommand.trim(),
+        shell_kind: labShellKind,
+      });
+      const result = payload.result || null;
+      setLabLatestResult(result);
+      setLabStatus(payload.lab || null);
+      if (result?.ok) {
+        addLocalActivity("Lab command executed", plainTextPreview(String(result.summary || result.message || "Executed the experimental shell command."), 180), "success");
+      } else if (result?.blocked) {
+        addLocalActivity("Lab command blocked", plainTextPreview(String(result.summary || result.message || "Blocked the experimental shell command."), 180), "warning");
+      } else if (result?.approval_required) {
+        addLocalActivity("Lab approval required", plainTextPreview(String(result.summary || result.message || "The experimental shell command is paused for approval."), 180), "warning");
+      }
+      await refreshLabPanel();
+    } finally {
+      setLabBusy("");
+    }
+  }
+
+  async function handleLabApproval(action: "approve" | "reject") {
+    if (!apiBaseUrl || !labStatus?.state_scope_id) {
+      return;
+    }
+    setLabBusy(action);
+    try {
+      const result =
+        action === "approve"
+          ? await approvePending(apiBaseUrl, "", labStatus.state_scope_id)
+          : await rejectPending(apiBaseUrl, "", labStatus.state_scope_id);
+      addLocalActivity(
+        action === "approve" ? "Lab command approved" : "Lab command rejected",
+        plainTextPreview(
+          String(result.result?.message || (action === "approve" ? "Approved the experimental shell command." : "Rejected the experimental shell command.")),
+          180,
+        ),
+        action === "approve" ? "success" : "warning",
+      );
+      await refreshLabPanel();
+    } finally {
+      setLabBusy("");
     }
   }
 
@@ -2713,6 +2898,39 @@ export default function App() {
         ? checkpointTargetProposalContext
         : selectedTargetProposalContext;
   const title = sessionDetail?.title || "New conversation";
+  const labModeActive = activeSurface === "lab";
+  const labPendingApproval = labStatus?.pending_approval || null;
+  const effectivePendingApproval = labModeActive ? labPendingApproval : pendingApproval;
+  const effectiveActiveTask = labModeActive ? labStatus?.active_task || null : activeTask;
+  const effectiveRunPhase = labModeActive ? String(labStatus?.run_phase || labStatus?.status || "idle").toLowerCase() : runPhase;
+  const effectiveRuntime = labModeActive ? labStatus?.runtime || {} : status?.runtime || {};
+  const effectiveRuntimeModel = String(effectiveRuntime.active_model || "").trim();
+  const effectiveRuntimeEffort = String(effectiveRuntime.reasoning_effort || "").trim();
+  const effectiveRuntimeEffortLabel =
+    effectiveRuntimeEffort && effectiveRuntime.reasoning_effort_applies_to_tool_calls === false
+      ? `${effectiveRuntimeEffort} (chat/final)`
+      : effectiveRuntimeEffort;
+  const effectiveHeaderTitle = labModeActive ? "Sandboxed full access lab" : title;
+  const effectiveHeaderStatus = labModeActive
+    ? String(labStatus?.status || (labStatus?.armed ? "armed" : "idle")).trim()
+    : String(sessionDetail?.status || status?.status || "idle").trim();
+  const effectiveHeaderSubtitle = labModeActive
+    ? plainTextPreview(
+        String(
+          labStatus?.current_step ||
+            labLatestResult?.summary ||
+            (labStatus?.armed
+              ? "Experimental shell access is isolated to a disposable workspace and stays approval-gated for risky or uncertain commands."
+              : "Arm the experimental lab mode before running any shell command."),
+        ),
+        220,
+      )
+    : effectivePendingApproval?.kind
+      ? plainTextPreview(approvalSummary(effectivePendingApproval), 220)
+      : plainTextPreview(
+          activeTask?.last_message || status?.current_step || sessionDetail?.summary || "Start a conversation or continue an existing task.",
+          220,
+        );
   const showConversationSkeleton = loadingConversation && !messages.length;
   const emptyState = !messages.length && !loadingConversation;
   const transcriptItems = buildTranscriptItems(messages);
@@ -2727,7 +2945,7 @@ export default function App() {
       ? "Sending your message to the operator..."
       : parsedSlashCommand
         ? `Tab to autocomplete. Enter to run. ${slashCommandHint}`
-      : pendingApproval?.kind
+      : effectivePendingApproval?.kind
         ? "Approval is waiting on the right rail. You can still add context here."
         : "Enter to send. Shift+Enter for a newline.";
   const composerPlaceholder =
@@ -2735,14 +2953,14 @@ export default function App() {
       ? "Connecting to the operator..."
       : parsedSlashCommand
         ? "Run a slash command like /new, /refresh, or /architecture..."
-      : pendingApproval?.kind
+      : effectivePendingApproval?.kind
         ? "Add context or resolve the approval..."
         : "Message the operator...";
   const emailService = infrastructure.email as Record<string, unknown> | undefined;
   const emailConnected = Boolean(
     emailPanelStatus?.authenticated || (emailService && String(emailService.active || "").toLowerCase() === "connected"),
   );
-  const pendingApprovalToolName = String(pendingApproval?.tool || "").trim().toLowerCase();
+  const pendingApprovalToolName = String(effectivePendingApproval?.tool || "").trim().toLowerCase();
   const approvalTool = pendingApprovalToolName
     ? controlData.tools.find((tool) => String(tool.name || "").trim().toLowerCase() === pendingApprovalToolName) || null
     : null;
@@ -2778,6 +2996,7 @@ export default function App() {
     groups[key].push(skill);
     return groups;
   }, {});
+  const showTopbarPrimaryAction = !labModeActive;
   const topbarPrimaryLabel =
     String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
     String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
@@ -3290,6 +3509,9 @@ export default function App() {
     }
     if (activeSurface === "gmail") {
       await refreshEmailPanel();
+    }
+    if (activeSurface === "lab") {
+      await refreshLabPanel();
     }
     if (activeSurface === "runs" && selectedRunId) {
       await loadRunDetail(selectedRunId);
@@ -3824,6 +4046,214 @@ export default function App() {
         </div>
       );
     }
+    if (activeSurface === "lab") {
+      const labRuns = labStatus?.recent_runs || [];
+      const labPolicyReasons = labLatestResult?.policy?.reasons || [];
+      const labPolicyWarnings = labLatestResult?.policy?.warnings || [];
+      const labBlockedCategories = labLatestResult?.policy?.blocked_categories || [];
+      return (
+        <div className="surface-view">
+          <div className="surface-header">
+            <div>
+              <div className="eyebrow">Experimental capability lane</div>
+              <h3>Sandboxed full access lab</h3>
+              <p className="secondary-copy">
+                This lane is isolated from the normal bounded operator path. Commands run only inside a disposable workspace, stay fail-closed, and remain approval-gated for risky or uncertain actions.
+              </p>
+            </div>
+            <div className="surface-header-meta">
+              <span className={clsx("status-pill", `tone-${labStatus?.armed ? "warning" : "neutral"}`)}>{labStatus?.armed ? "armed" : "disarmed"}</span>
+              {labStatus?.sandbox ? <span className="meta-pill">{plainTextPreview(labStatus.sandbox, 28)}</span> : null}
+              {labStatus?.isolation_level ? <span className="meta-pill">{plainTextPreview(labStatus.isolation_level, 28)}</span> : null}
+            </div>
+          </div>
+
+          <div className="surface-grid surface-grid-lab">
+            <section className="surface-card surface-card-stack">
+              <div className="surface-card-header">
+                <h4>Lab console</h4>
+                {labLoading ? <span className="muted-label">Refreshing</span> : null}
+              </div>
+              <div className="lab-warning">
+                <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.9} />
+                <div>
+                  <strong>Experimental only</strong>
+                  <p>
+                    This is not a VM-grade sandbox yet. It uses disposable workspaces, environment sanitization, and hard policy blocks, so it should remain lab-only until the trap suite keeps passing.
+                  </p>
+                </div>
+              </div>
+              <div className="surface-meta-row">
+                <span className="evidence-chip evidence-chip-soft">{plainTextPreview(labStatus?.root || "No lab root yet", 44)}</span>
+                {labStatus?.network_isolation ? <span className="evidence-chip">{plainTextPreview(labStatus.network_isolation, 28)}</span> : null}
+              </div>
+              {!labStatus?.armed ? (
+                <div className="surface-form">
+                  <label className="field">
+                    <span>Confirmation phrase</span>
+                    <input value={labArmConfirmation} onChange={(event) => setLabArmConfirmation(event.target.value)} placeholder="ENABLE LAB" />
+                  </label>
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={labBusy === "arm" || labArmConfirmation.trim().toUpperCase() !== "ENABLE LAB"} onClick={() => void handleArmLabSurface()} type="button">
+                      {labBusy === "arm" ? "Arming..." : "Arm lab mode"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="surface-form">
+                  <div className="segmented-control segmented-control-compact">
+                    <button className={clsx("segmented-control-button", labShellKind === "powershell" && "is-active")} onClick={() => setLabShellKind("powershell")} type="button">
+                      PowerShell
+                    </button>
+                    <button className={clsx("segmented-control-button", labShellKind === "cmd" && "is-active")} onClick={() => setLabShellKind("cmd")} type="button">
+                      cmd
+                    </button>
+                  </div>
+                  <label className="field">
+                    <span>Command</span>
+                    <textarea
+                      value={labCommand}
+                      onChange={(event) => setLabCommand(event.target.value)}
+                      placeholder={labShellKind === "powershell" ? "Get-ChildItem" : "dir"}
+                      rows={4}
+                    />
+                  </label>
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={labBusy === "run" || !labCommand.trim()} onClick={() => void handleRunLabSurface()} type="button">
+                      {labBusy === "run" ? "Evaluating..." : "Run in lab"}
+                    </button>
+                    <button className="ghost-button" disabled={labBusy === "disarm"} onClick={() => void handleDisarmLabSurface()} type="button">
+                      {labBusy === "disarm" ? "Disarming..." : "Disarm"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {labStatus?.pending_approval?.kind ? (
+                <div className="draft-preview-card">
+                  <div className="surface-list-head">
+                    <span className="surface-list-title">Approval required</span>
+                    <span className="mini-list-time">{plainTextPreview(labStatus.pending_approval.kind, 28)}</span>
+                  </div>
+                  <p className="surface-list-copy">{plainTextPreview(approvalSummary(labStatus.pending_approval), 220)}</p>
+                  <div className="surface-actions">
+                    <button className="send-button" disabled={labBusy === "approve"} onClick={() => void handleLabApproval("approve")} type="button">
+                      {labBusy === "approve" ? "Approving..." : "Approve exact command"}
+                    </button>
+                    <button className="ghost-button" disabled={labBusy === "reject"} onClick={() => void handleLabApproval("reject")} type="button">
+                      {labBusy === "reject" ? "Rejecting..." : "Reject"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+
+            <section className="surface-card surface-card-stack">
+              <div className="surface-card-header">
+                <h4>Policy + audit</h4>
+                <span className={clsx("status-pill", `tone-${labDecisionTone(labLatestResult)}`)}>
+                  {plainTextPreview(labLatestResult?.policy?.decision || "idle", 24)}
+                </span>
+              </div>
+              {labLatestResult ? (
+                <div className="surface-stack">
+                  <article className={clsx("surface-list-item", `tone-${labDecisionTone(labLatestResult)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(labLatestResult.normalized_command || labLatestResult.command || "Latest lab attempt", 84)}</span>
+                      <span className="mini-list-time">{plainTextPreview(labLatestResult.policy?.risk_level || "review", 20)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(labLatestResult.summary || labLatestResult.message || "No audit summary.", 220)}</p>
+                    <div className="surface-meta-row">
+                      {labLatestResult.environment?.workspace_id ? <span className="evidence-chip evidence-chip-soft">{plainTextPreview(labLatestResult.environment.workspace_id, 22)}</span> : null}
+                      {labLatestResult.environment?.isolation_level ? <span className="evidence-chip">{plainTextPreview(labLatestResult.environment.isolation_level, 22)}</span> : null}
+                      {typeof labLatestResult.exit_code === "number" ? <span className="evidence-chip">Exit {labLatestResult.exit_code}</span> : null}
+                    </div>
+                  </article>
+                  {labPolicyReasons.length ? (
+                    <div className="surface-group">
+                      <span className="surface-group-label">Why this was allowed or blocked</span>
+                      {labPolicyReasons.map((reason, index) => (
+                        <article key={`lab-reason:${index}`} className="surface-list-item tone-neutral">
+                          <p className="surface-list-copy">{plainTextPreview(reason, 220)}</p>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                  {labBlockedCategories.length ? (
+                    <div className="surface-meta-row">
+                      {labBlockedCategories.map((category) => (
+                        <span key={category} className="evidence-chip">
+                          {plainTextPreview(category.replace(/_/g, " "), 28)}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {labPolicyWarnings.length ? (
+                    <div className="surface-group">
+                      <span className="surface-group-label">Warnings</span>
+                      {labPolicyWarnings.map((warning, index) => (
+                        <article key={`lab-warning:${index}`} className="surface-list-item tone-warning">
+                          <p className="surface-list-copy">{plainTextPreview(warning, 220)}</p>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="secondary-copy">Run an experimental shell command to inspect the policy decision, workspace metadata, and replay trail.</p>
+              )}
+            </section>
+
+            <section className="surface-card surface-card-stack">
+              <div className="surface-card-header">
+                <h4>Recent lab runs</h4>
+                <span className="muted-label">{labRuns.length}</span>
+              </div>
+              <div className="surface-list">
+                {labRuns.map((run) => (
+                  <button
+                    key={run.run_id || `${run.goal}:${run.started_at}`}
+                    className={clsx("surface-list-item surface-list-button", run.run_id === labSelectedRunId && "is-selected", `tone-${statusTone(run.final_status)}`)}
+                    onClick={() => void loadLabRunDetail(String(run.run_id || ""), String(labStatus?.state_scope_id || "").trim())}
+                    type="button"
+                  >
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(run.goal || run.final_summary || "Lab run", 72)}</span>
+                      <span className="mini-list-time">{formatDateTime(run.started_at)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(run.final_summary || "Experimental lab run.", 180)}</p>
+                  </button>
+                ))}
+                {!labRuns.length ? <p className="secondary-copy">No experimental shell attempts have been recorded yet.</p> : null}
+              </div>
+              {labSelectedRun ? (
+                <div className="surface-group">
+                  <span className="surface-group-label">Replay detail</span>
+                  <article className={clsx("surface-list-item", `tone-${statusTone(labSelectedRun.final_status)}`)}>
+                    <div className="surface-list-head">
+                      <span className="surface-list-title">{plainTextPreview(labSelectedRun.goal || "Selected lab run", 72)}</span>
+                      <span className="mini-list-time">{plainTextPreview(labSelectedRun.final_status || "run", 16)}</span>
+                    </div>
+                    <p className="surface-list-copy">{plainTextPreview(labSelectedRun.final_summary || labSelectedRun.result_message || "Recorded lab run.", 220)}</p>
+                  </article>
+                  {(labSelectedRun.steps || []).map((step) => (
+                    <article key={`${labSelectedRun.run_id || "lab"}:${step.index}`} className={clsx("surface-list-item", `tone-${statusTone(step.status)}`)}>
+                      <div className="surface-list-head">
+                        <span className="surface-list-title">
+                          Step {typeof step.index === "number" ? step.index + 1 : "?"}: {plainTextPreview(step.tool || step.type || "step", 48)}
+                        </span>
+                        <span className="mini-list-time">{plainTextPreview(step.status || "unknown", 18)}</span>
+                      </div>
+                      <p className="surface-list-copy">{plainTextPreview(step.result_summary || step.message || "Recorded lab shell step.", 220)}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          </div>
+        </div>
+      );
+    }
     if (activeSurface === "runs") {
       return (
         <div className="surface-view">
@@ -4069,6 +4499,46 @@ export default function App() {
               </span>
             </div>
           </section>
+
+          <section className="sidebar-section sidebar-capability-section sidebar-section-experimental">
+            <div className="sidebar-section-header">
+              <SectionTitle icon="lab">Experimental</SectionTitle>
+              <button className="ghost-button sidebar-inline-button" onClick={() => setExperimentalOpen((current) => !current)} type="button">
+                {experimentalOpen || activeSurface === "lab" ? "Hide" : "Open"}
+              </button>
+            </div>
+            {experimentalOpen || activeSurface === "lab" ? (
+              <div className="workspace-nav experimental-nav">
+                <button
+                  className={clsx("workspace-nav-button", activeSurface === "lab" && "is-active")}
+                  onClick={() => {
+                    setExperimentalOpen(true);
+                    setActiveSurface("lab");
+                  }}
+                  type="button"
+                >
+                  <span className="workspace-nav-button-main">
+                    <UiIcon name="lab" />
+                    <span>Lab shell</span>
+                  </span>
+                  <span className="workspace-nav-button-count">
+                    {labStatus?.armed ? "armed" : "off"}
+                  </span>
+                </button>
+                <div className="sidebar-capability-list">
+                  <span className="sidebar-capability-chip sidebar-capability-chip-warning">
+                    <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.85} />
+                    <span>Explicit opt-in required</span>
+                  </span>
+                </div>
+                <p className="secondary-copy sidebar-section-copy">
+                  Disposable workspace, fail-closed policy, and approval-gated shell execution.
+                </p>
+              </div>
+            ) : (
+              <p className="secondary-copy sidebar-section-copy">Keep the lab lane tucked away until you explicitly need experimental shell access.</p>
+            )}
+          </section>
         </div>
       </aside>
 
@@ -4082,48 +4552,45 @@ export default function App() {
             <div className="chat-title-row">
               <div className="chat-title-stack">
                 <div className="chat-title-line">
-                  <StatusGlyph status={sessionDetail?.status || status?.status} />
-                  <h2>{title}</h2>
-                  <span className={clsx("status-pill", `tone-${statusTone(sessionDetail?.status || status?.status)}`)}>
-                    {sessionDetail?.status || status?.status || "idle"}
+                  <StatusGlyph status={effectiveHeaderStatus} />
+                  <h2>{effectiveHeaderTitle}</h2>
+                  <span className={clsx("status-pill", `tone-${statusTone(effectiveHeaderStatus)}`)}>
+                    {effectiveHeaderStatus || "idle"}
                   </span>
                 </div>
-                <p className="chat-subtitle">
-                  {pendingApproval?.kind
-                    ? plainTextPreview(approvalSummary(pendingApproval), 220)
-                    : plainTextPreview(
-                        activeTask?.last_message || status?.current_step || sessionDetail?.summary || "Start a conversation or continue an existing task.",
-                        220,
-                      )}
-                </p>
+                <p className="chat-subtitle">{effectiveHeaderSubtitle}</p>
               </div>
             </div>
             <div className="chat-meta-row">
               {desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">{desktopRuntimeLabel(desktopRuntimeStatus)}</span> : null}
               {apiManagedByDesktop && !desktopRuntimeLabel(desktopRuntimeStatus) ? <span className="meta-pill">Desktop-managed API</span> : null}
-              {runPhase !== "idle" ? <span className="meta-pill">Phase {runPhase.replace(/_/g, " ")}</span> : null}
+              {labModeActive ? <span className="meta-pill">Experimental lab</span> : null}
+              {effectiveRunPhase !== "idle" ? <span className="meta-pill">Phase {effectiveRunPhase.replace(/_/g, " ")}</span> : null}
               {runFocusLocked ? <span className="meta-pill">Run focus locked</span> : null}
-              {runtimeModel ? <span className="meta-pill">Model {runtimeModel}</span> : null}
-              {runtimeEffortLabel ? <span className="meta-pill">Reasoning {runtimeEffortLabel}</span> : null}
+              {labModeActive && labStatus?.sandbox ? <span className="meta-pill">{plainTextPreview(labStatus.sandbox, 24)}</span> : null}
+              {effectiveRuntimeModel ? <span className="meta-pill">Model {effectiveRuntimeModel}</span> : null}
+              {effectiveRuntimeEffortLabel ? <span className="meta-pill">Reasoning {effectiveRuntimeEffortLabel}</span> : null}
             </div>
           </div>
           <div className="chat-header-actions">
-            <button
-              className="send-button topbar-primary-action"
-              onClick={() => void handlePrimaryTaskAction()}
-              disabled={bootState !== "ready" || Boolean(taskActionBusy) || Boolean(pendingApproval?.kind && approving)}
-              type="button"
-            >
-              <UiIcon
-                name={
-                  String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
-                  String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
-                    ? "stop"
-                    : "run"
-                }
-              />
-              <span>{topbarPrimaryLabel}</span>
-            </button>
+            {showTopbarPrimaryAction ? (
+              <button
+                className="send-button topbar-primary-action"
+                onClick={() => void handlePrimaryTaskAction()}
+                disabled={bootState !== "ready" || Boolean(taskActionBusy) || Boolean(effectivePendingApproval?.kind && approving)}
+                type="button"
+              >
+                <UiIcon
+                  name={
+                    String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "running" ||
+                    String(activeTask?.status || sessionDetail?.status || status?.status || "idle").toLowerCase() === "queued"
+                      ? "stop"
+                      : "run"
+                  }
+                />
+                <span>{topbarPrimaryLabel}</span>
+              </button>
+            ) : null}
             <button
               aria-label={bootState === "ready" ? "Refresh data" : "Retry startup"}
               className="ghost-button icon-button topbar-action"

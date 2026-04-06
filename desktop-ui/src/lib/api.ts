@@ -326,6 +326,8 @@ export type StatusPayload = {
   runtime?: RuntimeConfig;
   infrastructure?: Record<string, unknown>;
   desktop?: DesktopState;
+  execution_profile?: string;
+  lab?: LabStatusPayload;
 };
 
 export type AlertItem = {
@@ -422,11 +424,95 @@ export type RunStep = {
   approval?: Record<string, unknown>;
   browser_transition?: Record<string, unknown>;
   recovery?: Record<string, unknown>;
+  lab_shell?: Record<string, unknown>;
 };
 
 export type RunDetail = RunEntry & {
   steps?: RunStep[];
   end_state?: Record<string, unknown>;
+};
+
+export type LabStatusPayload = {
+  profile?: string;
+  experimental?: boolean;
+  armed?: boolean;
+  sandbox?: string;
+  isolation_level?: string;
+  network_isolation?: string;
+  root?: string;
+  supported_shells?: string[];
+  constraints?: string[];
+  session_id?: string;
+  state_scope_id?: string;
+  status?: string;
+  run_phase?: string;
+  pending_approval?: PendingApproval;
+  active_task?: ActiveTask;
+  current_step?: string;
+  runtime?: RuntimeConfig;
+  recent_runs?: RunEntry[];
+  profile_metadata?: Record<string, unknown>;
+  last_status?: Record<string, unknown>;
+};
+
+export type LabCommandResult = {
+  ok?: boolean;
+  tool?: string;
+  kind?: string;
+  experimental?: boolean;
+  profile?: string;
+  shell_kind?: string;
+  command?: string;
+  proposed_command?: string;
+  normalized_command?: string;
+  plan_summary?: string;
+  policy?: {
+    decision?: string;
+    risk_level?: string;
+    intent?: string;
+    summary?: string;
+    reasons?: string[];
+    warnings?: string[];
+    blocked_categories?: string[];
+  };
+  environment?: {
+    workspace_id?: string;
+    lab_root?: string;
+    cwd?: string;
+    temp?: string;
+    sandbox?: string;
+    isolation_level?: string;
+    network_isolation?: string;
+    environment_sanitized?: boolean;
+    profile?: string;
+  };
+  approval_required?: boolean;
+  approval_status?: string;
+  paused?: boolean;
+  blocked?: boolean;
+  summary?: string;
+  message?: string;
+  reason?: string;
+  error?: string;
+  exit_code?: number;
+  timed_out?: boolean;
+  timeout_seconds?: number;
+  duration_ms?: number;
+  stdout_excerpt?: string;
+  stderr_excerpt?: string;
+  checkpoint_required?: boolean;
+  checkpoint_reason?: string;
+  checkpoint_tool?: string;
+  checkpoint_target?: string;
+  checkpoint_resume_args?: Record<string, unknown>;
+};
+
+export type LabMutationResult = {
+  ok?: boolean;
+  message?: string;
+  lab?: LabStatusPayload;
+  result?: LabCommandResult;
+  status?: StatusPayload;
 };
 
 export type SessionListPayload = {
@@ -666,6 +752,18 @@ function buildUrl(baseUrl: string, path: string, query?: Record<string, string |
   return url.toString();
 }
 
+function buildScopeQuery(sessionId = "", stateScopeId = ""): Record<string, string | number | undefined> | undefined {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const normalizedScopeId = String(stateScopeId || "").trim();
+  if (!normalizedSessionId && !normalizedScopeId) {
+    return undefined;
+  }
+  return {
+    session_id: normalizedSessionId || undefined,
+    state_scope_id: normalizedScopeId || undefined,
+  };
+}
+
 async function request<T>(baseUrl: string, path: string, init?: RequestInit, query?: Record<string, string | number | undefined>): Promise<T> {
   const url = buildUrl(baseUrl, path, query);
   let response: Response;
@@ -827,8 +925,8 @@ export async function sendSessionMessage(baseUrl: string, sessionId: string, mes
   });
 }
 
-export async function getStatus(baseUrl: string, sessionId = ""): Promise<StatusPayload> {
-  return request<StatusPayload>(baseUrl, "/status", undefined, sessionId ? { session_id: sessionId } : undefined);
+export async function getStatus(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<StatusPayload> {
+  return request<StatusPayload>(baseUrl, "/status", undefined, buildScopeQuery(sessionId, stateScopeId));
 }
 
 export async function getSlashCommands(baseUrl: string): Promise<SlashCommandCatalogPayload> {
@@ -968,16 +1066,16 @@ export function resolveDesktopEvidenceArtifactPreviewUrl(baseUrl: string, artifa
   return getDesktopEvidenceArtifactContentUrl(baseUrl, evidenceId);
 }
 
-export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8): Promise<{ items?: RunEntry[] }> {
+export async function getRecentRuns(baseUrl: string, sessionId = "", limit = 8, stateScopeId = ""): Promise<{ items?: RunEntry[] }> {
   return request<{ items?: RunEntry[] }>(baseUrl, "/runs/recent", undefined, {
     limit,
-    session_id: sessionId || undefined,
+    ...(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
-export async function getRunDetail(baseUrl: string, runId: string, sessionId = ""): Promise<{ run?: RunDetail }> {
+export async function getRunDetail(baseUrl: string, runId: string, sessionId = "", stateScopeId = ""): Promise<{ run?: RunDetail }> {
   return request<{ run?: RunDetail }>(baseUrl, `/runs/${encodeURIComponent(runId)}`, undefined, {
-    session_id: sessionId || undefined,
+    ...(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
@@ -1050,37 +1148,68 @@ export async function updateWatchAutomation(
   );
 }
 
-export async function approvePending(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+export async function approvePending(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<ApprovalResult> {
   return request<ApprovalResult>(baseUrl, "/approval/approve", {
     method: "POST",
-    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+    body: JSON.stringify(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
-export async function rejectPending(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+export async function rejectPending(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<ApprovalResult> {
   return request<ApprovalResult>(baseUrl, "/approval/reject", {
     method: "POST",
-    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+    body: JSON.stringify(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
-export async function stopTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+export async function stopTask(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<ApprovalResult> {
   return request<ApprovalResult>(baseUrl, "/tasks/stop", {
     method: "POST",
-    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+    body: JSON.stringify(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
-export async function resumeTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+export async function resumeTask(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<ApprovalResult> {
   return request<ApprovalResult>(baseUrl, "/tasks/resume", {
     method: "POST",
-    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+    body: JSON.stringify(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
 }
 
-export async function retryTask(baseUrl: string, sessionId = ""): Promise<ApprovalResult> {
+export async function retryTask(baseUrl: string, sessionId = "", stateScopeId = ""): Promise<ApprovalResult> {
   return request<ApprovalResult>(baseUrl, "/tasks/retry", {
     method: "POST",
-    body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+    body: JSON.stringify(buildScopeQuery(sessionId, stateScopeId) || {}),
+  });
+}
+
+export async function getLabStatus(baseUrl: string, sessionId = ""): Promise<LabStatusPayload> {
+  return request<LabStatusPayload>(baseUrl, "/lab/status", undefined, buildScopeQuery(sessionId, ""));
+}
+
+export async function armLabMode(baseUrl: string, confirmation: string, sessionId = ""): Promise<LabMutationResult> {
+  return request<LabMutationResult>(baseUrl, "/lab/arm", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(buildScopeQuery(sessionId, "") || {}),
+      confirmation,
+    }),
+  });
+}
+
+export async function disarmLabMode(baseUrl: string, sessionId = ""): Promise<LabMutationResult> {
+  return request<LabMutationResult>(baseUrl, "/lab/disarm", {
+    method: "POST",
+    body: JSON.stringify(buildScopeQuery(sessionId, "") || {}),
+  });
+}
+
+export async function runLabCommand(
+  baseUrl: string,
+  payload: { command: string; shell_kind?: string; approval_status?: string; session_id?: string },
+): Promise<LabMutationResult> {
+  return request<LabMutationResult>(baseUrl, "/lab/commands/run", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
