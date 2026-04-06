@@ -25,6 +25,7 @@ from core.local_api_events import (
     LocalApiEventStream,
 )
 from core.command_registry import execute_slash_command, list_slash_commands
+from core.config import load_settings
 from core.extension_registry import list_extension_catalog
 from core.desktop_evidence import compact_evidence_preview, get_desktop_evidence_store
 from core.skill_registry import list_skill_catalog
@@ -529,7 +530,7 @@ class LocalOperatorApiServer:
         settings: Dict[str, Any] | None = None,
     ):
         self.startup_profiler = StartupProfiler("local_api")
-        self.settings = settings if isinstance(settings, dict) else {}
+        self.settings = dict(settings) if isinstance(settings, dict) else load_settings(force=True)
         self.startup_profiler.mark("settings_ready")
         self.controller = controller or OperatorController(agent=Agent(settings=self.settings), settings=self.settings)
         self.startup_profiler.mark("controller_ready")

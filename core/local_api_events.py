@@ -697,6 +697,23 @@ class LocalApiEventStream:
         channel.last_access_at = time.monotonic()
         return effective_state
 
+    def _prime_reconnect_messages_locked(self, channel: _ReplayChannel) -> Dict[str, Any] | None:
+        if not channel.session_id:
+            return None
+        payload = self.chat_manager.peek_stream_view(channel.session_id, limit=self.message_limit)
+        if not payload.get("ok"):
+            return None
+
+        latest_state = channel.latest_state if isinstance(channel.latest_state, dict) else {}
+        primed_state = {
+            "session": _compact_session(payload.get("session", {})),
+            "messages": [_compact_message(message) for message in payload.get("messages", [])[-self.message_limit :]],
+            "snapshot": latest_state.get("snapshot", {}) if isinstance(latest_state.get("snapshot", {}), dict) else {},
+            "alerts": list(latest_state.get("alerts", []))[: self.alert_limit] if isinstance(latest_state.get("alerts", []), list) else [],
+        }
+        self._apply_state_to_channel_locked(channel, primed_state)
+        return primed_state
+
     def _publish_locked(self, channel: _ReplayChannel, event_name: str, *, data: Dict[str, Any]) -> Dict[str, Any]:
         channel.sequence += 1
         event = {
@@ -896,15 +913,22 @@ class LocalApiEventStream:
     def iter_events(self, *, session_id: str = "", state_scope_id: str = "", last_event_id: str = "") -> Iterator[Dict[str, Any]]:
         safe_session_id = _trim_text(session_id, limit=80)
         safe_scope_id = _trim_text(state_scope_id, limit=120)
+        requested_last_event_id = _trim_text(last_event_id, limit=80)
         with self._condition:
             channel = self._ensure_channel_locked(safe_session_id, safe_scope_id)
-            state = self._bootstrap_channel_locked(channel)
+            primed_state: Dict[str, Any] | None = None
+            if requested_last_event_id and channel.latest_state:
+                try:
+                    primed_state = self._prime_reconnect_messages_locked(channel)
+                except Exception:
+                    primed_state = None
+            state = self._bootstrap_channel_locked(channel, state=primed_state if isinstance(primed_state, dict) and primed_state else None)
+            replay_status, replay_events = self._replay_after_locked(channel, requested_last_event_id)
             channel.subscribers += 1
-            replay_status, replay_events = self._replay_after_locked(channel, last_event_id)
             current_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
             last_seen_sequence = current_sequence
             if replay_status == "ok":
-                parsed_sequence = self._event_sequence(last_event_id, expected_channel_id=channel.channel_id)
+                parsed_sequence = self._event_sequence(requested_last_event_id, expected_channel_id=channel.channel_id)
                 last_seen_sequence = parsed_sequence or current_sequence
                 if replay_events:
                     last_seen_sequence = self._event_sequence(replay_events[-1].get("event_id", ""), expected_channel_id=channel.channel_id)
@@ -926,7 +950,7 @@ class LocalApiEventStream:
                 for event in replay_events:
                     yield event
             else:
-                if _trim_text(last_event_id, limit=80):
+                if requested_last_event_id:
                     reason = "too_old" if replay_status == "stale" else "missing"
                     yield self._connection_event(
                         "stream.reset",
@@ -934,14 +958,14 @@ class LocalApiEventStream:
                         state_scope_id=safe_scope_id,
                         data={
                             "reason": reason,
-                            "requested_last_event_id": _trim_text(last_event_id, limit=80),
+                            "requested_last_event_id": requested_last_event_id,
                         },
                     )
                 yield self._sync_payload(
                     session_id=safe_session_id,
                     state_scope_id=safe_scope_id,
                     state=state,
-                    reason="reconnect" if _trim_text(last_event_id, limit=80) else "initial",
+                    reason="reconnect" if requested_last_event_id else "initial",
                     replay_status=replay_status,
                 )
 

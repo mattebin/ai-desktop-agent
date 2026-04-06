@@ -1007,14 +1007,9 @@ class ChatSessionManager:
     def list_sessions(self, limit: int = 10) -> Dict[str, Any]:
         safe_limit = max(1, min(int(limit or 10), 50))
         with self._lock:
-            snapshots: Dict[str, Dict[str, Any]] = {}
-            for session in self._sessions:
-                snapshot = self.controller.get_snapshot(session_id=session.get("session_id", ""))
-                snapshots[session.get("session_id", "")] = snapshot
-                self._sync_session_locked(session, snapshot)
-            self._persist_locked()
             ordered = sorted(self._sessions, key=lambda item: item.get("updated_at", ""), reverse=True)
-            items = [self._session_summary_payload(session, snapshots.get(session.get("session_id", ""), {})) for session in ordered[:safe_limit]]
+            visible_sessions = ordered[:safe_limit]
+            items = [self._session_summary_payload(session, {}) for session in visible_sessions]
         return {"items": items, "sessions": items}
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -1041,6 +1036,19 @@ class ChatSessionManager:
                 "ok": True,
                 "session": self._session_summary_payload(session, snapshot),
                 "items": messages,
+                "messages": messages,
+            }
+
+    def peek_stream_view(self, session_id: str, limit: int = 24) -> Dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 24), 80))
+        with self._lock:
+            session = self._find_session_locked(session_id)
+            if session is None:
+                return {"ok": False, "message": f"Unknown session: {session_id}"}
+            messages = session.get("messages", [])[-safe_limit:]
+            return {
+                "ok": True,
+                "session": self._session_summary_payload(session),
                 "messages": messages,
             }
 

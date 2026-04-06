@@ -218,7 +218,7 @@ def _message_summary(message: Dict[str, Any], *, self_address: str = "", body_li
     }
 
 
-def _thread_summary(thread: Dict[str, Any], *, self_address: str = "") -> Dict[str, Any]:
+def _thread_summary(thread: Dict[str, Any], *, self_address: str = "", include_messages: bool = True) -> Dict[str, Any]:
     messages = [
         _message_summary(item, self_address=self_address, body_limit=1200)
         for item in list(thread.get("messages", []))
@@ -242,7 +242,7 @@ def _thread_summary(thread: Dict[str, Any], *, self_address: str = "") -> Dict[s
         "last_date": str(latest.get("date", "")).strip(),
         "last_message_id": str(latest.get("message_id", "")).strip(),
         "unread": any(bool(item.get("unread", False)) for item in messages),
-        "messages": messages,
+        **({"messages": messages} if include_messages else {}),
     }
 
 
@@ -538,9 +538,20 @@ class EmailService:
                 thread = service.users().threads().get(
                     userId="me",
                     id=str(ref.get("id", "")).strip(),
-                    format="full",
+                    format="metadata",
+                    metadataHeaders=[
+                        "Subject",
+                        "From",
+                        "To",
+                        "Cc",
+                        "Reply-To",
+                        "Date",
+                        "Message-ID",
+                        "In-Reply-To",
+                        "References",
+                    ],
                 ).execute()
-                items.append(_thread_summary(thread, self_address=_normalize_email_address(profile.get("emailAddress", ""))))
+                items.append(_thread_summary(thread, self_address=_normalize_email_address(profile.get("emailAddress", "")), include_messages=False))
         except Exception as exc:
             return {
                 "ok": False,

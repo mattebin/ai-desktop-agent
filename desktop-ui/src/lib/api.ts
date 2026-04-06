@@ -608,11 +608,21 @@ export type EmailDraftsPayload = {
   message?: string;
   error?: string;
   paused?: boolean;
+  approval_required?: boolean;
+  approval_status?: string;
   disposition?: string;
   needs_context?: boolean;
   confidence?: string;
   questions?: string[];
   thread?: EmailThreadSummary;
+  reason?: string;
+  target?: string;
+  subject?: string;
+  sent?: {
+    message_id?: string;
+    thread_id?: string;
+    label_ids?: string[];
+  };
 };
 
 export type CommandExecutionResult = {
@@ -698,6 +708,17 @@ function normalizeInvokeError(error: unknown): string {
   return "Tauri bootstrap failed.";
 }
 
+function hasTauriRuntime(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const scopedWindow = window as typeof window & {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return Boolean(scopedWindow.__TAURI__ || scopedWindow.__TAURI_INTERNALS__);
+}
+
 async function waitForLocalOperator(baseUrl: string, timeoutMs = 20000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "";
@@ -716,32 +737,34 @@ async function waitForLocalOperator(baseUrl: string, timeoutMs = 20000): Promise
 export async function ensureLocalApi(): Promise<EnsureLocalApiResult> {
   let tauriError = "";
   let bootResult: EnsureLocalApiResult | null = null;
-  try {
-    const result = await invoke<{
-      baseUrl?: string;
-      started?: boolean;
-      managedByDesktop?: boolean;
-      runtimeStatus?: DesktopRuntimeStatus;
-      logPath?: string;
-      backendLogPath?: string;
-    }>("ensure_local_api");
-    bootResult = {
-      baseUrl: normalizeBaseUrl(result.baseUrl || DEFAULT_API_BASE_URL),
-      started: Boolean(result.started),
-      managedByDesktop: Boolean(result.managedByDesktop),
-      runtimeStatus: result.runtimeStatus,
-      logPath: result.logPath,
-      backendLogPath: result.backendLogPath,
-    };
-    await waitForLocalOperator(bootResult.baseUrl);
-    return bootResult;
-  } catch (error) {
-    tauriError = normalizeInvokeError(error);
-    if (bootResult?.baseUrl) {
-      const logNote = [bootResult.logPath ? `Runtime log: ${bootResult.logPath}.` : "", bootResult.backendLogPath ? `Backend log: ${bootResult.backendLogPath}.` : ""]
-        .filter(Boolean)
-        .join(" ");
-      throw new Error(`Local operator startup failed for ${bootResult.baseUrl}. ${tauriError}${logNote ? ` ${logNote}` : ""}`.trim());
+  if (hasTauriRuntime()) {
+    try {
+      const result = await invoke<{
+        baseUrl?: string;
+        started?: boolean;
+        managedByDesktop?: boolean;
+        runtimeStatus?: DesktopRuntimeStatus;
+        logPath?: string;
+        backendLogPath?: string;
+      }>("ensure_local_api");
+      bootResult = {
+        baseUrl: normalizeBaseUrl(result.baseUrl || DEFAULT_API_BASE_URL),
+        started: Boolean(result.started),
+        managedByDesktop: Boolean(result.managedByDesktop),
+        runtimeStatus: result.runtimeStatus,
+        logPath: result.logPath,
+        backendLogPath: result.backendLogPath,
+      };
+      await waitForLocalOperator(bootResult.baseUrl);
+      return bootResult;
+    } catch (error) {
+      tauriError = normalizeInvokeError(error);
+      if (bootResult?.baseUrl) {
+        const logNote = [bootResult.logPath ? `Runtime log: ${bootResult.logPath}.` : "", bootResult.backendLogPath ? `Backend log: ${bootResult.backendLogPath}.` : ""]
+          .filter(Boolean)
+          .join(" ");
+        throw new Error(`Local operator startup failed for ${bootResult.baseUrl}. ${tauriError}${logNote ? ` ${logNote}` : ""}`.trim());
+      }
     }
   }
 

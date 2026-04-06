@@ -1,4 +1,4 @@
-import React, { createContext, startTransition, useContext, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -15,13 +15,10 @@ import {
   Clock3,
   Command,
   Eye,
-  GitBranchPlus,
-  GitCommitHorizontal,
   History,
   ImageIcon,
   LoaderCircle,
   Mail,
-  Menu,
   MessagesSquare,
   MonitorSmartphone,
   MoonStar,
@@ -147,6 +144,10 @@ type ControlSnapshot = {
 type WorkspaceSurface = "chat" | "automations" | "gmail" | "workflows" | "runs";
 
 type AutomationComposerMode = "scheduled" | "watch";
+type AutomationListMode = "scheduled" | "watch" | "queue";
+type GmailWorkspaceMode = "thread" | "draft";
+type WorkflowWorkspaceMode = "skills" | "extensions";
+type InspectorMode = "evidence" | "context";
 
 type ThemeMode = "light" | "dark";
 
@@ -793,7 +794,6 @@ function proposalLabel(proposal?: DesktopTargetProposal | null): string {
 
 type IconName =
   | "brand"
-  | "menu"
   | "refresh"
   | "theme-light"
   | "theme-dark"
@@ -814,13 +814,10 @@ type IconName =
   | "extensions"
   | "run"
   | "stop"
-  | "handoff"
-  | "commit"
   | "search";
 
 const ICONS = {
   brand: Bot,
-  menu: Menu,
   refresh: RefreshCw,
   "theme-light": SunMedium,
   "theme-dark": MoonStar,
@@ -841,8 +838,6 @@ const ICONS = {
   extensions: Puzzle,
   run: Play,
   stop: Square,
-  handoff: GitBranchPlus,
-  commit: GitCommitHorizontal,
   search: Search,
 } satisfies Record<IconName, LucideIcon>;
 
@@ -871,13 +866,7 @@ function StatusGlyph({ status, className }: { status?: string; className?: strin
   return <CircleDot aria-hidden className={clsx("status-glyph", className)} strokeWidth={1.9} />;
 }
 
-function SectionTitle({
-  icon,
-  children,
-}: {
-  icon: IconName;
-  children: React.ReactNode;
-}) {
+function SectionTitle({ icon, children }: { icon: IconName; children: React.ReactNode }) {
   return (
     <span className="section-title">
       <UiIcon name={icon} />
@@ -885,8 +874,6 @@ function SectionTitle({
     </span>
   );
 }
-
-const CompactMenuContext = createContext<(() => void) | null>(null);
 
 function OverlayPortal({ children }: { children: React.ReactNode }) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
@@ -896,131 +883,6 @@ function OverlayPortal({ children }: { children: React.ReactNode }) {
   }, []);
 
   return container ? createPortal(children, container) : null;
-}
-
-function CompactMenu({
-  label,
-  icon,
-  children,
-}: {
-  label: string;
-  icon: IconName;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const popoverRef = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState({ top: 0, left: 0, minWidth: 198 });
-
-  function closeMenu() {
-    setOpen(false);
-  }
-
-  function updatePosition() {
-    const trigger = triggerRef.current;
-    if (!trigger) {
-      return;
-    }
-    const rect = trigger.getBoundingClientRect();
-    const minWidth = Math.max(Math.round(rect.width), 198);
-    const maxLeft = Math.max(12, window.innerWidth - minWidth - 12);
-    const left = Math.max(12, Math.min(Math.round(rect.right - minWidth), maxLeft));
-    const top = Math.round(rect.bottom + 8);
-    setPosition({ top, left, minWidth });
-  }
-
-  useLayoutEffect(() => {
-    if (!open) {
-      return;
-    }
-    updatePosition();
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    function handlePointerDown(event: MouseEvent) {
-      const target = event.target as Node | null;
-      if (target && (triggerRef.current?.contains(target) || popoverRef.current?.contains(target))) {
-        return;
-      }
-      closeMenu();
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        closeMenu();
-      }
-    }
-    function handleWindowChange() {
-      closeMenu();
-    }
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("resize", handleWindowChange);
-    window.addEventListener("scroll", handleWindowChange, true);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("resize", handleWindowChange);
-      window.removeEventListener("scroll", handleWindowChange, true);
-    };
-  }, [open]);
-
-  return (
-    <CompactMenuContext.Provider value={closeMenu}>
-      <div className={clsx("compact-menu", open && "is-open")}>
-        <button
-          aria-expanded={open}
-          className="ghost-button compact-menu-trigger"
-          onClick={() => setOpen((current) => !current)}
-          ref={triggerRef}
-          type="button"
-        >
-          <UiIcon name={icon} />
-          <span>{label}</span>
-        </button>
-        {open ? (
-          <OverlayPortal>
-            <div className="compact-menu-popover-layer">
-              <div
-                className="compact-menu-popover"
-                ref={popoverRef}
-                style={{ top: `${position.top}px`, left: `${position.left}px`, minWidth: `${position.minWidth}px` }}
-              >
-                {children}
-              </div>
-            </div>
-          </OverlayPortal>
-        ) : null}
-      </div>
-    </CompactMenuContext.Provider>
-  );
-}
-
-function CompactMenuButton({
-  icon,
-  children,
-  onClick,
-}: {
-  icon: IconName;
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
-  const closeMenu = useContext(CompactMenuContext);
-  return (
-    <button
-      className="compact-menu-item"
-      type="button"
-      onClick={() => {
-        onClick();
-        closeMenu?.();
-      }}
-    >
-      <UiIcon name={icon} />
-      <span>{children}</span>
-    </button>
-  );
 }
 
 function hasEvidencePreview(preview?: EvidenceSummary | null): boolean {
@@ -1751,6 +1613,7 @@ export default function App() {
   });
   const [activeSurface, setActiveSurface] = useState<WorkspaceSurface>("chat");
   const [automationComposerMode, setAutomationComposerMode] = useState<AutomationComposerMode>("scheduled");
+  const [automationListMode, setAutomationListMode] = useState<AutomationListMode>("scheduled");
   const [automationBusy, setAutomationBusy] = useState("");
   const [automationGoal, setAutomationGoal] = useState("");
   const [automationRunAt, setAutomationRunAt] = useState(() => {
@@ -1772,10 +1635,15 @@ export default function App() {
   const [emailDraftDetail, setEmailDraftDetail] = useState<EmailDraftsPayload | null>(null);
   const [emailQuery, setEmailQuery] = useState("");
   const [emailBusy, setEmailBusy] = useState("");
+  const [emailPanelLoading, setEmailPanelLoading] = useState(false);
+  const [gmailWorkspaceMode, setGmailWorkspaceMode] = useState<GmailWorkspaceMode>("thread");
+  const [emailSendReview, setEmailSendReview] = useState<EmailDraftsPayload | null>(null);
   const [emailReplyGuidance, setEmailReplyGuidance] = useState("");
   const [emailReplyContext, setEmailReplyContext] = useState("");
   const [emailForwardTo, setEmailForwardTo] = useState("");
   const [emailForwardNote, setEmailForwardNote] = useState("");
+  const [workflowWorkspaceMode, setWorkflowWorkspaceMode] = useState<WorkflowWorkspaceMode>("skills");
+  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("evidence");
   const [selectedRunId, setSelectedRunId] = useState("");
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
   const [runDetailBusy, setRunDetailBusy] = useState(false);
@@ -1784,7 +1652,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
-  const [taskActionBusy, setTaskActionBusy] = useState<"" | "run" | "stop" | "handoff" | "commit">("");
+  const [taskActionBusy, setTaskActionBusy] = useState<"" | "run" | "stop">("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(SLASH_COMMANDS);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
@@ -2000,7 +1868,7 @@ export default function App() {
     if (!apiBaseUrl) {
       return "";
     }
-    const payload = await listSessions(apiBaseUrl, 32);
+    const payload = await listSessions(apiBaseUrl, 12);
     const nextSessions = payload.sessions || payload.items || [];
     setSessions((current) => reconcileSessionList(current, nextSessions));
     const lockedSessionId =
@@ -2124,46 +1992,52 @@ export default function App() {
     if (!apiBaseUrl) {
       return;
     }
-    const [statusPayload, threadsPayload, draftsPayload] = await Promise.all([
-      getEmailStatus(apiBaseUrl),
-      listEmailThreads(apiBaseUrl, { limit: 18, query: emailQuery.trim() || undefined, labelIds: ["INBOX"] }),
-      listEmailDrafts(apiBaseUrl, "", 12),
-    ]);
-    setEmailPanelStatus(statusPayload);
-    setEmailThreads(threadsPayload.items || []);
-    setEmailDrafts(draftsPayload.items || []);
+    setEmailPanelLoading(true);
+    try {
+      const [statusPayload, threadsPayload, draftsPayload] = await Promise.all([
+        getEmailStatus(apiBaseUrl),
+        listEmailThreads(apiBaseUrl, { limit: 12, query: emailQuery.trim() || undefined, labelIds: ["INBOX"] }),
+        listEmailDrafts(apiBaseUrl, "", 12),
+      ]);
+      setEmailPanelStatus(statusPayload);
+      setEmailThreads(threadsPayload.items || []);
+      setEmailDrafts(draftsPayload.items || []);
 
-    const nextThreadId =
-      options.threadId ||
-      emailSelectedThread?.thread_id ||
-      threadsPayload.thread?.thread_id ||
-      threadsPayload.items?.[0]?.thread_id ||
-      "";
-    if (nextThreadId) {
-      try {
-        const threadPayload = await readEmailThread(apiBaseUrl, nextThreadId, 10);
-        setEmailSelectedThread(threadPayload.thread || null);
-      } catch (_error) {
+      const nextThreadId =
+        options.threadId ||
+        emailSelectedThread?.thread_id ||
+        threadsPayload.thread?.thread_id ||
+        threadsPayload.items?.[0]?.thread_id ||
+        "";
+      if (nextThreadId) {
+        try {
+          const threadPayload = await readEmailThread(apiBaseUrl, nextThreadId, 10);
+          setEmailSelectedThread(threadPayload.thread || null);
+        } catch (_error) {
+          setEmailSelectedThread(null);
+        }
+      } else {
         setEmailSelectedThread(null);
       }
-    } else {
-      setEmailSelectedThread(null);
-    }
 
-    const nextDraftId =
-      options.draftId ||
-      String(emailDraftDetail?.draft?.draft_id || "").trim() ||
-      draftsPayload.items?.[0]?.draft_id ||
-      "";
-    if (nextDraftId) {
-      try {
-        const draftPayload = await getEmailDraft(apiBaseUrl, nextDraftId);
-        setEmailDraftDetail(draftPayload);
-      } catch (_error) {
+      const currentDraftId = String(emailDraftDetail?.draft?.draft_id || "").trim();
+      const nextDraftId =
+        options.draftId ||
+        ((currentDraftId && (draftsPayload.items || []).some((draft) => String(draft.draft_id || "").trim() === currentDraftId))
+          ? currentDraftId
+          : "");
+      if (nextDraftId) {
+        try {
+          const draftPayload = await getEmailDraft(apiBaseUrl, nextDraftId);
+          setEmailDraftDetail(draftPayload);
+        } catch (_error) {
+          setEmailDraftDetail(null);
+        }
+      } else {
         setEmailDraftDetail(null);
       }
-    } else {
-      setEmailDraftDetail(null);
+    } finally {
+      setEmailPanelLoading(false);
     }
   }
 
@@ -2175,6 +2049,7 @@ export default function App() {
     try {
       const payload = await readEmailThread(apiBaseUrl, threadId, 10);
       setEmailSelectedThread(payload.thread || null);
+      setGmailWorkspaceMode("thread");
     } finally {
       setEmailBusy("");
     }
@@ -2307,7 +2182,9 @@ export default function App() {
         guidance: emailReplyGuidance.trim(),
         user_context: emailReplyContext.trim(),
       });
+      setEmailSendReview(null);
       setEmailDraftDetail(payload);
+      setGmailWorkspaceMode("draft");
       await refreshEmailPanel({ threadId: emailSelectedThread.thread_id, draftId: String(payload.draft?.draft_id || "").trim() });
       addLocalActivity("Reply draft prepared", plainTextPreview(String(payload.message || (typeof payload.summary === "string" ? payload.summary : payload.summary?.summary) || "Prepared a reply draft."), 180), payload.needs_context ? "warning" : "success");
     } finally {
@@ -2329,9 +2206,32 @@ export default function App() {
           .filter(Boolean),
         note: emailForwardNote.trim(),
       });
+      setEmailSendReview(null);
       setEmailDraftDetail(payload);
+      setGmailWorkspaceMode("draft");
       await refreshEmailPanel({ threadId: emailSelectedThread.thread_id, draftId: String(payload.draft?.draft_id || "").trim() });
       addLocalActivity("Forward draft prepared", plainTextPreview(String(payload.message || (typeof payload.summary === "string" ? payload.summary : payload.summary?.summary) || "Prepared a forward draft."), 180), "success");
+    } finally {
+      setEmailBusy("");
+    }
+  }
+
+  async function handleReviewPreparedDraft() {
+    if (!apiBaseUrl) {
+      return;
+    }
+    const draftId = String(
+      emailDraftDetail?.draft?.draft_id ||
+        (emailDraftDetail?.summary && typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary.draft_id : "") ||
+        "",
+    ).trim();
+    if (!draftId) {
+      return;
+    }
+    setEmailBusy("review-send");
+    try {
+      const payload = await sendEmailDraft(apiBaseUrl, draftId, "pending");
+      setEmailSendReview(payload);
     } finally {
       setEmailBusy("");
     }
@@ -2353,6 +2253,7 @@ export default function App() {
     try {
       const payload = await sendEmailDraft(apiBaseUrl, draftId, "approved");
       setEmailDraftDetail(payload);
+      setEmailSendReview(null);
       await refreshEmailPanel({ draftId });
       addLocalActivity("Draft sent", plainTextPreview(String(payload.message || "Sent the approved Gmail draft."), 180), payload.ok ? "success" : "warning");
     } finally {
@@ -2376,6 +2277,7 @@ export default function App() {
     try {
       const payload = await rejectEmailDraft(apiBaseUrl, draftId, "Rejected from the Gmail workspace.");
       setEmailDraftDetail(payload);
+      setEmailSendReview(null);
       await refreshEmailPanel({ draftId });
       addLocalActivity("Draft rejected", plainTextPreview(String(payload.message || "Rejected the Gmail draft."), 180), "warning");
     } finally {
@@ -2391,6 +2293,8 @@ export default function App() {
     try {
       const payload = await getEmailDraft(apiBaseUrl, draftId);
       setEmailDraftDetail(payload);
+      setEmailSendReview(null);
+      setGmailWorkspaceMode("draft");
     } finally {
       setEmailBusy("");
     }
@@ -2553,9 +2457,7 @@ export default function App() {
         if (!alive) {
           return;
         }
-        if (resolvedSession) {
-          await loadConversation(resolvedSession, { preserveVisibleState: true });
-        } else {
+        if (!resolvedSession) {
           const [operatorStatus, operatorAlerts] = await Promise.all([getStatus(apiBaseUrl), getAlerts(apiBaseUrl, "", 8)]);
           if (!alive) {
             return;
@@ -2568,6 +2470,9 @@ export default function App() {
           return;
         }
         setBootState("ready");
+        if (resolvedSession) {
+          void loadConversation(resolvedSession, { preserveVisibleState: true });
+        }
       } catch (error) {
         if (!alive) {
           return;
@@ -2834,7 +2739,9 @@ export default function App() {
         ? "Add context or resolve the approval..."
         : "Message the operator...";
   const emailService = infrastructure.email as Record<string, unknown> | undefined;
-  const emailConnected = Boolean(emailService && String(emailService.active || "").toLowerCase() === "connected");
+  const emailConnected = Boolean(
+    emailPanelStatus?.authenticated || (emailService && String(emailService.active || "").toLowerCase() === "connected"),
+  );
   const pendingApprovalToolName = String(pendingApproval?.tool || "").trim().toLowerCase();
   const approvalTool = pendingApprovalToolName
     ? controlData.tools.find((tool) => String(tool.name || "").trim().toLowerCase() === pendingApprovalToolName) || null
@@ -2844,6 +2751,25 @@ export default function App() {
       (emailDraftDetail?.summary && typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary.draft_id : "") ||
       "",
   ).trim();
+  const emailDraftSummaryText =
+    typeof emailDraftDetail?.summary === "string"
+      ? emailDraftDetail.summary
+      : emailDraftDetail?.summary?.summary || emailDraftDetail?.message || "";
+  const emailDraftQuestions =
+    emailDraftDetail?.questions ||
+    (typeof emailDraftDetail?.summary !== "string" ? emailDraftDetail?.summary?.questions : []) ||
+    [];
+  const automationCounts = {
+    queue: controlData.queue?.queued_tasks?.length || 0,
+    scheduled: controlData.scheduled?.tasks?.length || 0,
+    watch: controlData.watches?.tasks?.length || 0,
+  };
+  const activeAutomationItems =
+    automationListMode === "scheduled"
+      ? controlData.scheduled?.tasks || []
+      : automationListMode === "watch"
+        ? controlData.watches?.tasks || []
+        : controlData.queue?.queued_tasks || [];
   const groupedSkills = availableSkills.reduce<Record<string, SkillSummary[]>>((groups, skill) => {
     const key = String(skill.tags?.[0] || skill.source || "general").trim() || "general";
     if (!groups[key]) {
@@ -3383,9 +3309,9 @@ export default function App() {
               </p>
             </div>
             <div className="surface-header-meta">
-              <span className="meta-pill">{controlData.scheduled?.tasks?.length || 0} scheduled</span>
-              <span className="meta-pill">{controlData.watches?.tasks?.length || 0} watches</span>
-              <span className="meta-pill">{controlData.queue?.queued_tasks?.length || 0} queued</span>
+              <span className="meta-pill">{automationCounts.scheduled} scheduled</span>
+              <span className="meta-pill">{automationCounts.watch} watches</span>
+              <span className="meta-pill">{automationCounts.queue} queued</span>
             </div>
           </div>
 
@@ -3500,79 +3426,85 @@ export default function App() {
               )}
             </section>
 
-            <section className="surface-card">
+            <section className="surface-card surface-card-scroll">
               <div className="surface-card-header">
-                <h4>Queued tasks</h4>
-                <span className="muted-label">{controlData.queue?.queued_tasks?.length || 0}</span>
+                <h4>Automation activity</h4>
+                <div className="segmented-control">
+                  <button
+                    className={clsx("segmented-control-button", automationListMode === "scheduled" && "is-active")}
+                    onClick={() => setAutomationListMode("scheduled")}
+                    type="button"
+                  >
+                    Scheduled
+                  </button>
+                  <button
+                    className={clsx("segmented-control-button", automationListMode === "watch" && "is-active")}
+                    onClick={() => setAutomationListMode("watch")}
+                    type="button"
+                  >
+                    Watches
+                  </button>
+                  <button
+                    className={clsx("segmented-control-button", automationListMode === "queue" && "is-active")}
+                    onClick={() => setAutomationListMode("queue")}
+                    type="button"
+                  >
+                    Queue
+                  </button>
+                </div>
               </div>
               <div className="surface-list">
-                {(controlData.queue?.queued_tasks || []).map((task) => (
-                  <article key={task.task_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
-                    <div className="surface-list-head">
-                      <span className="surface-list-title">{plainTextPreview(task.goal || "Queued task", 88)}</span>
-                      <span className="mini-list-time">{plainTextPreview(task.status || "queued", 24)}</span>
-                    </div>
-                    <p className="surface-list-copy">{plainTextPreview(task.last_message || "Waiting behind the active task.", 180)}</p>
-                  </article>
-                ))}
-                {!(controlData.queue?.queued_tasks || []).length ? <p className="secondary-copy">No queued tasks right now.</p> : null}
-              </div>
-            </section>
-
-            <section className="surface-card">
-              <div className="surface-card-header">
-                <h4>Scheduled</h4>
-                <span className="muted-label">{controlData.scheduled?.tasks?.length || 0}</span>
-              </div>
-              <div className="surface-list">
-                {(controlData.scheduled?.tasks || []).map((task) => (
-                  <article key={task.scheduled_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
-                    <div className="surface-list-head">
-                      <span className="surface-list-title">{plainTextPreview(task.goal || "Scheduled task", 88)}</span>
-                      <span className="mini-list-time">{plainTextPreview(task.recurrence || "once", 20)}</span>
-                    </div>
-                    <p className="surface-list-copy">{plainTextPreview(task.last_message || task.goal || "Scheduled task", 180)}</p>
-                    <div className="surface-meta-row">
-                      <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.next_run_at || task.scheduled_for || "unscheduled", 36)}</span>
-                      <span className="evidence-chip">{plainTextPreview(task.status || "scheduled", 20)}</span>
-                    </div>
-                    <div className="surface-actions">
-                      <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `scheduled:pause:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "pause")} type="button">Pause</button>
-                      <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `scheduled:resume:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "resume")} type="button">Resume</button>
-                      <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `scheduled:delete:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "delete")} type="button">Delete</button>
-                    </div>
-                  </article>
-                ))}
-                {!(controlData.scheduled?.tasks || []).length ? <p className="secondary-copy">No scheduled automations yet.</p> : null}
-              </div>
-            </section>
-
-            <section className="surface-card">
-              <div className="surface-card-header">
-                <h4>Watches</h4>
-                <span className="muted-label">{controlData.watches?.tasks?.length || 0}</span>
-              </div>
-              <div className="surface-list">
-                {(controlData.watches?.tasks || []).map((task) => (
-                  <article key={task.watch_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
-                    <div className="surface-list-head">
-                      <span className="surface-list-title">{plainTextPreview(task.goal || "Watch", 88)}</span>
-                      <span className="mini-list-time">{plainTextPreview(task.condition_label || task.condition_type || "watch", 24)}</span>
-                    </div>
-                    <p className="surface-list-copy">{plainTextPreview(task.last_message || task.target || "Waiting for the watch condition.", 180)}</p>
-                    <div className="surface-meta-row">
-                      {task.target ? <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.target, 36)}</span> : null}
-                      <span className="evidence-chip">{plainTextPreview(task.status || "watching", 20)}</span>
-                      {typeof task.trigger_count === "number" ? <span className="evidence-chip">Triggers {task.trigger_count}</span> : null}
-                    </div>
-                    <div className="surface-actions">
-                      <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `watch:pause:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "pause")} type="button">Pause</button>
-                      <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `watch:resume:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "resume")} type="button">Resume</button>
-                      <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `watch:delete:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "delete")} type="button">Delete</button>
-                    </div>
-                  </article>
-                ))}
-                {!(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No watch conditions yet.</p> : null}
+                {automationListMode === "scheduled"
+                  ? (controlData.scheduled?.tasks || []).map((task) => (
+                      <article key={task.scheduled_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                        <div className="surface-list-head">
+                          <span className="surface-list-title">{plainTextPreview(task.goal || "Scheduled task", 88)}</span>
+                          <span className="mini-list-time">{plainTextPreview(task.recurrence || "once", 20)}</span>
+                        </div>
+                        <p className="surface-list-copy">{plainTextPreview(task.last_message || task.goal || "Scheduled task", 180)}</p>
+                        <div className="surface-meta-row">
+                          <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.next_run_at || task.scheduled_for || "unscheduled", 36)}</span>
+                          <span className="evidence-chip">{plainTextPreview(task.status || "scheduled", 20)}</span>
+                        </div>
+                        <div className="surface-actions">
+                          <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `scheduled:pause:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "pause")} type="button">Pause</button>
+                          <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `scheduled:resume:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "resume")} type="button">Resume</button>
+                          <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `scheduled:delete:${task.scheduled_id}` } onClick={() => void handleScheduledAutomationAction(task, "delete")} type="button">Delete</button>
+                        </div>
+                      </article>
+                    ))
+                  : automationListMode === "watch"
+                    ? (controlData.watches?.tasks || []).map((task) => (
+                        <article key={task.watch_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                          <div className="surface-list-head">
+                            <span className="surface-list-title">{plainTextPreview(task.goal || "Watch", 88)}</span>
+                            <span className="mini-list-time">{plainTextPreview(task.condition_label || task.condition_type || "watch", 24)}</span>
+                          </div>
+                          <p className="surface-list-copy">{plainTextPreview(task.last_message || task.target || "Waiting for the watch condition.", 180)}</p>
+                          <div className="surface-meta-row">
+                            {task.target ? <span className="evidence-chip evidence-chip-soft">{plainTextPreview(task.target, 36)}</span> : null}
+                            <span className="evidence-chip">{plainTextPreview(task.status || "watching", 20)}</span>
+                            {typeof task.trigger_count === "number" ? <span className="evidence-chip">Triggers {task.trigger_count}</span> : null}
+                          </div>
+                          <div className="surface-actions">
+                            <button className="ghost-button" disabled={!task.available_actions?.pause || automationBusy === `watch:pause:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "pause")} type="button">Pause</button>
+                            <button className="ghost-button" disabled={!task.available_actions?.resume || automationBusy === `watch:resume:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "resume")} type="button">Resume</button>
+                            <button className="ghost-button" disabled={!task.available_actions?.delete || automationBusy === `watch:delete:${task.watch_id}` } onClick={() => void handleWatchAutomationAction(task, "delete")} type="button">Delete</button>
+                          </div>
+                        </article>
+                      ))
+                    : (controlData.queue?.queued_tasks || []).map((task) => (
+                        <article key={task.task_id || task.goal} className={clsx("surface-list-item", `tone-${statusTone(task.status)}`)}>
+                          <div className="surface-list-head">
+                            <span className="surface-list-title">{plainTextPreview(task.goal || "Queued task", 88)}</span>
+                            <span className="mini-list-time">{plainTextPreview(task.status || "queued", 24)}</span>
+                          </div>
+                          <p className="surface-list-copy">{plainTextPreview(task.last_message || "Waiting behind the active task.", 180)}</p>
+                        </article>
+                      ))}
+                {automationListMode === "scheduled" && !(controlData.scheduled?.tasks || []).length ? <p className="secondary-copy">No scheduled automations yet.</p> : null}
+                {automationListMode === "watch" && !(controlData.watches?.tasks || []).length ? <p className="secondary-copy">No watch conditions yet.</p> : null}
+                {automationListMode === "queue" && !(controlData.queue?.queued_tasks || []).length ? <p className="secondary-copy">No queued tasks right now.</p> : null}
               </div>
             </section>
           </div>
@@ -3580,14 +3512,6 @@ export default function App() {
       );
     }
     if (activeSurface === "gmail") {
-      const draftSummaryText =
-        typeof emailDraftDetail?.summary === "string"
-          ? emailDraftDetail.summary
-          : emailDraftDetail?.summary?.summary || emailDraftDetail?.message || "";
-      const draftQuestions =
-        emailDraftDetail?.questions ||
-        (typeof emailDraftDetail?.summary !== "string" ? emailDraftDetail?.summary?.questions : []) ||
-        [];
       return (
         <div className="surface-view">
           <div className="surface-header">
@@ -3598,8 +3522,11 @@ export default function App() {
             </div>
             <div className="surface-header-meta">
               {emailPanelStatus?.profile_email ? <span className="meta-pill">{plainTextPreview(emailPanelStatus.profile_email, 32)}</span> : null}
+              {!emailPanelStatus?.profile_email && emailPanelLoading ? <span className="meta-pill">Loading inbox</span> : null}
               <span className="meta-pill">
-                {emailPanelStatus?.watch_enabled
+                {emailPanelLoading
+                  ? "Syncing Gmail"
+                  : emailPanelStatus?.watch_enabled
                   ? `Inbox watch ${emailPanelStatus.poll_seconds || 60}s`
                   : "Manual inbox mode"}
               </span>
@@ -3618,8 +3545,7 @@ export default function App() {
               >
                 Create inbox automation
               </button>
-              <button className="ghost-button" onClick={() => void refreshEmailPanel()} type="button">Refresh</button>
-              {!emailPanelStatus?.authenticated ? (
+              {!emailPanelLoading && !emailPanelStatus?.authenticated ? (
                 <button className="send-button" disabled={emailBusy === "connect"} onClick={() => void handleConnectGmailSurface()} type="button">
                   {emailBusy === "connect" ? "Connecting..." : "Connect Gmail"}
                 </button>
@@ -3638,7 +3564,9 @@ export default function App() {
                 <input value={emailQuery} onChange={(event) => setEmailQuery(event.target.value)} placeholder="from:alice@example.com newer_than:7d" />
               </label>
               <div className="surface-actions">
-                <button className="ghost-button" onClick={() => void refreshEmailPanel()} type="button">Run query</button>
+                <button className="ghost-button" disabled={emailPanelLoading} onClick={() => void refreshEmailPanel()} type="button">
+                  {emailPanelLoading ? "Loading..." : emailQuery.trim() ? "Run query" : "Refresh inbox"}
+                </button>
               </div>
               <div className="surface-list">
                 {emailThreads.map((thread) => (
@@ -3659,119 +3587,141 @@ export default function App() {
                     </div>
                   </button>
                 ))}
-                {!emailThreads.length ? <p className="secondary-copy">No inbox threads match the current query.</p> : null}
+                {!emailThreads.length ? (
+                  <p className="secondary-copy">
+                    {emailPanelLoading ? "Loading inbox threads..." : "No inbox threads match the current query."}
+                  </p>
+                ) : null}
               </div>
             </section>
 
-            <section className="surface-card">
+            <section className="surface-card surface-card-scroll surface-card-stack">
               <div className="surface-card-header">
-                <h4>Thread</h4>
-                <span className="muted-label">{emailSelectedThread?.message_count || 0}</span>
+                <h4>Workspace</h4>
+                <div className="segmented-control">
+                  <button
+                    className={clsx("segmented-control-button", gmailWorkspaceMode === "thread" && "is-active")}
+                    onClick={() => setGmailWorkspaceMode("thread")}
+                    type="button"
+                  >
+                    Thread
+                  </button>
+                  <button
+                    className={clsx("segmented-control-button", gmailWorkspaceMode === "draft" && "is-active")}
+                    onClick={() => setGmailWorkspaceMode("draft")}
+                    type="button"
+                  >
+                    Drafts
+                  </button>
+                </div>
               </div>
-              {emailSelectedThread ? (
-                <div className="surface-thread">
-                  <div className="surface-thread-header">
-                    <h5>{plainTextPreview(emailSelectedThread.subject || "Thread", 96)}</h5>
-                    <p className="secondary-copy">{plainTextPreview(emailSelectedThread.snippet || "Selected Gmail thread.", 180)}</p>
-                  </div>
-                  <div className="surface-list surface-thread-messages">
-                    {(emailSelectedThread.messages || []).map((message) => (
-                      <article key={message.message_id || `${message.from}:${message.date}`} className={clsx("surface-list-item", message.sent_by_self ? "tone-info" : "tone-neutral")}>
-                        <div className="surface-list-head">
-                          <span className="surface-list-title">{plainTextPreview(message.from || message.from_address || "Message", 64)}</span>
-                          <span className="mini-list-time">{formatDateTime(message.date)}</span>
-                        </div>
-                        <p className="surface-list-copy">{plainTextPreview(message.body_text || message.snippet || "Message preview", 420)}</p>
-                      </article>
-                    ))}
+
+              {gmailWorkspaceMode === "thread" ? (
+                <div className="surface-stack">
+                  {emailSelectedThread ? (
+                    <div className="surface-thread">
+                      <div className="surface-thread-header">
+                        <h5>{plainTextPreview(emailSelectedThread.subject || "Thread", 96)}</h5>
+                        <p className="secondary-copy">{plainTextPreview(emailSelectedThread.snippet || "Selected Gmail thread.", 180)}</p>
+                      </div>
+                      <div className="surface-list surface-thread-messages">
+                        {(emailSelectedThread.messages || []).map((message) => (
+                          <article key={message.message_id || `${message.from}:${message.date}`} className={clsx("surface-list-item", message.sent_by_self ? "tone-info" : "tone-neutral")}>
+                            <div className="surface-list-head">
+                              <span className="surface-list-title">{plainTextPreview(message.from || message.from_address || "Message", 64)}</span>
+                              <span className="mini-list-time">{formatDateTime(message.date)}</span>
+                            </div>
+                            <p className="surface-list-copy">{plainTextPreview(message.body_text || message.snippet || "Message preview", 420)}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="secondary-copy">Select a thread to inspect the conversation and prepare a reply.</p>
+                  )}
+
+                  <div className="surface-form">
+                    <label className="field">
+                      <span>Reply guidance</span>
+                      <textarea value={emailReplyGuidance} onChange={(event) => setEmailReplyGuidance(event.target.value)} placeholder="Keep it short, confirm delivery, and ask for one next step." rows={3} />
+                    </label>
+                    <label className="field">
+                      <span>User context</span>
+                      <textarea value={emailReplyContext} onChange={(event) => setEmailReplyContext(event.target.value)} placeholder="Use facts the model needs before drafting." rows={3} />
+                    </label>
+                    <div className="surface-actions">
+                      <button className="send-button" disabled={emailBusy === "reply" || !emailSelectedThread?.thread_id} onClick={() => void handleReplyDraft()} type="button">
+                        {emailBusy === "reply" ? "Drafting..." : "Generate reply"}
+                      </button>
+                    </div>
+                    <div className="surface-form-grid">
+                      <label className="field">
+                        <span>Forward to</span>
+                        <input value={emailForwardTo} onChange={(event) => setEmailForwardTo(event.target.value)} placeholder="name@example.com, ops@example.com" />
+                      </label>
+                      <label className="field">
+                        <span>Forward note</span>
+                        <input value={emailForwardNote} onChange={(event) => setEmailForwardNote(event.target.value)} placeholder="Optional note above the forwarded message" />
+                      </label>
+                    </div>
+                    <div className="surface-actions">
+                      <button className="ghost-button" disabled={emailBusy === "forward" || !emailSelectedThread?.thread_id || !emailForwardTo.trim()} onClick={() => void handleForwardDraft()} type="button">
+                        {emailBusy === "forward" ? "Preparing..." : "Prepare forward"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
-                <p className="secondary-copy">Select a thread to inspect the conversation and prepare a reply.</p>
+                <div className="surface-stack">
+                  {emailDraftDetail ? (
+                    <div className="draft-preview-card">
+                      <div className="surface-list-head">
+                        <span className="surface-list-title">{plainTextPreview(typeof emailDraftDetail.summary === "string" ? "Draft guidance" : emailDraftDetail.summary?.subject || emailDraftDetail.draft?.subject || "Prepared draft", 88)}</span>
+                        <span className="mini-list-time">{plainTextPreview(emailDraftDetail.confidence || (typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary?.confidence : "") || "review", 18)}</span>
+                      </div>
+                      <p className="surface-list-copy">{plainTextPreview(emailDraftSummaryText || "Draft details appear here after you prepare a reply or forward.", 220)}</p>
+                      {emailDraftQuestions.length ? (
+                        <div className="surface-meta-row">
+                          {emailDraftQuestions.map((question) => (
+                            <span key={question} className="evidence-chip">{plainTextPreview(question, 44)}</span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim() ? (
+                        <pre className="draft-preview-body">{String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim()}</pre>
+                      ) : null}
+                      <div className="surface-actions">
+                        <button className="send-button" disabled={!activeDraftId || emailBusy === "review-send"} onClick={() => void handleReviewPreparedDraft()} type="button">
+                          {emailBusy === "review-send" ? "Reviewing..." : "Review send"}
+                        </button>
+                        <button className="ghost-button" disabled={!activeDraftId || emailBusy === "reject-draft"} onClick={() => void handleRejectPreparedDraft()} type="button">
+                          {emailBusy === "reject-draft" ? "Rejecting..." : "Reject draft"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="secondary-copy">Prepare a reply or select a stored draft to review and send it.</p>
+                  )}
+
+                  <div className="surface-list">
+                    {emailDrafts.map((draft) => (
+                      <button
+                        key={draft.draft_id || `${draft.subject}:${draft.updated_at}`}
+                        className={clsx("surface-list-item surface-list-button", activeDraftId && draft.draft_id === activeDraftId && "is-selected")}
+                        onClick={() => void loadEmailDraftDetail(String(draft.draft_id || ""))}
+                        type="button"
+                      >
+                        <div className="surface-list-head">
+                          <span className="surface-list-title">{plainTextPreview(draft.subject || "Prepared draft", 72)}</span>
+                          <span className="mini-list-time">{plainTextPreview(draft.status || "prepared", 20)}</span>
+                        </div>
+                        <p className="surface-list-copy">{plainTextPreview(draft.summary || "Draft summary", 160)}</p>
+                      </button>
+                    ))}
+                    {!emailDrafts.length ? <p className="secondary-copy">No stored Gmail drafts yet.</p> : null}
+                  </div>
+                </div>
               )}
-            </section>
-
-            <section className="surface-card">
-              <div className="surface-card-header">
-                <h4>Draft</h4>
-                <span className="muted-label">{emailDrafts.length}</span>
-              </div>
-              <div className="surface-form">
-                <label className="field">
-                  <span>Reply guidance</span>
-                  <textarea value={emailReplyGuidance} onChange={(event) => setEmailReplyGuidance(event.target.value)} placeholder="Keep it short, confirm delivery, and ask for one next step." rows={3} />
-                </label>
-                <label className="field">
-                  <span>User context</span>
-                  <textarea value={emailReplyContext} onChange={(event) => setEmailReplyContext(event.target.value)} placeholder="Use facts the model needs before drafting." rows={3} />
-                </label>
-                <div className="surface-actions">
-                  <button className="send-button" disabled={emailBusy === "reply" || !emailSelectedThread?.thread_id} onClick={() => void handleReplyDraft()} type="button">
-                    {emailBusy === "reply" ? "Drafting..." : "Generate reply"}
-                  </button>
-                </div>
-                <div className="surface-form-grid">
-                  <label className="field">
-                    <span>Forward to</span>
-                    <input value={emailForwardTo} onChange={(event) => setEmailForwardTo(event.target.value)} placeholder="name@example.com, ops@example.com" />
-                  </label>
-                  <label className="field">
-                    <span>Forward note</span>
-                    <input value={emailForwardNote} onChange={(event) => setEmailForwardNote(event.target.value)} placeholder="Optional note above the forwarded message" />
-                  </label>
-                </div>
-                <div className="surface-actions">
-                  <button className="ghost-button" disabled={emailBusy === "forward" || !emailSelectedThread?.thread_id || !emailForwardTo.trim()} onClick={() => void handleForwardDraft()} type="button">
-                    {emailBusy === "forward" ? "Preparing..." : "Prepare forward"}
-                  </button>
-                </div>
-              </div>
-
-              {emailDraftDetail ? (
-                <div className="draft-preview-card">
-                  <div className="surface-list-head">
-                    <span className="surface-list-title">{plainTextPreview(typeof emailDraftDetail.summary === "string" ? "Draft guidance" : emailDraftDetail.summary?.subject || emailDraftDetail.draft?.subject || "Prepared draft", 88)}</span>
-                    <span className="mini-list-time">{plainTextPreview(emailDraftDetail.confidence || (typeof emailDraftDetail.summary !== "string" ? emailDraftDetail.summary?.confidence : "") || "review", 18)}</span>
-                  </div>
-                  <p className="surface-list-copy">{plainTextPreview(draftSummaryText || "Draft details appear here after you prepare a reply or forward.", 220)}</p>
-                  {draftQuestions.length ? (
-                    <div className="surface-meta-row">
-                      {draftQuestions.map((question) => (
-                        <span key={question} className="evidence-chip">{plainTextPreview(question, 44)}</span>
-                      ))}
-                    </div>
-                  ) : null}
-                  {String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim() ? (
-                    <pre className="draft-preview-body">{String(emailDraftDetail.draft?.body || emailDraftDetail.draft?.note || "").trim()}</pre>
-                  ) : null}
-                  <div className="surface-actions">
-                    <button className="send-button" disabled={!activeDraftId || emailBusy === "send"} onClick={() => void handleSendPreparedDraft()} type="button">
-                      {emailBusy === "send" ? "Sending..." : "Approve & send"}
-                    </button>
-                    <button className="ghost-button" disabled={!activeDraftId || emailBusy === "reject-draft"} onClick={() => void handleRejectPreparedDraft()} type="button">
-                      {emailBusy === "reject-draft" ? "Rejecting..." : "Reject draft"}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="surface-list">
-                {emailDrafts.map((draft) => (
-                  <button
-                    key={draft.draft_id || `${draft.subject}:${draft.updated_at}`}
-                    className={clsx("surface-list-item surface-list-button", activeDraftId && draft.draft_id === activeDraftId && "is-selected")}
-                    onClick={() => void loadEmailDraftDetail(String(draft.draft_id || ""))}
-                    type="button"
-                  >
-                    <div className="surface-list-head">
-                      <span className="surface-list-title">{plainTextPreview(draft.subject || "Prepared draft", 72)}</span>
-                      <span className="mini-list-time">{plainTextPreview(draft.status || "prepared", 20)}</span>
-                    </div>
-                    <p className="surface-list-copy">{plainTextPreview(draft.summary || "Draft summary", 160)}</p>
-                  </button>
-                ))}
-                {!emailDrafts.length ? <p className="secondary-copy">No stored Gmail drafts yet.</p> : null}
-              </div>
             </section>
           </div>
         </div>
@@ -3793,68 +3743,81 @@ export default function App() {
             </div>
           </div>
           <div className="surface-grid surface-grid-workflows">
-            <section className="surface-card">
+            <section className="surface-card surface-card-scroll">
               <div className="surface-card-header">
-                <h4>Skills</h4>
-                <span className="muted-label">{availableSkills.length}</span>
+                <h4>Workflows</h4>
+                <div className="segmented-control">
+                  <button
+                    className={clsx("segmented-control-button", workflowWorkspaceMode === "skills" && "is-active")}
+                    onClick={() => setWorkflowWorkspaceMode("skills")}
+                    type="button"
+                  >
+                    Skills
+                  </button>
+                  <button
+                    className={clsx("segmented-control-button", workflowWorkspaceMode === "extensions" && "is-active")}
+                    onClick={() => setWorkflowWorkspaceMode("extensions")}
+                    type="button"
+                  >
+                    Extensions
+                  </button>
+                </div>
               </div>
               <div className="surface-list">
-                {Object.entries(groupedSkills).map(([group, skills]) => (
-                  <div key={group} className="surface-group">
-                    <div className="surface-group-label">{plainTextPreview(group.replace(/_/g, " "), 32)}</div>
-                    {skills.map((skill) => (
-                      <article key={skill.slug || skill.commandName || skill.title} className="surface-list-item tone-neutral">
-                        <div className="surface-list-head">
-                          <span className="surface-list-title">{plainTextPreview(skill.title || skill.commandName || "Skill", 72)}</span>
-                          {skill.commandName ? <span className="mini-list-time">/{skill.commandName}</span> : null}
-                        </div>
-                        <p className="surface-list-copy">{plainTextPreview(skill.description || skill.purpose || "Workflow skill", 180)}</p>
-                        <div className="surface-actions">
-                          <button
-                            className="ghost-button"
-                            onClick={() => {
-                              setActiveSurface("chat");
-                              updateDraft(skill.commandName ? `/${skill.commandName} ` : skill.promptText || "", selectedSessionId);
-                              window.requestAnimationFrame(() => textareaRef.current?.focus());
-                            }}
-                            type="button"
-                          >
-                            Use in chat
-                          </button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                ))}
-                {!availableSkills.length ? <p className="secondary-copy">No repo-local skills are available.</p> : null}
-              </div>
-            </section>
-
-            <section className="surface-card">
-              <div className="surface-card-header">
-                <h4>Extensions</h4>
-                <span className="muted-label">{availableExtensions.length}</span>
-              </div>
-              <div className="surface-list">
-                {availableExtensions.map((extension) => (
-                  <article key={extension.slug || extension.relativePath || extension.title} className="surface-list-item tone-info">
-                    <div className="surface-list-head">
-                      <span className="surface-list-title">{plainTextPreview(extension.title || extension.slug || "Extension", 72)}</span>
-                      <span className="mini-list-time">{extension.commandCount || extension.commands?.length || 0} cmds</span>
-                    </div>
-                    <p className="surface-list-copy">{plainTextPreview(extension.description || "Local extension manifest.", 180)}</p>
-                    {(extension.commands || []).length ? (
-                      <div className="surface-meta-row">
-                        {(extension.commands || []).slice(0, 4).map((command) => (
-                          <span key={`${extension.slug}:${command.name}`} className="evidence-chip evidence-chip-soft">
-                            /{plainTextPreview(command.name || "command", 20)}
-                          </span>
+                {workflowWorkspaceMode === "skills" ? (
+                  <>
+                    {Object.entries(groupedSkills).map(([group, skills]) => (
+                      <div key={group} className="surface-group">
+                        <div className="surface-group-label">{plainTextPreview(group.replace(/_/g, " "), 32)}</div>
+                        {skills.map((skill) => (
+                          <article key={skill.slug || skill.commandName || skill.title} className="surface-list-item tone-neutral">
+                            <div className="surface-list-head">
+                              <span className="surface-list-title">{plainTextPreview(skill.title || skill.commandName || "Skill", 72)}</span>
+                              {skill.commandName ? <span className="mini-list-time">/{skill.commandName}</span> : null}
+                            </div>
+                            <p className="surface-list-copy">{plainTextPreview(skill.description || skill.purpose || "Workflow skill", 180)}</p>
+                            <div className="surface-actions">
+                              <button
+                                className="ghost-button"
+                                onClick={() => {
+                                  setActiveSurface("chat");
+                                  updateDraft(skill.commandName ? `/${skill.commandName} ` : skill.promptText || "", selectedSessionId);
+                                  window.requestAnimationFrame(() => textareaRef.current?.focus());
+                                }}
+                                type="button"
+                              >
+                                Use in chat
+                              </button>
+                            </div>
+                          </article>
                         ))}
                       </div>
-                    ) : null}
-                  </article>
-                ))}
-                {!availableExtensions.length ? <p className="secondary-copy">No local extensions are loaded.</p> : null}
+                    ))}
+                    {!availableSkills.length ? <p className="secondary-copy">No repo-local skills are available.</p> : null}
+                  </>
+                ) : (
+                  <>
+                    {availableExtensions.map((extension) => (
+                      <article key={extension.slug || extension.relativePath || extension.title} className="surface-list-item tone-info">
+                        <div className="surface-list-head">
+                          <span className="surface-list-title">{plainTextPreview(extension.title || extension.slug || "Extension", 72)}</span>
+                          <span className="mini-list-time">{extension.commandCount || extension.commands?.length || 0} cmds</span>
+                        </div>
+                        <p className="surface-list-copy">{plainTextPreview(extension.description || "Local extension manifest.", 180)}</p>
+                        {(extension.commands || []).length ? (
+                          <div className="surface-meta-row">
+                            {(extension.commands || []).slice(0, 4).map((command) => (
+                              <span key={`${extension.slug}:${command.name}`} className="evidence-chip evidence-chip-soft">
+                                /{plainTextPreview(command.name || "command", 20)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                    {!availableExtensions.length ? <p className="secondary-copy">No local extensions are loaded.</p> : null}
+                  </>
+                )}
               </div>
             </section>
           </div>
@@ -3961,20 +3924,15 @@ export default function App() {
                 <p className="sidebar-subtitle">Chat-first desktop control surface</p>
               </div>
             </div>
-            <CompactMenu label="View" icon="menu">
-              <CompactMenuButton icon="details" onClick={() => setDetailsOpen((current) => !current)}>
-                {detailsOpen ? "Hide details" : "Show details"}
-              </CompactMenuButton>
-              <CompactMenuButton icon="refresh" onClick={() => void handleRefresh()}>
-                {bootState === "ready" ? "Refresh data" : "Retry startup"}
-              </CompactMenuButton>
-              <CompactMenuButton
-                icon={themeMode === "light" ? "theme-dark" : "theme-light"}
-                onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
-              >
-                {themeMode === "light" ? "Use dark theme" : "Use light theme"}
-              </CompactMenuButton>
-            </CompactMenu>
+            <button
+              aria-label={themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              className="ghost-button icon-button"
+              onClick={() => setThemeMode((current) => (current === "light" ? "dark" : "light"))}
+              title={themeMode === "light" ? "Use dark theme" : "Use light theme"}
+              type="button"
+            >
+              <UiIcon name={themeMode === "light" ? "theme-dark" : "theme-light"} />
+            </button>
           </div>
           <div className="sidebar-actions">
             <button className="sidebar-primary-button sidebar-primary-button-wide" onClick={() => void handleNewChat()} disabled={sending} type="button">
@@ -4080,10 +4038,7 @@ export default function App() {
                   id: "automations",
                   label: "Automations",
                   icon: "automations" as const,
-                  count:
-                    (controlData.scheduled?.tasks?.length || 0) +
-                    (controlData.watches?.tasks?.length || 0) +
-                    (controlData.queue?.queued_tasks?.length || 0),
+                  count: automationCounts.scheduled + automationCounts.watch + automationCounts.queue,
                 },
                 { id: "gmail", label: "Gmail", icon: "gmail" as const, count: emailConnected ? emailThreads.length || 0 : 0 },
                 { id: "workflows", label: "Workflows", icon: "workflows" as const, count: availableSkills.length + availableExtensions.length },
@@ -4111,14 +4066,6 @@ export default function App() {
               <span className="sidebar-capability-chip">
                 <UiIcon name="gmail" />
                 <span>{emailConnected ? "Gmail connected" : "Gmail ready"}</span>
-              </span>
-              <span className="sidebar-capability-chip">
-                <UiIcon name="tools" />
-                <span>{controlData.tools.length} tools</span>
-              </span>
-              <span className="sidebar-capability-chip">
-                <UiIcon name="chat" />
-                <span>{slashCommands.length} commands</span>
               </span>
             </div>
           </section>
@@ -4177,44 +4124,26 @@ export default function App() {
               />
               <span>{topbarPrimaryLabel}</span>
             </button>
-            <button className="ghost-button topbar-action" onClick={() => void handleRefresh()} type="button">
+            <button
+              aria-label={bootState === "ready" ? "Refresh data" : "Retry startup"}
+              className="ghost-button icon-button topbar-action"
+              onClick={() => void handleRefresh()}
+              title={bootState === "ready" ? "Refresh data" : "Retry startup"}
+              type="button"
+            >
               <UiIcon name="refresh" />
-              <span>{bootState === "ready" ? "Refresh" : "Retry"}</span>
             </button>
-            <button className="ghost-button topbar-action" disabled title="Future handoff flow" type="button">
-              <UiIcon name="handoff" />
-              <span>Handoff</span>
-            </button>
-            <button className="ghost-button topbar-action" disabled title="Future commit flow" type="button">
-              <UiIcon name="commit" />
-              <span>Commit</span>
-            </button>
-            <button className="ghost-button topbar-action" onClick={() => setDetailsOpen((current) => !current)} type="button">
+            <button
+              aria-label={detailsOpen ? "Hide context" : "Show context"}
+              className="ghost-button icon-button topbar-action"
+              onClick={() => setDetailsOpen((current) => !current)}
+              title={detailsOpen ? "Hide context" : "Show context"}
+              type="button"
+            >
               <UiIcon name="details" />
-              <span>{detailsOpen ? "Hide context" : "Context"}</span>
             </button>
           </div>
         </header>
-
-        <nav className="surface-switcher" aria-label="Workspace surfaces">
-          {[
-            { id: "chat", label: "Conversation", icon: "chat" as const },
-            { id: "automations", label: "Automations", icon: "automations" as const },
-            { id: "gmail", label: "Gmail", icon: "gmail" as const },
-            { id: "workflows", label: "Workflows", icon: "workflows" as const },
-            { id: "runs", label: "Runs", icon: "history" as const },
-          ].map((surface) => (
-            <button
-              key={surface.id}
-              className={clsx("surface-switcher-button", activeSurface === surface.id && "is-active")}
-              onClick={() => setActiveSurface(surface.id as WorkspaceSurface)}
-              type="button"
-            >
-              <UiIcon name={surface.icon} />
-              <span>{surface.label}</span>
-            </button>
-          ))}
-        </nav>
 
         <section className="conversation-frame">
           {activeSurface !== "chat" ? (
@@ -4367,20 +4296,6 @@ export default function App() {
           <div className="composer-footer">
             <div className="composer-footer-main">
               <span className="composer-hint">{composerHint}</span>
-              <div className="composer-capability-row">
-                <span className="composer-capability-pill">
-                  <UiIcon name="tools" />
-                  Slash commands
-                </span>
-                <span className="composer-capability-pill">
-                  <UiIcon name="desktop" />
-                  Desktop evidence
-                </span>
-                <span className="composer-capability-pill">
-                  <UiIcon name="gmail" />
-                  Gmail
-                </span>
-              </div>
             </div>
             <button className="send-button" onClick={() => void handleSendMessage()} disabled={bootState !== "ready" || sending || !draft.trim()}>
               {sending ? "Sending..." : bootState !== "ready" ? "Unavailable" : "Send"}
@@ -4526,83 +4441,155 @@ export default function App() {
           </div>
         </section>
 
-        <section className="rail-card">
-          <div className="rail-card-header">
-            <h3><SectionTitle icon="evidence">Evidence</SectionTitle></h3>
-            <span className="muted-label">{controlData.desktopEvidence.length}</span>
-          </div>
-          <div className="rail-evidence-stack rail-evidence-stack-tight">
-            <EvidencePreviewCard
-              title="Selected evidence"
-              preview={selectedDesktopEvidence}
-              onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
-              artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
-              emptyText="No desktop evidence is selected for the current task."
-            />
-            {distinctCheckpointEvidence ? (
-              <EvidencePreviewCard
-                title="Checkpoint evidence"
-                preview={distinctCheckpointEvidence}
-                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
-                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
-              />
-            ) : null}
-            <div className="mini-list inspector-mini-list">
-              {controlData.desktopEvidence.slice(0, 3).map((item) => (
-                <article
-                  key={item.evidence_id || item.timestamp || item.summary}
-                  className={clsx("mini-list-item", item.is_partial ? "tone-warning" : "tone-neutral")}
-                >
-                  <div className="mini-list-title">
-                    {plainTextPreview(item.active_window_title || item.summary || "Evidence", 46)}
-                    <span className="mini-list-time">{formatTime(item.timestamp)}</span>
-                  </div>
-                  <div className="mini-list-detail">{plainTextPreview(evidenceSummaryText(item), 120)}</div>
-                </article>
-              ))}
-            </div>
-          </div>
-        </section>
-
         <section className="rail-card rail-card-grow">
           <div className="rail-card-header">
-            <h3><SectionTitle icon="tools">Context</SectionTitle></h3>
-            <button className="ghost-button sidebar-inline-button" onClick={() => setDetailsOpen(true)} type="button">
-              Open details
-            </button>
+            <h3><SectionTitle icon={inspectorMode === "evidence" ? "evidence" : "tools"}>Inspector</SectionTitle></h3>
+            <div className="segmented-control segmented-control-compact">
+              <button
+                className={clsx("segmented-control-button", inspectorMode === "evidence" && "is-active")}
+                onClick={() => setInspectorMode("evidence")}
+                type="button"
+              >
+                Evidence
+              </button>
+              <button
+                className={clsx("segmented-control-button", inspectorMode === "context" && "is-active")}
+                onClick={() => setInspectorMode("context")}
+                type="button"
+              >
+                Context
+              </button>
+            </div>
           </div>
-          <div className="context-inspector-grid">
-            <article className="mini-list-item tone-info">
-              <div className="mini-list-title">
-                Runtime
-                <span className="mini-list-time">{plainTextPreview(status?.runtime?.reasoning_effort || "default", 18)}</span>
+          <div className="inspector-panel">
+            {inspectorMode === "evidence" ? (
+              <div className="rail-evidence-stack rail-evidence-stack-tight">
+                <EvidencePreviewCard
+                  title="Selected evidence"
+                  preview={selectedDesktopEvidence}
+                  onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Selected desktop evidence")}
+                  artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === selectedDesktopEvidence?.evidence_id}
+                  emptyText="No desktop evidence is selected for the current task."
+                />
+                {distinctCheckpointEvidence ? (
+                  <EvidencePreviewCard
+                    title="Checkpoint evidence"
+                    preview={distinctCheckpointEvidence}
+                    onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Checkpoint evidence")}
+                    artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === distinctCheckpointEvidence?.evidence_id}
+                  />
+                ) : null}
+                <div className="mini-list inspector-mini-list">
+                  {controlData.desktopEvidence.slice(0, 3).map((item) => (
+                    <article
+                      key={item.evidence_id || item.timestamp || item.summary}
+                      className={clsx("mini-list-item", item.is_partial ? "tone-warning" : "tone-neutral")}
+                    >
+                      <div className="mini-list-title">
+                        {plainTextPreview(item.active_window_title || item.summary || "Evidence", 46)}
+                        <span className="mini-list-time">{formatTime(item.timestamp)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(evidenceSummaryText(item), 120)}</div>
+                    </article>
+                  ))}
+                </div>
               </div>
-              <div className="mini-list-detail">{plainTextPreview(status?.runtime?.active_model || "Runtime metadata not loaded yet.", 120)}</div>
-            </article>
-            <article className={clsx("mini-list-item", emailConnected ? "tone-success" : "tone-neutral")}>
-              <div className="mini-list-title">
-                Gmail
-                <span className="mini-list-time">{emailConnected ? "connected" : "ready"}</span>
+            ) : (
+              <div className="context-inspector-grid">
+                <article className="mini-list-item tone-info">
+                  <div className="mini-list-title">
+                    Runtime
+                    <span className="mini-list-time">{plainTextPreview(status?.runtime?.reasoning_effort || "default", 18)}</span>
+                  </div>
+                  <div className="mini-list-detail">{plainTextPreview(status?.runtime?.active_model || "Runtime metadata not loaded yet.", 120)}</div>
+                </article>
+                <article className={clsx("mini-list-item", emailConnected ? "tone-success" : "tone-neutral")}>
+                  <div className="mini-list-title">
+                    Gmail
+                    <span className="mini-list-time">{emailConnected ? "connected" : "ready"}</span>
+                  </div>
+                  <div className="mini-list-detail">{plainTextPreview(backendServiceDetail(emailService), 120)}</div>
+                </article>
+                <article className="mini-list-item tone-neutral">
+                  <div className="mini-list-title">
+                    Tools
+                    <span className="mini-list-time">{controlData.tools.length}</span>
+                  </div>
+                  <div className="mini-list-detail">Slash commands, desktop controls, runtime tools, and Gmail are available from chat.</div>
+                </article>
+                <article className="mini-list-item tone-neutral">
+                  <div className="mini-list-title">
+                    Extensions
+                    <span className="mini-list-time">{controlData.extensions.length}</span>
+                  </div>
+                  <div className="mini-list-detail">{plainTextPreview(controlData.extensions[0]?.description || "Local extensions appear here when loaded.", 120)}</div>
+                </article>
               </div>
-              <div className="mini-list-detail">{plainTextPreview(backendServiceDetail(emailService), 120)}</div>
-            </article>
-            <article className="mini-list-item tone-neutral">
-              <div className="mini-list-title">
-                Tools
-                <span className="mini-list-time">{controlData.tools.length}</span>
-              </div>
-              <div className="mini-list-detail">Slash commands, desktop controls, runtime tools, and Gmail are available from chat.</div>
-            </article>
-            <article className="mini-list-item tone-neutral">
-              <div className="mini-list-title">
-                Extensions
-                <span className="mini-list-time">{controlData.extensions.length}</span>
-              </div>
-              <div className="mini-list-detail">{plainTextPreview(controlData.extensions[0]?.description || "Local extensions appear here when loaded.", 120)}</div>
-            </article>
+            )}
           </div>
         </section>
       </aside>
+
+      {emailSendReview && activeDraftId ? (
+        <OverlayPortal>
+          <div className="send-review-modal">
+            <div className="send-review-backdrop" onClick={() => setEmailSendReview(null)} />
+            <section className="send-review-panel">
+              <header className="artifact-viewer-header">
+                <div>
+                  <div className="eyebrow">Approval required</div>
+                  <h3>Review Gmail send</h3>
+                </div>
+                <button className="ghost-button" onClick={() => setEmailSendReview(null)} type="button">
+                  Close
+                </button>
+              </header>
+              <div className="send-review-body">
+                <article className="mini-list-item tone-warning">
+                  <div className="mini-list-title">
+                    {plainTextPreview(emailSendReview.subject || emailDraftDetail?.draft?.subject || "Prepared Gmail draft", 64)}
+                    <span className="mini-list-time">Email send</span>
+                  </div>
+                  <div className="mini-list-detail">
+                    {plainTextPreview(
+                      emailSendReview.reason ||
+                        "Sending email is an external action, so the operator waits for explicit approval before it sends anything.",
+                      180,
+                    )}
+                  </div>
+                  <div className="evidence-preview-meta">
+                    <span className="evidence-chip evidence-chip-soft">
+                      {plainTextPreview(emailSendReview.target || (emailDraftDetail?.draft?.to || []).join(", ") || "No recipient", 44)}
+                    </span>
+                    <span className="evidence-chip">Risk external send</span>
+                  </div>
+                </article>
+                <div className="draft-preview-card">
+                  <div className="surface-list-head">
+                    <span className="surface-list-title">What will be sent</span>
+                    <span className="mini-list-time">{plainTextPreview(emailDraftDetail?.confidence || "review", 18)}</span>
+                  </div>
+                  <p className="surface-list-copy">{plainTextPreview(emailDraftSummaryText || "Review the prepared Gmail draft before sending it.", 220)}</p>
+                  {String(emailDraftDetail?.draft?.body || emailDraftDetail?.draft?.note || "").trim() ? (
+                    <pre className="draft-preview-body">{String(emailDraftDetail?.draft?.body || emailDraftDetail?.draft?.note || "").trim()}</pre>
+                  ) : null}
+                </div>
+              </div>
+              <footer className="artifact-viewer-footer">
+                <p className="secondary-copy">Approving here sends the exact prepared draft shown above.</p>
+                <div className="approval-actions">
+                  <button className="ghost-button" onClick={() => setEmailSendReview(null)} type="button">
+                    Cancel
+                  </button>
+                  <button className="approve-button" disabled={emailBusy === "send"} onClick={() => void handleSendPreparedDraft()} type="button">
+                    {emailBusy === "send" ? "Sending..." : "Approve & send"}
+                  </button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        </OverlayPortal>
+      ) : null}
 
       {detailsOpen ? (
         <div className="details-drawer">
