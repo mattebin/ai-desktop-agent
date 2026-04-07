@@ -172,13 +172,68 @@ export type OperatorMemoryHint = {
   retry_action?: string;
 };
 
+export type ProblemRecord = {
+  problem_id?: string;
+  problem_key?: string;
+  run_id?: string;
+  session_id?: string;
+  state_scope_id?: string;
+  task_id?: string;
+  timestamp?: string;
+  tool?: string;
+  domain?: string;
+  user_intent?: string;
+  operator_step?: string;
+  error_code?: string;
+  error_text?: string;
+  outcome_classification?: string;
+  retry_count?: number;
+  retry_budget_exhausted?: boolean;
+  alternate_strategy_attempted?: boolean;
+  approval_involved?: boolean;
+  evidence_refs?: string[];
+  failure_category?: string;
+  summary?: string;
+  improvement_hint?: string;
+  action_signature?: string;
+  target_signature?: string;
+  reason?: string;
+  expected_change?: string;
+  observed_change?: string;
+  exact_error?: string;
+  policy_decision?: string;
+  policy_summary?: string;
+  stored_lesson?: string;
+  lesson_key?: string;
+  occurrence_count?: number;
+  first_seen_at?: string;
+  last_seen_at?: string;
+  recent_occurrences?: Array<Record<string, unknown>>;
+};
+
+export type ProblemSummary = {
+  total_records?: number;
+  total_occurrences?: number;
+  top_categories?: Array<{ category?: string; count?: number }>;
+  top_tools?: Array<{ tool?: string; count?: number }>;
+  updated_at?: string;
+};
+
 export type OperatorIntelligence = {
   last_outcome?: OutcomeEvaluation;
   recent_outcomes?: OutcomeEvaluation[];
   retry?: OutcomeRetry;
+  last_problem?: ProblemRecord;
   memory_hints?: {
     prefer?: OperatorMemoryHint[];
     avoid?: OperatorMemoryHint[];
+    lessons?: Array<{
+      lesson?: string;
+      category?: string;
+      tool?: string;
+      recorded_at?: string;
+      problem_key?: string;
+    }>;
   };
   execution_memory?: {
     attempted_actions?: number;
@@ -465,6 +520,12 @@ export type RunEntry = {
   source?: string;
   session_id?: string;
   state_scope_id?: string;
+  problem_count?: number;
+  latest_problem?: {
+    summary?: string;
+    failure_category?: string;
+    error_code?: string;
+  };
 };
 
 export type RunStep = {
@@ -480,11 +541,13 @@ export type RunStep = {
   recovery?: Record<string, unknown>;
   lab_shell?: Record<string, unknown>;
   evaluation?: OutcomeEvaluation;
+  problem?: ProblemRecord;
 };
 
 export type RunDetail = RunEntry & {
   steps?: RunStep[];
   end_state?: Record<string, unknown>;
+  problems?: ProblemRecord[];
 };
 
 export type LabStatusPayload = {
@@ -1132,6 +1195,14 @@ export async function getRunDetail(baseUrl: string, runId: string, sessionId = "
   return request<{ run?: RunDetail }>(baseUrl, `/runs/${encodeURIComponent(runId)}`, undefined, {
     ...(buildScopeQuery(sessionId, stateScopeId) || {}),
   });
+}
+
+export async function getRecentProblems(baseUrl: string, limit = 10): Promise<{ items?: ProblemRecord[] }> {
+  return request<{ items?: ProblemRecord[] }>(baseUrl, "/problems/recent", undefined, { limit });
+}
+
+export async function getProblemSummary(baseUrl: string, limit = 6): Promise<ProblemSummary> {
+  return request<ProblemSummary>(baseUrl, "/problems/summary", undefined, { limit });
 }
 
 export async function getQueueState(baseUrl: string): Promise<QueuePayload> {

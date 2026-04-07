@@ -99,6 +99,14 @@ class OperatorController:
         alerts["items"] = list(alerts.get("items", []))[:safe_limit]
         return alerts
 
+    def get_recent_problems(self, limit: int = 12) -> list[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 12), 40))
+        return self.manager.agent.get_recent_problems(limit=safe_limit)
+
+    def get_problem_summary(self, limit: int = 6) -> Dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 6), 12))
+        return self.manager.agent.get_problem_summary(limit=safe_limit)
+
     def get_runtime_config(self) -> Dict[str, Any]:
         return self.manager.agent.get_runtime_config()
 

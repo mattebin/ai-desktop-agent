@@ -14,6 +14,7 @@ from core.operator_intelligence import (
     build_environment_awareness,
     refresh_operator_intelligence_context,
 )
+from core.problem_records import DEFAULT_PROBLEM_RECORD_PATH, ProblemRecordStore
 from core.run_history import DEFAULT_RUN_HISTORY_PATH, RunHistoryStore
 from core.session_store import DEFAULT_SESSION_STATE_PATH, DEFAULT_STATE_SCOPE_ID, SessionStore
 from core.state import TaskState
@@ -36,6 +37,9 @@ class Agent:
         self.history_store = RunHistoryStore(run_history_path, max_runs=max_runs)
         operator_memory_path = self.settings.get("operator_memory_path", str(DEFAULT_OPERATOR_MEMORY_PATH))
         self.operator_memory_store = OperatorMemoryStore(operator_memory_path)
+        problem_record_path = self.settings.get("problem_record_path", str(DEFAULT_PROBLEM_RECORD_PATH))
+        max_problem_records = int(self.settings.get("max_problem_records", 120) or 120)
+        self.problem_store = ProblemRecordStore(problem_record_path, max_records=max_problem_records)
 
     def refresh_runtime_settings_if_needed(self, *, force: bool = False) -> bool:
         settings_snapshot = get_settings_snapshot(force=force)
@@ -53,6 +57,9 @@ class Agent:
         max_runs = int(self.settings.get("max_run_history_entries", 25) or 25)
         if getattr(self.history_store, "max_runs", max_runs) != max_runs:
             self.history_store.max_runs = max_runs
+        max_problem_records = int(self.settings.get("max_problem_records", 120) or 120)
+        if getattr(self.problem_store, "max_records", max_problem_records) != max_problem_records:
+            self.problem_store.max_records = max_problem_records
         return True
 
     def get_runtime_config(self) -> Dict[str, object]:
@@ -85,6 +92,14 @@ class Agent:
             execution_profile=execution_profile,
             lab_armed=lab_armed,
         )
+
+    def get_recent_problems(self, *, limit: int = 12) -> list[Dict[str, Any]]:
+        self.refresh_runtime_settings_if_needed()
+        return self.problem_store.get_recent(limit=limit)
+
+    def get_problem_summary(self, *, limit: int = 6) -> Dict[str, Any]:
+        self.refresh_runtime_settings_if_needed()
+        return self.problem_store.get_summary(limit=limit)
 
     def get_email_status(self) -> Dict[str, Any]:
         self.refresh_runtime_settings_if_needed()
@@ -160,6 +175,7 @@ class Agent:
         )
         state.state_scope_id = normalized_scope_id
         setattr(state, "_operator_memory_store", self.operator_memory_store)
+        setattr(state, "_problem_store", self.problem_store)
         environment_awareness = self.get_environment_awareness(execution_profile=getattr(state, "execution_profile", ""))
         setattr(
             state,
@@ -235,6 +251,7 @@ class Agent:
         step_start_index = len(state.steps) if history_start_index is None else max(0, int(history_start_index))
         started_at = time.time()
         setattr(state, "_operator_memory_store", self.operator_memory_store)
+        setattr(state, "_problem_store", self.problem_store)
         environment_awareness = self.get_environment_awareness(
             execution_profile=getattr(state, "execution_profile", ""),
             lab_armed=bool(getattr(self, "_lab_armed", False)),

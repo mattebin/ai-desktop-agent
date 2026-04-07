@@ -3032,16 +3032,26 @@ class TaskState:
             lines.append(
                 f"Latest outcome: {last_outcome.get('status', '')} via {last_outcome.get('tool', '')}: {last_outcome.get('summary', '')}"
             )
+        last_problem = intelligence.get("last_problem", {}) if isinstance(intelligence.get("last_problem", {}), dict) else {}
+        if last_problem.get("summary"):
+            lines.append(
+                f"Latest problem: {last_problem.get('failure_category', 'problem')} - {last_problem.get('summary', '')}"
+            )
+        if last_problem.get("improvement_hint"):
+            lines.append(f"Problem hint: {last_problem.get('improvement_hint', '')}")
         retry = intelligence.get("retry", {}) if isinstance(intelligence.get("retry", {}), dict) else {}
         if retry.get("action") and retry.get("action") != "none":
             lines.append(f"Retry policy: {retry.get('action', '')} ({retry.get('explanation', '')})")
         memory_hints = intelligence.get("memory_hints", {}) if isinstance(intelligence.get("memory_hints", {}), dict) else {}
         prefer = memory_hints.get("prefer", []) if isinstance(memory_hints.get("prefer", []), list) else []
         avoid = memory_hints.get("avoid", []) if isinstance(memory_hints.get("avoid", []), list) else []
+        lessons = memory_hints.get("lessons", []) if isinstance(memory_hints.get("lessons", []), list) else []
         if prefer:
             lines.append(f"What worked recently: {prefer[0].get('summary', '')}")
         if avoid:
             lines.append(f"Avoid repeating: {avoid[0].get('summary', '')}")
+        if lessons:
+            lines.append(f"Stored lesson: {lessons[0].get('lesson', '')}")
 
         if self.last_summary:
             lines.append(f"Rolling summary: {self.last_summary}")

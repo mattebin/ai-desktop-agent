@@ -63,6 +63,8 @@ import {
   getAlerts,
   getDesktopEvidenceArtifact,
   getEmailDraft,
+  getProblemSummary,
+  getRecentProblems,
   getSkillCatalog,
   getSlashCommands,
   getEmailStatus,
@@ -111,6 +113,8 @@ import {
   disarmLabMode,
   runLabCommand,
   type PendingApproval,
+  type ProblemRecord,
+  type ProblemSummary,
   type QueuePayload,
   type ScheduledPayload,
   type ScheduledTask,
@@ -143,6 +147,8 @@ type ControlSnapshot = {
   scheduled: ScheduledPayload | null;
   watches: WatchPayload | null;
   recentRuns: RunEntry[];
+  recentProblems: ProblemRecord[];
+  problemSummary: ProblemSummary | null;
   desktopEvidence: EvidenceSummary[];
   tools: ToolSummary[];
   extensions: ExtensionSummary[];
@@ -1649,6 +1655,8 @@ export default function App() {
     scheduled: null,
     watches: null,
     recentRuns: [],
+    recentProblems: [],
+    problemSummary: null,
     desktopEvidence: [],
     tools: [],
     extensions: [],
@@ -2016,11 +2024,13 @@ export default function App() {
       return;
     }
     const runsSessionId = activeSurface === "runs" ? "" : sessionId;
-    const [queue, scheduled, watches, runs, desktopEvidence, toolCatalog, extensionCatalog] = await Promise.all([
+    const [queue, scheduled, watches, runs, problems, problemSummary, desktopEvidence, toolCatalog, extensionCatalog] = await Promise.all([
       getQueueState(apiBaseUrl),
       getScheduledState(apiBaseUrl),
       getWatchState(apiBaseUrl),
       getRecentRuns(apiBaseUrl, runsSessionId, 10),
+      getRecentProblems(apiBaseUrl, 10),
+      getProblemSummary(apiBaseUrl, 6),
       getDesktopEvidence(apiBaseUrl, 6),
       getToolCatalog(apiBaseUrl),
       getExtensionCatalog(apiBaseUrl),
@@ -2031,6 +2041,8 @@ export default function App() {
       scheduled,
       watches,
       recentRuns: runs.items || [],
+      recentProblems: problems.items || [],
+      problemSummary,
       desktopEvidence: desktopEvidence.recent_summaries || [],
       tools: toolCatalog.items || [],
       extensions: extensionCatalog.items || [],
@@ -2883,8 +2895,10 @@ export default function App() {
   const operatorIntelligence = (status?.intelligence || {}) as StatusPayload["intelligence"];
   const lastOutcome = (operatorIntelligence?.last_outcome || null) as NonNullable<StatusPayload["intelligence"]>["last_outcome"] | null;
   const outcomeRetry = (operatorIntelligence?.retry || null) as NonNullable<StatusPayload["intelligence"]>["retry"] | null;
+  const lastProblem = (operatorIntelligence?.last_problem || null) as NonNullable<StatusPayload["intelligence"]>["last_problem"] | null;
   const preferredHints = Array.isArray(operatorIntelligence?.memory_hints?.prefer) ? operatorIntelligence?.memory_hints?.prefer || [] : [];
   const avoidedHints = Array.isArray(operatorIntelligence?.memory_hints?.avoid) ? operatorIntelligence?.memory_hints?.avoid || [] : [];
+  const lessonHints = Array.isArray(operatorIntelligence?.memory_hints?.lessons) ? operatorIntelligence?.memory_hints?.lessons || [] : [];
   const executionMemory = (operatorIntelligence?.execution_memory || {}) as NonNullable<StatusPayload["intelligence"]>["execution_memory"];
   const environmentAwareness =
     ((operatorIntelligence?.environment as Record<string, unknown> | undefined) ||
@@ -4313,6 +4327,14 @@ export default function App() {
                       <span className="mini-list-time">{formatDateTime(run.started_at)}</span>
                     </div>
                     <p className="surface-list-copy">{plainTextPreview(run.final_summary || "Recent operator run.", 180)}</p>
+                    {run.problem_count ? (
+                      <div className="surface-meta-row">
+                        <span className="evidence-chip">{`${run.problem_count} problem${run.problem_count === 1 ? "" : "s"}`}</span>
+                        {run.latest_problem?.error_code ? (
+                          <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(run.latest_problem.error_code || ""), 22)}</span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </button>
                 ))}
                 {!controlData.recentRuns.length ? <p className="secondary-copy">No recent runs are available yet.</p> : null}
@@ -4335,6 +4357,33 @@ export default function App() {
                     </div>
                     <p className="surface-list-copy">{plainTextPreview(selectedRun.final_summary || selectedRun.result_message || "Run summary", 240)}</p>
                   </article>
+                  {(selectedRun.problems || []).length ? (
+                    <section className="surface-section-block">
+                      <div className="surface-card-header">
+                        <h4>Problems</h4>
+                        <span className="muted-label">{selectedRun.problems?.length || 0}</span>
+                      </div>
+                      <div className="surface-list">
+                        {(selectedRun.problems || []).map((problem, index) => (
+                          <article
+                            key={`${selectedRun.run_id || "run"}:problem:${problem.problem_key || index}`}
+                            className={clsx("surface-list-item", `tone-${statusTone(problem.outcome_classification || "warning")}`)}
+                          >
+                            <div className="surface-list-head">
+                              <span className="surface-list-title">{plainTextPreview(problem.summary || problem.failure_category || "Problem", 88)}</span>
+                              <span className="mini-list-time">{plainTextPreview(problem.error_code || problem.failure_category || "issue", 28)}</span>
+                            </div>
+                            <p className="surface-list-copy">
+                              {plainTextPreview(
+                                problem.improvement_hint || problem.error_text || problem.reason || "Recorded problem for this run step.",
+                                220,
+                              )}
+                            </p>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
                   {(selectedRun.steps || []).map((step) => (
                     <article key={`${selectedRun.run_id || "run"}:${step.index}`} className={clsx("surface-list-item", `tone-${statusTone(step.status)}`)}>
                       <div className="surface-list-head">
@@ -4360,6 +4409,20 @@ export default function App() {
                             <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.evaluation.retry.action || ""), 24)}</span>
                           ) : null}
                         </div>
+                      ) : null}
+                      {step.problem ? (
+                        <div className="surface-meta-row">
+                          <span className="evidence-chip">{plainTextPreview(String(step.problem.failure_category || "problem"), 26)}</span>
+                          {step.problem.error_code ? (
+                            <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.problem.error_code || ""), 20)}</span>
+                          ) : null}
+                          {step.problem.stored_lesson ? (
+                            <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(step.problem.stored_lesson || ""), 28)}</span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {step.problem?.error_text ? (
+                        <p className="surface-list-copy">{plainTextPreview(step.problem.error_text, 220)}</p>
                       ) : null}
                     </article>
                   ))}
@@ -5037,6 +5100,35 @@ export default function App() {
                     )}
                   </div>
                 </article>
+                {lastProblem ? (
+                  <article className={clsx("mini-list-item", `tone-${statusTone(lastProblem?.outcome_classification || lastOutcome?.status)}`)}>
+                    <div className="mini-list-title">
+                      Problem
+                      <span className="mini-list-time">{plainTextPreview(String(lastProblem.failure_category || lastProblem.outcome_classification || "issue"), 22)}</span>
+                    </div>
+                    <div className="mini-list-detail">
+                      {plainTextPreview(
+                        String(lastProblem.summary || lastProblem.error_text || "The latest problem record will appear here when the operator blocks or fails a step."),
+                        160,
+                      )}
+                    </div>
+                    <div className="evidence-preview-meta">
+                      {lastProblem.error_code ? <span className="evidence-chip">{plainTextPreview(String(lastProblem.error_code || ""), 22)}</span> : null}
+                      {lastProblem.improvement_hint ? (
+                        <span className="evidence-chip evidence-chip-soft">{plainTextPreview(String(lastProblem.improvement_hint || ""), 30)}</span>
+                      ) : null}
+                    </div>
+                  </article>
+                ) : null}
+                {lessonHints[0]?.lesson ? (
+                  <article className="mini-list-item tone-info">
+                    <div className="mini-list-title">
+                      Stored lesson
+                      <span className="mini-list-time">{plainTextPreview(String(lessonHints[0]?.category || "memory"), 18)}</span>
+                    </div>
+                    <div className="mini-list-detail">{plainTextPreview(String(lessonHints[0]?.lesson || ""), 150)}</div>
+                  </article>
+                ) : null}
                 <article className="mini-list-item tone-info">
                   <div className="mini-list-title">
                     Runtime
@@ -5242,6 +5334,37 @@ export default function App() {
                       <div className="mini-list-detail">{plainTextPreview(run.final_summary || run.goal || "Recent run", 120)}</div>
                     </article>
                   ))}
+                </div>
+              </section>
+
+              <section className="details-card">
+                <div className="rail-card-header">
+                  <h4>Recent problems</h4>
+                  <span className="muted-label">{controlData.problemSummary?.total_occurrences || controlData.recentProblems.length}</span>
+                </div>
+                <div className="mini-list">
+                  {controlData.recentProblems.slice(0, 6).map((problem) => (
+                    <article
+                      key={problem.problem_key || `${problem.tool}:${problem.timestamp}`}
+                      className={clsx("mini-list-item", `tone-${statusTone(problem.outcome_classification || "warning")}`)}
+                    >
+                      <div className="mini-list-title">
+                        {plainTextPreview(problem.failure_category || problem.tool || "Problem", 44)}
+                        <span className="mini-list-time">{plainTextPreview(problem.error_code || `${problem.occurrence_count || 1}x`, 20)}</span>
+                      </div>
+                      <div className="mini-list-detail">{plainTextPreview(problem.summary || problem.error_text || "Recent structured problem record.", 150)}</div>
+                    </article>
+                  ))}
+                  {!controlData.recentProblems.length ? <p className="secondary-copy">No recent structured problems yet.</p> : null}
+                  {controlData.problemSummary?.top_categories?.length ? (
+                    <p className="secondary-copy">
+                      Top categories:{" "}
+                      {controlData.problemSummary.top_categories
+                        ?.slice(0, 3)
+                        .map((item) => `${plainTextPreview(item.category || "unknown", 18)} (${item.count || 0})`)
+                        .join(", ")}
+                    </p>
+                  ) : null}
                 </div>
               </section>
 

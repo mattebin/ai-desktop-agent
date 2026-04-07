@@ -2451,6 +2451,8 @@ class ExecutionManager:
         session_id = self._task_session_id_locked(task)
         state = self.agent.load_task_state(task.get("goal", ""), state_scope_id=state_scope_id)
         state.state_scope_id = state_scope_id
+        state.task_id = task.get("task_id", "")
+        state.session_id = session_id
         state.status = "running"
         if hasattr(state, "clear_desktop_run_outcome"):
             state.clear_desktop_run_outcome()
@@ -2686,8 +2688,11 @@ class ExecutionManager:
                 state_scope_id=scope_id,
             )
             state.set_execution_profile(SANDBOXED_FULL_ACCESS_LAB_PROFILE)
+            state.task_id = live_task.get("task_id", "")
+            state.session_id = normalized_session_id
             state.status = "running"
             setattr(state, "_operator_memory_store", self.agent.operator_memory_store)
+            setattr(state, "_problem_store", self.agent.problem_store)
             environment_awareness = build_environment_awareness(
                 settings={**self.agent.settings, "_settings_version": getattr(self.agent, "_settings_version", "")},
                 email_status=self.agent.get_email_status(),
@@ -4031,6 +4036,10 @@ class ExecutionManager:
                 latest_run = self.agent.history_store.get_latest_run()
             snapshot["recent_runs"] = recent_runs
             snapshot["latest_run"] = latest_run
+            get_recent_problems = getattr(self.agent, "get_recent_problems", None)
+            get_problem_summary = getattr(self.agent, "get_problem_summary", None)
+            snapshot["recent_problems"] = get_recent_problems(limit=6) if callable(get_recent_problems) else []
+            snapshot["problem_summary"] = get_problem_summary(limit=6) if callable(get_problem_summary) else {}
 
             latest_run_status = _trim_text(latest_run.get("final_status", ""), limit=40)
             latest_run_message = _trim_text(latest_run.get("result_message", ""), limit=280)

@@ -206,6 +206,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "lifecycle": snapshot.get("lifecycle", {}),
         "runtime": snapshot.get("runtime", {}),
         "infrastructure": snapshot.get("infrastructure", {}),
+        "intelligence": snapshot.get("intelligence", {}),
         "behavior": behavior,
         "human_control": snapshot.get("human_control", {}),
         "action_policy": snapshot.get("action_policy", {}),
@@ -229,6 +230,7 @@ def _active_task_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "human_control": snapshot.get("human_control", {}),
         "task_control": snapshot.get("task_control", {}),
         "infrastructure": snapshot.get("infrastructure", {}),
+        "intelligence": snapshot.get("intelligence", {}),
     }
 
 
@@ -869,6 +871,16 @@ class LocalOperatorApiServer:
                     limit = self._query_limit(parsed, default=12, maximum=40)
                     session_id, state_scope_id = self._session_filters(parsed=parsed)
                     self._respond_ok(server_ref.controller.get_alerts(limit=limit, session_id=session_id, state_scope_id=state_scope_id))
+                    return
+
+                if path == "/problems/recent":
+                    limit = self._query_limit(parsed, default=10, maximum=40)
+                    self._respond_ok({"items": server_ref.controller.get_recent_problems(limit=limit)})
+                    return
+
+                if path == "/problems/summary":
+                    limit = self._query_limit(parsed, default=6, maximum=12)
+                    self._respond_ok(server_ref.controller.get_problem_summary(limit=limit))
                     return
 
                 if path == "/queue":

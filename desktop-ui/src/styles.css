@@ -2353,6 +2353,12 @@ body {
   min-height: 0;
 }
 
+.surface-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .surface-list-item {
   border: 1px solid var(--border-soft);
   background: var(--panel);

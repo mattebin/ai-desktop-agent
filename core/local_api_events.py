@@ -430,6 +430,7 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
     intelligence = snapshot.get("intelligence", {}) if isinstance(snapshot.get("intelligence", {}), dict) else {}
     last_outcome = intelligence.get("last_outcome", {}) if isinstance(intelligence.get("last_outcome", {}), dict) else {}
     retry = intelligence.get("retry", {}) if isinstance(intelligence.get("retry", {}), dict) else {}
+    last_problem = intelligence.get("last_problem", {}) if isinstance(intelligence.get("last_problem", {}), dict) else {}
     return {
         "status": _trim_text(snapshot.get("status", "idle"), limit=40),
         "running": bool(snapshot.get("running", False)),
@@ -453,6 +454,12 @@ def _compact_snapshot(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
                 "action": _trim_text(retry.get("action", ""), limit=40),
                 "exhausted": bool(retry.get("exhausted", False)),
                 "explanation": _trim_text(retry.get("explanation", ""), limit=180),
+            },
+            "last_problem": {
+                "tool": _trim_text(last_problem.get("tool", ""), limit=60),
+                "category": _trim_text(last_problem.get("failure_category", ""), limit=80),
+                "summary": _trim_text(last_problem.get("summary", ""), limit=180),
+                "error_code": _trim_text(last_problem.get("error_code", ""), limit=80),
             },
         },
         "runtime": _compact_runtime(snapshot.get("runtime", {})),

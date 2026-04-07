@@ -14,6 +14,7 @@ from core.operator_intelligence import (
     build_environment_awareness,
     guard_repeated_failed_action,
 )
+from core.problem_records import ProblemRecordStore
 from core.run_history import RunHistoryStore
 from core.state import TaskState
 
@@ -76,9 +77,10 @@ def _request_json(base_url: str, path: str, *, method: str = "GET", payload: Dic
         return int(response.status), json.loads(body) if body else {}
 
 
-def _state(memory_store: OperatorMemoryStore, *, goal: str = "eval goal") -> TaskState:
+def _state(memory_store: OperatorMemoryStore, problem_store: ProblemRecordStore, *, goal: str = "eval goal") -> TaskState:
     state = TaskState(goal)
     setattr(state, "_operator_memory_store", memory_store)
+    setattr(state, "_problem_store", problem_store)
     setattr(
         state,
         "_environment_awareness",
@@ -119,6 +121,8 @@ def _lab_settings() -> Dict[str, Any]:
     return {
         "session_state_path": str(TEMP_ROOT / "session_state.json"),
         "run_history_path": str(TEMP_ROOT / "run_history.json"),
+        "problem_record_path": str(TEMP_ROOT / "problem_records.json"),
+        "operator_memory_path": str(TEMP_ROOT / "operator_memory.json"),
         "queue_state_path": str(TEMP_ROOT / "task_queue.json"),
         "scheduled_task_state_path": str(TEMP_ROOT / "scheduled_tasks.json"),
         "watch_state_path": str(TEMP_ROOT / "watch_state.json"),
@@ -136,12 +140,13 @@ def main() -> int:
     shutil.rmtree(TEMP_ROOT, ignore_errors=True)
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     memory_store = OperatorMemoryStore(TEMP_ROOT / "operator_memory.json")
+    problem_store = ProblemRecordStore(TEMP_ROOT / "problem_records.json")
     results: List[CheckResult] = []
     server: LocalOperatorApiServer | None = None
     thread: threading.Thread | None = None
 
     try:
-        desktop_state = _state(memory_store, goal="Focus Notepad")
+        desktop_state = _state(memory_store, problem_store, goal="Focus Notepad")
         before_focus = {
             "active_window_title": "Explorer",
             "active_window_process": "explorer.exe",
@@ -172,7 +177,7 @@ def main() -> int:
             group="desktop",
         )
 
-        desktop_uncertain_state = _state(memory_store, goal="Open a file in Notepad")
+        desktop_uncertain_state = _state(memory_store, problem_store, goal="Open a file in Notepad")
         before_open = {
             "active_window_title": "Explorer",
             "active_window_process": "explorer.exe",
@@ -202,7 +207,7 @@ def main() -> int:
             group="desktop",
         )
 
-        gmail_state = _state(memory_store, goal="Reply to this Gmail thread")
+        gmail_state = _state(memory_store, problem_store, goal="Reply to this Gmail thread")
         gmail_partial = _record_tool_step(
             gmail_state,
             memory_store,
@@ -245,7 +250,7 @@ def main() -> int:
             group="gmail",
         )
 
-        repeat_state = _state(memory_store, goal="Retry a failing action")
+        repeat_state = _state(memory_store, problem_store, goal="Retry a failing action")
         for _ in range(2):
             _record_tool_step(
                 repeat_state,
@@ -283,6 +288,71 @@ def main() -> int:
             bool(failure_hints.get("avoid")),
             json.dumps(failure_hints, ensure_ascii=False),
             group="memory",
+        )
+
+        lesson_hints = memory_store.lookup_patterns(domain="desktop", tool_name="desktop_run_command", goal="Open a file in Notepad")
+        _append(
+            results,
+            "memory_captures_useful_lesson",
+            bool(lesson_hints.get("lessons")),
+            json.dumps(lesson_hints, ensure_ascii=False),
+            group="memory",
+        )
+
+        launcher_state = _state(memory_store, problem_store, goal="Open an image file")
+        launcher_eval = _record_tool_step(
+            launcher_state,
+            memory_store,
+            tool="desktop_run_command",
+            args={"command": "C:\\temp\\photo.png", "shell_kind": "powershell"},
+            result={
+                "ok": False,
+                "error": "[WinError 193] %1 is not a valid Win32 application",
+                "summary": "Tried to launch the file directly as a program.",
+                "command_result": {"returncode": 193, "stderr_excerpt": "[WinError 193] %1 is not a valid Win32 application"},
+            },
+        )
+        launcher_problem = ((launcher_state.steps[-1].get("result", {}) if isinstance(launcher_state.steps[-1].get("result", {}), dict) else {}).get("problem", {}) if launcher_state.steps else {})
+        _append(
+            results,
+            "winerror_problem_record_created",
+            isinstance(launcher_problem, dict) and str(launcher_problem.get("error_code", "")) in {"WinError 193", "exit_193"},
+            json.dumps(launcher_problem, ensure_ascii=False),
+            group="problem",
+        )
+        _append(
+            results,
+            "launcher_failure_category_classified",
+            str(launcher_problem.get("failure_category", "")) == "launcher_file_open_semantics",
+            json.dumps(launcher_problem, ensure_ascii=False),
+            group="problem",
+        )
+
+        blocked_state = _state(memory_store, problem_store, goal="Run blocked lab command")
+        blocked_eval = _record_tool_step(
+            blocked_state,
+            memory_store,
+            tool="lab_run_shell",
+            args={"command": "Remove-Item -Recurse -Force C:\\Users\\Matte\\Documents"},
+            result={
+                "ok": False,
+                "blocked": True,
+                "summary": "Blocked destructive command in lab mode.",
+                "error": "Blocked destructive command in lab mode.",
+                "policy": {
+                    "decision": "block",
+                    "summary": "Blocked destructive command in lab mode.",
+                    "blocked_categories": ["destructive_filesystem_wipe"],
+                },
+            },
+        )
+        blocked_problem = ((blocked_state.steps[-1].get("result", {}) if isinstance(blocked_state.steps[-1].get("result", {}), dict) else {}).get("problem", {}) if blocked_state.steps else {})
+        _append(
+            results,
+            "blocked_policy_problem_classified",
+            str(blocked_problem.get("failure_category", "")) in {"shell_lab_policy_block", "policy_approval_block"},
+            json.dumps(blocked_problem, ensure_ascii=False),
+            group="problem",
         )
 
         environment_facts = build_environment_awareness(
@@ -323,6 +393,94 @@ def main() -> int:
             json.dumps(stored_run, ensure_ascii=False)[:500],
             group="history",
         )
+        _append(
+            results,
+            "run_history_contains_problem_trace",
+            isinstance(stored_run.get("problems", []), list),
+            json.dumps(stored_run.get("problems", []), ensure_ascii=False)[:500],
+            group="history",
+        )
+
+        problem_runs_state = _state(memory_store, problem_store, goal="Open a file in Notepad")
+        _record_tool_step(
+            problem_runs_state,
+            memory_store,
+            tool="desktop_run_command",
+            args={"command": "notepad notes.txt", "shell_kind": "powershell"},
+            result={
+                "ok": True,
+                "summary": "Ran the bounded local command.",
+                "command": "notepad notes.txt",
+                "command_result": {"returncode": 0, "stdout_excerpt": ""},
+            },
+            before=before_open,
+        )
+        problem_history_store = RunHistoryStore(TEMP_ROOT / "run_history_problem.json")
+        problem_history_entry = problem_history_store.record_run(
+            run_id=problem_history_store.next_run_id(),
+            goal="Open a file in Notepad",
+            started_at=time.time() - 1,
+            ended_at=time.time(),
+            final_status="incomplete",
+            final_summary="No visible progress.",
+            result_message="No visible progress.",
+            steps=problem_runs_state.steps,
+            task_state=problem_runs_state,
+            source="goal_run",
+            session_id="problem-session",
+            state_scope_id="problem-scope",
+        )
+        repeated_problem_state = _state(memory_store, problem_store, goal="Open a file in Notepad")
+        _record_tool_step(
+            repeated_problem_state,
+            memory_store,
+            tool="desktop_run_command",
+            args={"command": "notepad notes.txt", "shell_kind": "powershell"},
+            result={
+                "ok": True,
+                "summary": "Ran the bounded local command.",
+                "command": "notepad notes.txt",
+                "command_result": {"returncode": 0, "stdout_excerpt": ""},
+            },
+            before=before_open,
+        )
+        problem_history_store.record_run(
+            run_id=problem_history_store.next_run_id(),
+            goal="Open a file in Notepad",
+            started_at=time.time() - 1,
+            ended_at=time.time(),
+            final_status="incomplete",
+            final_summary="Still no visible progress.",
+            result_message="Still no visible progress.",
+            steps=repeated_problem_state.steps,
+            task_state=repeated_problem_state,
+            source="goal_run",
+            session_id="problem-session",
+            state_scope_id="problem-scope",
+        )
+        recent_problem_records = problem_store.get_recent(limit=6)
+        summary = problem_store.get_summary(limit=4)
+        _append(
+            results,
+            "problem_store_persists_records",
+            bool(recent_problem_records),
+            json.dumps(recent_problem_records, ensure_ascii=False)[:500],
+            group="problem_store",
+        )
+        _append(
+            results,
+            "problem_store_deduplicates_repeated_failures",
+            bool(recent_problem_records) and int(recent_problem_records[0].get("occurrence_count", 0) or 0) >= 2,
+            json.dumps(recent_problem_records[0] if recent_problem_records else {}, ensure_ascii=False),
+            group="problem_store",
+        )
+        _append(
+            results,
+            "problem_summary_groups_failures",
+            bool(summary.get("top_categories")),
+            json.dumps(summary, ensure_ascii=False),
+            group="problem_store",
+        )
 
         server = LocalOperatorApiServer(host="127.0.0.1", port=0, settings=_lab_settings())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -337,6 +495,34 @@ def main() -> int:
             status_code == 200 and isinstance(runtime, dict) and isinstance(runtime.get("environment_awareness", {}), dict),
             json.dumps(runtime, ensure_ascii=False),
             group="environment",
+        )
+        status_intelligence = (status_payload.get("data", {}) if isinstance(status_payload.get("data", {}), dict) else {}).get("intelligence", {})
+        _append(
+            results,
+            "status_payload_exposes_intelligence",
+            isinstance(status_intelligence, dict),
+            json.dumps(status_intelligence, ensure_ascii=False),
+            group="surface",
+        )
+
+        problems_status, problems_payload = _request_json(base_url, "/problems/recent")
+        problems_items = ((problems_payload.get("data", {}) if isinstance(problems_payload.get("data", {}), dict) else {}).get("items", []) if isinstance((problems_payload.get("data", {}) if isinstance(problems_payload.get("data", {}), dict) else {}).get("items", []), list) else [])
+        _append(
+            results,
+            "recent_problems_endpoint_exposes_records",
+            problems_status == 200 and bool(problems_items),
+            json.dumps(problems_items[:2], ensure_ascii=False),
+            group="surface",
+        )
+
+        summary_status, summary_payload = _request_json(base_url, "/problems/summary")
+        summary_data = summary_payload.get("data", {}) if isinstance(summary_payload.get("data", {}), dict) else {}
+        _append(
+            results,
+            "problem_summary_endpoint_exposes_categories",
+            summary_status == 200 and bool(summary_data.get("top_categories")),
+            json.dumps(summary_data, ensure_ascii=False),
+            group="surface",
         )
 
         arm_status, arm_payload = _request_json(base_url, "/lab/arm", method="POST", payload={"confirmation": "ENABLE LAB"})

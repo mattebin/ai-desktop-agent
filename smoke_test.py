@@ -37,6 +37,7 @@ mods = [
     "core.loop",
     "core.operator_behavior",
     "core.operator_controller",
+    "core.problem_records",
     "core.run_history",
     "core.scheduler_backend",
     "core.session_store",
@@ -156,6 +157,10 @@ if not isinstance(snapshot, dict):
     raise SystemExit("OperatorController.get_snapshot() did not return a dict.")
 if not isinstance(snapshot.get("recent_runs", []), list):
     raise SystemExit("OperatorController.get_snapshot() did not include a recent_runs list.")
+if not isinstance(snapshot.get("recent_problems", []), list):
+    raise SystemExit("OperatorController.get_snapshot() did not include a recent_problems list.")
+if not isinstance(snapshot.get("problem_summary", {}), dict):
+    raise SystemExit("OperatorController.get_snapshot() did not include a problem_summary dict.")
 if not isinstance(snapshot.get("latest_run", {}), dict):
     raise SystemExit("OperatorController.get_snapshot() did not include a latest_run dict.")
 if not isinstance(snapshot.get("queue", {}), dict):

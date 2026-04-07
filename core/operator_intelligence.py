@@ -10,12 +10,14 @@ from typing import Any, Dict, List
 
 from core.capability_profiles import normalize_execution_profile
 from core.lab_shell import lab_status_snapshot
+from core.problem_records import build_problem_record
 
 
 DEFAULT_OPERATOR_MEMORY_PATH = Path(__file__).resolve().parents[1] / "data" / "operator_memory.json"
 _FAIL_LIKE_OUTCOMES = {"failure", "uncertain", "blocked", "no_progress"}
 _MAX_HEURISTIC_ENTRIES = 120
 _MAX_HINT_ITEMS = 2
+_MAX_LESSON_ENTRIES = 24
 
 
 def _trim_text(value: Any, *, limit: int = 220) -> str:
@@ -784,18 +786,20 @@ class OperatorMemoryStore:
 
     def _load(self) -> Dict[str, Any]:
         if not self.path.exists():
-            return {"heuristics": [], "environment": {}}
+            return {"heuristics": [], "environment": {}, "lessons": []}
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
-            return {"heuristics": [], "environment": {}}
+            return {"heuristics": [], "environment": {}, "lessons": []}
         if not isinstance(payload, dict):
-            return {"heuristics": [], "environment": {}}
+            return {"heuristics": [], "environment": {}, "lessons": []}
         heuristics = payload.get("heuristics", [])
         environment = payload.get("environment", {})
+        lessons = payload.get("lessons", [])
         return {
             "heuristics": heuristics if isinstance(heuristics, list) else [],
             "environment": environment if isinstance(environment, dict) else {},
+            "lessons": lessons if isinstance(lessons, list) else [],
         }
 
     def _save(self, payload: Dict[str, Any]) -> bool:
@@ -854,6 +858,9 @@ class OperatorMemoryStore:
         heuristics = payload.get("heuristics", [])
         if not isinstance(heuristics, list):
             heuristics = []
+        lessons = payload.get("lessons", [])
+        if not isinstance(lessons, list):
+            lessons = []
 
         normalized_domain = _trim_text(domain, limit=40)
         normalized_tool = _trim_text(tool_name, limit=80)
@@ -892,11 +899,58 @@ class OperatorMemoryStore:
             if len(prefer) >= _MAX_HINT_ITEMS and len(avoid) >= _MAX_HINT_ITEMS:
                 break
 
+        matching_lessons: List[Dict[str, Any]] = []
+        for lesson in lessons:
+            if not isinstance(lesson, dict):
+                continue
+            lesson_tool = _trim_text(lesson.get("tool", ""), limit=80)
+            lesson_domain = _trim_text(lesson.get("domain", ""), limit=40)
+            if normalized_domain and lesson_domain and lesson_domain != normalized_domain:
+                continue
+            if normalized_tool and lesson_tool and lesson_tool != normalized_tool:
+                continue
+            matching_lessons.append(
+                {
+                    "lesson": _trim_text(lesson.get("lesson", ""), limit=220),
+                    "category": _trim_text(lesson.get("category", ""), limit=80),
+                    "tool": lesson_tool,
+                    "recorded_at": _trim_text(lesson.get("recorded_at", ""), limit=40),
+                    "problem_key": _trim_text(lesson.get("problem_key", ""), limit=80),
+                }
+            )
+            if len(matching_lessons) >= _MAX_HINT_ITEMS:
+                break
+
         return {
             "prefer": prefer,
             "avoid": avoid,
+            "lessons": matching_lessons,
             "environment": payload.get("environment", {}) if isinstance(payload.get("environment", {}), dict) else {},
         }
+
+    def record_lesson(self, lesson: Dict[str, Any] | None) -> bool:
+        safe_lesson = lesson if isinstance(lesson, dict) else {}
+        lesson_key = _trim_text(safe_lesson.get("lesson_key", ""), limit=80)
+        lesson_text = _trim_text(safe_lesson.get("lesson", ""), limit=220)
+        if not lesson_key or not lesson_text:
+            return False
+        payload = self._load()
+        lessons = payload.get("lessons", [])
+        if not isinstance(lessons, list):
+            lessons = []
+        next_entry = {
+            "lesson_key": lesson_key,
+            "lesson": lesson_text,
+            "category": _trim_text(safe_lesson.get("category", ""), limit=80),
+            "tool": _trim_text(safe_lesson.get("tool", ""), limit=80),
+            "domain": _trim_text(safe_lesson.get("domain", ""), limit=40),
+            "problem_key": _trim_text(safe_lesson.get("problem_key", ""), limit=80),
+            "recorded_at": _iso_now(),
+        }
+        lessons = [item for item in lessons if not isinstance(item, dict) or _trim_text(item.get("lesson_key", ""), limit=80) != lesson_key]
+        lessons.insert(0, next_entry)
+        payload["lessons"] = lessons[:_MAX_LESSON_ENTRIES]
+        return self._save(payload)
 
 
 def _recent_evaluation_items(task_state, *, limit: int = 6) -> List[Dict[str, Any]]:
@@ -928,6 +982,25 @@ def _recent_evaluation_items(task_state, *, limit: int = 6) -> List[Dict[str, An
     return items
 
 
+def _alternate_strategy_attempted(task_state, evaluation: Dict[str, Any] | None) -> bool:
+    safe_evaluation = evaluation if isinstance(evaluation, dict) else {}
+    target_signature = _trim_text(safe_evaluation.get("target_signature", ""), limit=220)
+    action_signature = _trim_text(safe_evaluation.get("action_signature", ""), limit=220)
+    if not target_signature:
+        return False
+    for item in _recent_evaluation_items(task_state, limit=8):
+        if _trim_text(item.get("target_signature", ""), limit=220) != target_signature:
+            continue
+        if _trim_text(item.get("tool", ""), limit=80) == _trim_text(safe_evaluation.get("tool", ""), limit=80):
+            continue
+        if _trim_text(item.get("status", ""), limit=40) in _FAIL_LIKE_OUTCOMES | {"partial_success"}:
+            return True
+        prior_retry = item.get("retry", {}) if isinstance(item.get("retry", {}), dict) else {}
+        if _trim_text(prior_retry.get("action", ""), limit=40) in {"retry_with_variation", "alternate_target", "recovery_first"}:
+            return True
+    return False
+
+
 def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
     recent = _recent_evaluation_items(task_state, limit=6)
     last = recent[0] if recent else {}
@@ -955,6 +1028,9 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
             in {"recovery_first", "retry_with_variation", "alternate_target"}
         ][:3],
     }
+    last_problem = getattr(task_state, "_last_problem_record", {})
+    if not isinstance(last_problem, dict):
+        last_problem = {}
     context = {
         "last_outcome": last,
         "recent_outcomes": recent,
@@ -962,9 +1038,11 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
         "memory_hints": {
             "prefer": list(hints.get("prefer", [])) if isinstance(hints.get("prefer", []), list) else [],
             "avoid": list(hints.get("avoid", [])) if isinstance(hints.get("avoid", []), list) else [],
+            "lessons": list(hints.get("lessons", [])) if isinstance(hints.get("lessons", []), list) else [],
         },
         "execution_memory": execution_memory,
         "environment": environment,
+        "last_problem": last_problem,
     }
     setattr(task_state, "_operator_intelligence_context", context)
     return context
@@ -983,8 +1061,31 @@ def apply_outcome_evaluation(
     evaluation = evaluate_action_outcome(task_state, tool_name, args, result, before_context=before_context)
     result["evaluation"] = evaluation
     store = getattr(task_state, "_operator_memory_store", None)
+    alternate_strategy_attempted = _alternate_strategy_attempted(task_state, evaluation)
+    problem = build_problem_record(
+        task_state=task_state,
+        tool_name=tool_name,
+        args=args if isinstance(args, dict) else {},
+        result=result,
+        evaluation=evaluation,
+        alternate_strategy_attempted=alternate_strategy_attempted,
+    )
+    if problem:
+        result["problem"] = problem
+        setattr(task_state, "_last_problem_record", problem)
     if isinstance(store, OperatorMemoryStore):
         store.record_outcome(evaluation, goal=str(getattr(task_state, "goal", "")).strip())
+        if problem and problem.get("lesson_key"):
+            store.record_lesson(
+                {
+                    "lesson_key": problem.get("lesson_key", ""),
+                    "lesson": problem.get("stored_lesson", ""),
+                    "category": problem.get("failure_category", ""),
+                    "tool": problem.get("tool", ""),
+                    "domain": problem.get("domain", ""),
+                    "problem_key": problem.get("problem_key", ""),
+                }
+            )
     refresh_operator_intelligence_context(task_state)
     return evaluation
 

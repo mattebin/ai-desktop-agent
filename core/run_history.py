@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from core.problem_records import enrich_problem_record
 
-RUN_HISTORY_VERSION = 1
+
+RUN_HISTORY_VERSION = 2
 DEFAULT_RUN_HISTORY_PATH = "data/run_history.json"
 DEFAULT_MAX_RUNS = 25
 DEFAULT_MAX_STEPS_PER_RUN = 40
@@ -309,6 +311,40 @@ def _evaluation_payload(result: Dict[str, Any]) -> Dict[str, Any]:
     return filtered
 
 
+def _problem_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    problem = result.get("problem", {}) if isinstance(result.get("problem", {}), dict) else {}
+    payload = {
+        "problem_id": _trim_text(problem.get("problem_id", ""), limit=80),
+        "problem_key": _trim_text(problem.get("problem_key", ""), limit=80),
+        "tool": _trim_text(problem.get("tool", ""), limit=80),
+        "domain": _trim_text(problem.get("domain", ""), limit=40),
+        "summary": _trim_text(problem.get("summary", ""), limit=220),
+        "error_code": _trim_text(problem.get("error_code", ""), limit=80),
+        "error_text": _trim_text(problem.get("error_text", ""), limit=280),
+        "outcome_classification": _trim_text(problem.get("outcome_classification", ""), limit=40),
+        "failure_category": _trim_text(problem.get("failure_category", ""), limit=80),
+        "retry_count": _safe_int(problem.get("retry_count", 0)),
+        "retry_budget_exhausted": bool(problem.get("retry_budget_exhausted", False)),
+        "alternate_strategy_attempted": bool(problem.get("alternate_strategy_attempted", False)),
+        "approval_involved": bool(problem.get("approval_involved", False)),
+        "reason": _trim_text(problem.get("reason", ""), limit=120),
+        "improvement_hint": _trim_text(problem.get("improvement_hint", ""), limit=220),
+        "stored_lesson": _trim_text(problem.get("stored_lesson", ""), limit=220),
+        "action_signature": _trim_text(problem.get("action_signature", ""), limit=220),
+        "target_signature": _trim_text(problem.get("target_signature", ""), limit=220),
+        "timestamp": _trim_text(problem.get("timestamp", ""), limit=40),
+        "evidence_refs": [_trim_text(item, limit=80) for item in list(problem.get("evidence_refs", []))[:4] if _trim_text(item, limit=80)],
+    }
+    filtered: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if value in ("", None, 0, False):
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        filtered[key] = value
+    return filtered
+
+
 def _step_entry(step: Dict[str, Any], *, index: int) -> Dict[str, Any]:
     result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
     tool_name = str(step.get("tool", step.get("type", "unknown"))).strip() or "unknown"
@@ -340,6 +376,10 @@ def _step_entry(step: Dict[str, Any], *, index: int) -> Dict[str, Any]:
     evaluation = _evaluation_payload(result)
     if evaluation:
         entry["evaluation"] = evaluation
+
+    problem = _problem_payload(result)
+    if problem:
+        entry["problem"] = problem
 
     message = _trim_text(step.get("message", ""), limit=220)
     if message:
@@ -454,6 +494,25 @@ class RunHistoryStore:
                     "duration_seconds": run.get("duration_seconds", 0),
                     "step_count": _safe_int(run.get("step_count", 0)),
                     "final_summary": _trim_text(run.get("final_summary", ""), limit=220),
+                    "problem_count": _safe_int(run.get("problem_count", 0)),
+                    "latest_problem": (
+                        {
+                            "summary": _trim_text(
+                                ((run.get("problems", [{}]) or [{}])[0] if isinstance(run.get("problems", []), list) else {}).get("summary", ""),
+                                limit=180,
+                            ),
+                            "failure_category": _trim_text(
+                                ((run.get("problems", [{}]) or [{}])[0] if isinstance(run.get("problems", []), list) else {}).get("failure_category", ""),
+                                limit=80,
+                            ),
+                            "error_code": _trim_text(
+                                ((run.get("problems", [{}]) or [{}])[0] if isinstance(run.get("problems", []), list) else {}).get("error_code", ""),
+                                limit=80,
+                            ),
+                        }
+                        if isinstance(run.get("problems", []), list) and run.get("problems", [])
+                        else {}
+                    ),
                 }
             )
             if len(items) >= safe_limit:
@@ -506,12 +565,30 @@ class RunHistoryStore:
             for offset, step in enumerate((steps or [])[: self.max_steps_per_run])
             if isinstance(step, dict)
         ]
+        run_problem_records: List[Dict[str, Any]] = []
+        safe_session_id = _trim_text(session_id, limit=80)
+        safe_scope_id = _trim_text(state_scope_id, limit=120)
+        safe_task_id = _trim_text(getattr(task_state, "task_id", ""), limit=80)
+        for step_entry in step_entries:
+            problem = step_entry.get("problem", {}) if isinstance(step_entry.get("problem", {}), dict) else {}
+            if not problem:
+                continue
+            enriched = enrich_problem_record(
+                problem,
+                run_id=_trim_text(run_id, limit=60),
+                session_id=safe_session_id,
+                state_scope_id=safe_scope_id,
+                task_id=safe_task_id,
+            )
+            if enriched:
+                step_entry["problem"] = enriched
+                run_problem_records.append(enriched)
         entry = {
             "run_id": _trim_text(run_id, limit=60),
             "source": _trim_text(source, limit=40),
             "goal": _trim_text(goal, limit=500),
-            "session_id": _trim_text(session_id, limit=80),
-            "state_scope_id": _trim_text(state_scope_id, limit=120),
+            "session_id": safe_session_id,
+            "state_scope_id": safe_scope_id,
             "started_at": _iso_timestamp(started_at),
             "ended_at": _iso_timestamp(ended_at),
             "duration_seconds": round(max(0.0, float(ended_at) - float(started_at)), 2),
@@ -521,8 +598,16 @@ class RunHistoryStore:
             "step_count": len(step_entries),
             "steps": step_entries,
             "end_state": _end_state(task_state),
+            "problem_count": len(run_problem_records),
+            "problems": run_problem_records,
         }
         self.append_run(entry)
+        problem_store = getattr(task_state, "_problem_store", None)
+        if problem_store is not None and hasattr(problem_store, "record_problems"):
+            try:
+                problem_store.record_problems(run_problem_records)
+            except Exception:
+                pass
         return entry
 
     def append_run(self, entry: Dict[str, Any]) -> bool:
