@@ -1,274 +1,103 @@
 # AI Desktop Operator
 
-Local chat-first AI desktop operator for Windows that analyzes, plans, and executes tasks with controlled actions.
+A local AI desktop operator that can understand your system, take actions, and work through tasks step by step with controlled execution.
 
-## What this is
+AI Desktop Operator is built to feel less like a chatbot and more like a careful operator. You can ask it to inspect the desktop, work through browser or system tasks, manage Gmail workflows, run automations, and pause for approval when something sensitive is about to happen. It stays local-first, keeps a clear run history, and tries to judge whether its actions actually worked instead of blindly assuming success.
 
-This project is not a chatbot and not a collection of scripts.
+## What it can do
 
-It is a structured local operator system that:
-- observes the desktop, apps, and browser
-- interprets what is happening
-- plans multi-step actions
-- executes them in a controlled and observable way
-- requires approval for sensitive actions
+- Work from chat while keeping task state, approvals, and context visible
+- Inspect the desktop, windows, browser state, and recent evidence
+- Run Gmail workflows such as inbox review, drafting, forwarding, and approval-gated sending
+- Create and manage automations and watch-based tasks
+- Use workflow skills and local extensions from the same command surface
+- Keep replayable run history and explain what happened
+- Learn from recent outcomes through short-horizon memory and retry logic
+- Experiment with controlled shell access in a separate lab mode
 
-## Key features
+## What makes it different
 
-- local API as the main control surface
-- chat-first desktop UI
-- evidence-based desktop reasoning
-- scene interpretation and workflow awareness
-- approval-gated desktop and browser actions
-- bounded desktop control primitives
-- local-first architecture with controlled runtime behavior
+- **Local-first**: the main control surface is a local API with a thin desktop UI on top
+- **Approval-gated**: sensitive actions pause instead of racing ahead
+- **Bounded control**: this is designed to act carefully, not as reckless full-device automation
+- **Evidence-based**: it uses screenshots, window state, and scene context to ground decisions
+- **Adaptive**: it can evaluate outcomes, retry carefully, recover, and stop when progress is unclear
+- **Built as an operator**: task lifecycle, replay, and state are first-class parts of the system
 
-## Why it’s different
+## How it works
 
-Most automation systems rely on fragile scripts, blind execution, or broad unsafe control.
+The short version is:
 
-This system is built around:
-- explicit state and task lifecycle
-- evidence selection and approval grounding
-- recovery and readiness checks
-- bounded action scope
-- controllable local execution
+**observe -> plan -> act -> evaluate -> adapt**
 
-## Tech stack
+The operator gathers local context, decides on a bounded next step, executes it, checks whether it actually worked, and either continues, recovers, asks for approval, or stops. That loop is what makes the project more useful than a one-shot tool call and safer than a free-running automation agent.
 
-- Python for core logic
-- Playwright for browser automation
-- Tauri + React for desktop UI
-- local API control layer
-- optional local infrastructure backends for scheduling, file watching, window metadata, and screenshot capture
+## UI overview
 
-## Project status
+![AI Desktop Operator UI](images/ui-main.png)
 
-Actively developed. Core architecture is in place, with current work focused on reliability, grounded desktop control, and better end-to-end operator usefulness.
+The UI is chat-first, with workspaces for things like Automations, Gmail, Workflows, Runs, and experimental lab features. The main conversation stays in the center, approvals and active context stay visible on the right, and recent work stays compact in the left rail.
+
+## Example use cases
+
+- Open a file, inspect it, and send the result through Gmail with approval before the final send
+- Check what is happening on the desktop and recover when the wrong window is focused
+- Run a multi-step task that pauses for approvals instead of trying to do everything blindly
+- Set up a recurring automation and review what happened later through replay and run history
+- Test a safe shell task inside the experimental lab mode without mixing it into normal operator control
 
 ## Current status
 
-This project is now a serious local operator framework with:
+The project already has a strong foundation and a real working product shape, but it is still evolving.
 
-- a strong chat-first desktop UI
-- a local API as the main control surface
-- explicit operator behavior and task lifecycle
-- stop / defer / resume / retry / replace / supersession control
-- approval-gated safety
-- Playwright-only browser operations
-- bounded desktop-control primitives
-- optional local infrastructure backends for scheduling, file watching, desktop observation, and future UI evidence
-- a bounded read-only desktop evidence layer for screenshots, window metadata, and future UI probes
-- a compact desktop evidence summary/selection layer for recent evidence lookup
-- bounded automatic active-window capture into the same desktop evidence layer
-- a bounded desktop scene interpretation layer for app/workflow/readiness understanding
-- evidence-aware desktop reasoning for bounded investigations and approval grounding
-- workflow-aware target proposals that bridge evidence and scene state into bounded next-step candidates
-- explicit active run phases with batched live runtime frames for steadier execution UI behavior
-- a bounded desktop recovery and readiness layer for minimized, hidden, tray/background, loading, and unstable window conditions
-- a per-monitor-DPI-safe desktop coordinate mapping layer from capture space to action space
-- live eval coverage for core and realistic workflows
-- a tighter live-eval client/harness wait path for desktop-grounding validation
-
-## Current architecture
-
-Main shape:
-
-- local API is the front door
-- thin API-backed UI
-- OperatorController / ExecutionManager / agent loop
-- ToolRuntime for tools/runtime orchestration
-- session-aware and task-aware state
-- approval-gated actions
-- browser scope is Playwright-only
-- desktop control is intentionally bounded
-
-## Current desktop-control scope
-
-Implemented bounded desktop-control primitives:
-
-- list visible windows
-- get active window
-- focus a specific window
-- capture a bounded screenshot
-- approval-gated mouse move / hover / click / right click / double click
-- approval-gated bounded scroll
-- approval-gated bounded safe key press and short key sequences
-- approval-gated bounded text entry
-- bounded process listing / inspection
-- approval-gated owned-process start / stop
-- approval-gated bounded local command execution with timeout and captured output
-
-Not included:
-
-- drag/drop
-- arbitrary hotkeys or unrestricted macro playback
-- unrestricted keyboard/mouse control
-- broad kill-anything process control
-- giant shell-agent behavior
-- autonomous desktop navigation loops
-- broad dangerous autonomy
-
-## Local-only infrastructure backends
-
-This project now includes optional local backends that strengthen offline/runtime plumbing without widening operator behavior:
-
-- `APScheduler`
-  Preferred in-process scheduler backend under the existing queue/scheduler model.
-- `watchdog`
-  Preferred local filesystem event backend for file-based watch triggers.
-- `PyWinCtl`
-  Preferred desktop window metadata/focus backend for bounded window observation.
-- `mss`
-  Preferred bounded desktop screenshot backend.
-- `pywinauto`
-  Future-facing read-only UI evidence backend scaffold only.
-- `RapidFuzz`
-  Bounded title/candidate matching helper for window-title drift and recovery ranking.
-- `dxcam` / `bettercam` (optional)
-  Future-facing higher-performance screenshot backends behind the shared capture boundary.
-
-These integrations are intentionally narrow:
-
-- they are optional and fallback-safe
-- they do not add broad new control loops
-- they do not change model-facing behavior by themselves
-- they do not widen the current bounded desktop action scope
-
-## Read-only desktop evidence layer
-
-This project now includes a bounded read-only desktop evidence layer that assembles:
-
-- active-window metadata
-- visible-window observations
-- bounded screenshot artifact references
-- optional read-only UI evidence probes
-
-Current role:
-
-- provide a normalized, serialization-friendly desktop evidence bundle
-- retain bounded evidence artifacts under `data/desktop_evidence/`
-- expose recent evidence references through the authoritative local API
-- support future approval grounding without adding new action capability in this pass
-
-The evidence layer now also exposes compact recent summaries, deterministic selection helpers, and bounded evidence sufficiency assessment for the most relevant recent desktop evidence bundle.
-
-The local runtime can now also record bounded automatic active-window captures into that same evidence store. Those frames are deduped when unchanged and promoted when task, checkpoint, or active-window context meaningfully changes, so older important screenshots can stay available as context instead of being replaced by a simple stream of duplicates.
-
-The desktop stack now also includes bounded recovery/readiness helpers so desktop tasks can diagnose and recover from messy window states without relying on one fragile foreground-only path.
-
-Recent reliability work also added a shared coordinate-mapping layer so screenshot evidence, primary-monitor capture, window-relative targeting, and final input coordinates all use one bounded physical-pixel model. On mixed-monitor Windows setups, the runtime now prefers full-primary-screen capture, carries per-monitor DPI/scale metadata, and maps capture-relative points back into action space explicitly instead of letting each action improvise its own coordinate math.
-
-Recent architecture work also strengthened the plug-in seams around:
-
-- capture backend selection and fallback
-- coordinate mapping and per-monitor DPI normalization
-- bounded title/process/class matching
-- process/background diagnostics
-- readiness and control-state probing
-- deterministic direct-vision packaging
-
-Recent runtime stabilization work also added:
-
-- explicit run phases (`idle`, `planning`, `awaiting_approval`, `executing`, `post_execution`)
-- batched live operator/session frames on top of the existing event stream
-- stable execution-focus behavior in the desktop UI so active runs stop forcing chat/view churn during bounded execution
-- stale-while-refresh transcript resync so routine conversation refreshes stop clearing the visible chat pane during execution
-- stable transcript message identity and incremental merge preservation so unchanged replies stay mounted instead of being subtly rebound during execution
-- top-layer menu/modal rendering and evidence-artifact image preview resolution through the existing local API path
-- conservative proposal-aware desktop action pacing so the same unchanged target is not hammered repeatedly
-
-Those summaries now feed compact UI/client presentation too:
-
-- desktop approvals show linked evidence context
-- active task/status surfaces show selected/checkpoint evidence previews
-- secondary details surfaces can inspect recent evidence summaries without raw bundle spam
-- retained evidence artifacts can be viewed on demand from those summary surfaces without auto-expanding screenshots into the main experience
-
-Recent validation work also tightened the desktop live-eval wait path and confirmed the main screenshot-backed approval-grounding path locally plus in one bounded desktop-grounding live scenario, while leaving stale-evidence follow-up behavior as the next targeted validation slice.
-
-## Desktop scene interpretation layer
-
-The desktop evidence/viewing stack now also includes a bounded scene interpretation layer that can compactly classify:
-
-- probable scene/app class
-- probable workflow state
-- loading / ready / blocked / unstable state
-- dialog/prompt/fullscreen/background-like characteristics
-- meaningful scene changes across recent evidence history
-
-This layer plugs into:
-
-- bounded vision selection
-- desktop recovery/readiness reasoning
-- workflow-aware target proposal
-- approval grounding
-- desktop-state answers
-- final desktop context packaging
-
-It does not replace the evidence store, and it does not introduce broad OCR-heavy automation. Its job is to make the existing evidence stack more understandable and more reusable for future bounded desktop capability.
-
-Current non-goals:
-
-- no OCR-heavy desktop interpretation
-- no broad UI automation
-- no new desktop actions beyond the existing bounded set
-- no broad autonomous desktop navigation or OCR-heavy desktop reasoning
-
-## Desktop recovery layer
-
-The bounded desktop recovery layer now supports:
-
-- richer window-state inspection
-- minimized / hidden / tray-background classification
-- foreground confirmation checks
-- bounded restore/show/focus recovery
-- bounded readiness and visual-stability checks
-
-See [docs/DESKTOP_RECOVERY_MODEL.md](docs/DESKTOP_RECOVERY_MODEL.md) for the current model and non-goals.  
-See [docs/DESKTOP_EVIDENCE_ARCHITECTURE.md](docs/DESKTOP_EVIDENCE_ARCHITECTURE.md) for the current semi-final subsystem shape.
-
-Recent integration work also wired those recovery tools into the real desktop loop and added a focused `desktop_recovery_grounding` live scenario for minimized, wrong-foreground, loading, and unstable states. The main remaining live validation limitation is fully withdrawn or tray-like hidden windows, which are still reported clearly as not visibly present instead of being force-recovered.
-
-## Project philosophy
-
-- keep chat primary
-- keep operator internals secondary
-- preserve the current architecture
-- do not widen dangerous autonomy casually
-- do not add desktop control too early or too broadly
-- do not turn the app into a dashboard
-- build toward a trustworthy operator, not a gimmick
-
-## Current priorities
-
-Highest current priorities:
-
-1. improve operator usefulness and judgment quality
-2. improve realistic scenario reliability
-3. improve final-answer quality and outcome clarity
-4. expand bounded desktop evidence and action grounding carefully
-5. preserve safety and controllability while adding capability
+- The main desktop operator flow is usable and grounded in local state
+- Gmail workflows, automations, replay, and workflow tooling are integrated
+- Outcome evaluation, bounded recovery, and short-horizon memory are in place
+- Experimental shell lab mode exists, but it should stay lab-only until it proves itself further
 
 ## Repository structure
 
-- `core/` - operator core logic
-- `tools/` - tool implementations
-- `desktop-ui/` - desktop UI
-- `docs/` - architecture notes, roadmap, handoff
-- `skills/` - reusable skill definitions/instructions
-- `agents/` - sub-agent role definitions
-- `prompts/` - canonical prompts and pass prompts
+- `core/` - operator runtime, control flow, evaluation, state, approvals, and API
+- `desktop-ui/` - Tauri + React desktop interface
+- `tools/` - tool implementations used by the operator
+- `docs/` - deeper architecture notes and technical references
 
-## Branching approach
+## Getting started
 
-- `main` = stable baseline
-- feature branches = current implementation work
+1. Install Python dependencies from the repo root:
 
-## Links
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-- Repository: https://github.com/mattebin/ai-desktop-agent
+2. Install the desktop UI dependencies:
 
-## Notes
+   ```bash
+   cd desktop-ui
+   npm install
+   ```
 
-This repository is shared publicly for demonstration and portfolio purposes.
+3. Start the desktop app:
+
+   ```bash
+   npm run tauri:dev
+   ```
+
+If you want to inspect the backend directly, you can also run:
+
+```bash
+python main.py
+```
+
+## Learn more
+
+The README is intentionally the simple entry point. Deeper technical material lives in [`docs/`](docs/).
+
+Useful starting points:
+
+- [Project overview](docs/PROJECT_OVERVIEW.md)
+- [Desktop evidence architecture](docs/DESKTOP_EVIDENCE_ARCHITECTURE.md)
+- [Desktop recovery model](docs/DESKTOP_RECOVERY_MODEL.md)
+- [Desktop scene interpretation](docs/DESKTOP_SCENE_INTERPRETATION.md)
+- [Gmail integration](docs/gmail-integration.md)
+- [Roadmap](docs/ROADMAP.md)
