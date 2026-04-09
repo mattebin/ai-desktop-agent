@@ -56,6 +56,12 @@ try:
 except Exception:
     psutil = None  # type: ignore[assignment]
 
+try:
+    import ctypes
+    _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+except Exception:
+    _user32 = None
+
 
 WindowListDelegate = Callable[..., List[Dict[str, Any]]]
 WindowInfoDelegate = Callable[[], Dict[str, Any]]
@@ -167,6 +173,30 @@ def _hex_hwnd(value: Any) -> str:
         return ""
 
 
+def _count_hung_windows(target_pid: int) -> int:
+    """Count windows owned by *target_pid* that Windows considers hung."""
+    if _user32 is None or target_pid <= 0:
+        return 0
+    hung = 0
+    try:
+        import ctypes as _ct
+
+        @_ct.WINFUNCTYPE(_ct.c_bool, _ct.c_void_p, _ct.c_void_p)
+        def _cb(hwnd, _lp):
+            nonlocal hung
+            owner_pid = _ct.c_uint32(0)
+            _user32.GetWindowThreadProcessId(_ct.c_void_p(hwnd), _ct.byref(owner_pid))
+            if int(owner_pid.value) == target_pid:
+                if _user32.IsWindowVisible(_ct.c_void_p(hwnd)) and _user32.IsHungAppWindow(_ct.c_void_p(hwnd)):
+                    hung += 1
+            return True
+
+        _user32.EnumWindows(_cb, 0)
+    except Exception:
+        pass
+    return hung
+
+
 def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, Any]:
     normalized_name = _trim_text(process_name, limit=120)
     normalized_pid = _coerce_int(pid, 0, minimum=0, maximum=10_000_000)
@@ -257,9 +287,19 @@ def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, 
     except Exception:
         parent = None
     background_candidate = running and status.lower() in {"sleeping", "idle", "stopped"}
+    resolved_pid = int(getattr(process, "pid", normalized_pid) or normalized_pid)
+    hung_windows = _count_hung_windows(resolved_pid) if running else 0
+    responsive = running and hung_windows == 0
+    display_name = name or normalized_name or "unknown"
+    if not running:
+        summary = f"Process '{display_name}' is present but does not look runnable."
+    elif hung_windows > 0:
+        summary = f"Process '{display_name}' is running but has {hung_windows} hung window(s) — it may be unresponsive."
+    else:
+        summary = f"Process '{display_name}' is running with status '{status or 'unknown'}'."
     context = normalize_desktop_process_context(
         {
-            "pid": int(getattr(process, "pid", normalized_pid) or normalized_pid),
+            "pid": resolved_pid,
             "process_name": name or normalized_name,
             "status": status,
             "exe": exe,
@@ -267,14 +307,12 @@ def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, 
             "parent_name": _trim_text(parent.name(), limit=120) if parent is not None else "",
             "present": True,
             "running": running,
+            "responsive": responsive,
+            "hung_windows": hung_windows,
             "background_candidate": background_candidate,
             "backend": "psutil",
             "reason": "inspected",
-            "summary": (
-                f"Process '{name or normalized_name or 'unknown'}' is running with status '{status or 'unknown'}'."
-                if running
-                else f"Process '{name or normalized_name or 'unknown'}' is present but does not look runnable."
-            ),
+            "summary": summary,
         }
     )
     return result_envelope(

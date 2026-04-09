@@ -559,6 +559,56 @@ class ProblemRecordStore:
                 break
         return items
 
+    def recall_relevant(
+        self,
+        *,
+        goal: str = "",
+        tool: str = "",
+        domain: str = "",
+        limit: int = 4,
+    ) -> List[Dict[str, Any]]:
+        """Return recent problems that match the given goal, tool, or domain."""
+        safe_limit = max(1, min(int(limit or 4), 12))
+        goal_lower = str(goal or "").strip().lower()
+        tool_lower = str(tool or "").strip().lower()
+        domain_lower = str(domain or "").strip().lower()
+        if not goal_lower and not tool_lower and not domain_lower:
+            return []
+        payload = self._load()
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for entry in payload.get("records", []):
+            if not isinstance(entry, dict):
+                continue
+            latest = entry.get("latest", {}) if isinstance(entry.get("latest", {}), dict) else {}
+            score = 0
+            entry_tool = str(latest.get("tool", "")).strip().lower()
+            entry_domain = str(latest.get("domain", "")).strip().lower()
+            entry_intent = str(latest.get("user_intent", "")).strip().lower()
+            if tool_lower and entry_tool == tool_lower:
+                score += 3
+            if domain_lower and entry_domain == domain_lower:
+                score += 2
+            if goal_lower and entry_intent and (goal_lower in entry_intent or entry_intent in goal_lower):
+                score += 4
+            if score == 0:
+                continue
+            occurrences = _safe_int(entry.get("occurrence_count", 1), default=1)
+            score += min(occurrences, 3)
+            hint = _trim_text(latest.get("improvement_hint", ""), limit=220)
+            lesson = _trim_text(latest.get("stored_lesson", ""), limit=220)
+            scored.append((score, {
+                "tool": entry_tool,
+                "domain": entry_domain,
+                "category": _trim_text(latest.get("failure_category", ""), limit=80),
+                "occurrences": occurrences,
+                "summary": _trim_text(latest.get("summary", ""), limit=220),
+                "hint": hint,
+                "lesson": lesson,
+                "last_seen": _trim_text(entry.get("last_seen_at", ""), limit=40),
+            }))
+        scored.sort(key=lambda item: -item[0])
+        return [item for _, item in scored[:safe_limit]]
+
     def get_summary(self, limit: int = 6) -> Dict[str, Any]:
         payload = self._load()
         records = payload.get("records", [])

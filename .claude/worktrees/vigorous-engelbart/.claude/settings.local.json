@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uniq -c -f1)",
+      "Bash(python -c \"import main; print\\('main.py OK'\\)\")",
+      "Bash(python -c \"import tools.desktop; print\\('facade OK'\\)\")",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('C:/Users/Matte/ai-desktop-agent/.claude/settings.local.json'\\)\\); print\\(d['hooks']['PostToolUse'][0]['hooks'][0]['command']\\)\")",
+      "Bash(python smoke_test.py)",
+      "Bash(ls -la /c/Users/Matte/ai-desktop-agent/core/*.py)",
+      "Bash(ls -la /c/Users/Matte/ai-desktop-agent/tools/*.py)",
+      "Bash(wc -l /c/Users/Matte/ai-desktop-agent/core/*.py /c/Users/Matte/ai-desktop-agent/tools/shell.py /c/Users/Matte/ai-desktop-agent/tools/browser.py)",
+      "WebSearch"
+    ]
+  }
+}

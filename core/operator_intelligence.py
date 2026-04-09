@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 from core.capability_profiles import normalize_execution_profile
 from core.lab_shell import lab_status_snapshot
-from core.problem_records import build_problem_record
+from core.problem_records import ProblemRecordStore, build_problem_record
 from core.windows_opening import choose_windows_open_strategy
 
 
@@ -1140,7 +1140,18 @@ def _build_retry_policy(
             action = "stop"
             stop_run = True
             explanation = "Blocked outcomes should stop rather than retrying."
-    elif status in {"failure", "uncertain", "no_progress"}:
+    elif status == "uncertain":
+        if attempts >= max_attempts:
+            action = "ask_user"
+            stop_run = True
+            explanation = "The outcome is uncertain — I could not verify whether the action actually worked. Please check the current state and tell me whether to continue or try a different approach."
+        elif domain == "desktop":
+            action = "recovery_first"
+            explanation = "Recover or refresh the bounded desktop context, then re-verify the uncertain outcome."
+        else:
+            action = "retry_with_variation"
+            explanation = "The outcome is uncertain — retry with a variation that produces a verifiable result."
+    elif status in {"failure", "no_progress"}:
         if attempts >= max_attempts:
             action = "stop"
             stop_run = True
@@ -1533,6 +1544,18 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
     last_problem = getattr(task_state, "_last_problem_record", {})
     if not isinstance(last_problem, dict):
         last_problem = {}
+    known_problems: list[dict[str, Any]] = []
+    problem_store = getattr(task_state, "_problem_store", None)
+    if isinstance(problem_store, ProblemRecordStore):
+        try:
+            known_problems = problem_store.recall_relevant(
+                goal=str(getattr(task_state, "goal", "")).strip(),
+                tool=str(last.get("tool", "")).strip(),
+                domain=str(last.get("domain", "")).strip(),
+                limit=4,
+            )
+        except Exception:
+            known_problems = []
     context = {
         "last_outcome": last,
         "recent_outcomes": recent,
@@ -1545,6 +1568,7 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
         "execution_memory": execution_memory,
         "environment": environment,
         "last_problem": last_problem,
+        "known_problems": known_problems,
     }
     setattr(task_state, "_operator_intelligence_context", context)
     return context

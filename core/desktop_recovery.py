@@ -217,6 +217,22 @@ def classify_window_recovery_state(
     )
 
 
+_RECOVERY_BUDGET_BY_REASON: Dict[str, int] = {
+    "target_minimized": 1,
+    "target_hidden": 2,
+    "foreground_not_confirmed": 2,
+    "target_mismatch": 2,
+    "target_loading": 4,
+    "target_not_ready": 4,
+    "visual_state_unstable": 4,
+}
+
+
+def recovery_budget_for_reason(reason: str) -> int:
+    """Return the recommended max recovery attempts for a given reason."""
+    return _RECOVERY_BUDGET_BY_REASON.get(str(reason or "").strip().lower(), 2)
+
+
 def select_window_recovery_strategy(
     classification: Dict[str, Any] | None,
     *,
@@ -227,7 +243,7 @@ def select_window_recovery_strategy(
     reason = str(classification.get("reason", "") or "").strip().lower()
     state = str(classification.get("state", "") or "").strip().lower()
     attempts_used = max(0, int(attempt_count or 0))
-    attempts_allowed = max(0, int(max_attempts or 0))
+    attempts_allowed = min(max(0, int(max_attempts or 0)), recovery_budget_for_reason(reason))
 
     if state == "ready":
         strategy = "no_action"

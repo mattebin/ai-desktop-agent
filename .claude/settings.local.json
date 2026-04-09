@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd C:/Users/Matte/ai-desktop-agent && python -m pytest tests/ -q 2>&1 | tail -3",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
