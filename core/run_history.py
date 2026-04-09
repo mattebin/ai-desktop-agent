@@ -290,6 +290,7 @@ def _evaluation_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "action_signature": _trim_text(evaluation.get("action_signature", ""), limit=220),
         "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=220),
         "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=80),
+        "validator_family": _trim_text(evaluation.get("validator_family", ""), limit=80),
         "target_classification": _trim_text(evaluation.get("target_classification", ""), limit=80),
         "verification_status": _trim_text(evaluation.get("verification_status", ""), limit=80),
         "retry": {
@@ -338,6 +339,9 @@ def _problem_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "open_target_classification": _trim_text(problem.get("open_target_classification", ""), limit=80),
         "open_strategy_family": _trim_text(problem.get("open_strategy_family", ""), limit=80),
         "open_verification_status": _trim_text(problem.get("open_verification_status", ""), limit=80),
+        "desktop_strategy_family": _trim_text(problem.get("desktop_strategy_family", ""), limit=80),
+        "desktop_validator_family": _trim_text(problem.get("desktop_validator_family", ""), limit=80),
+        "desktop_verification_status": _trim_text(problem.get("desktop_verification_status", ""), limit=80),
         "timestamp": _trim_text(problem.get("timestamp", ""), limit=40),
         "evidence_refs": [_trim_text(item, limit=80) for item in list(problem.get("evidence_refs", []))[:4] if _trim_text(item, limit=80)],
     }

@@ -168,6 +168,15 @@ def _infer_target_signature(
 ) -> str:
     domain = action_domain(tool_name)
     if domain == "desktop":
+        explicit_target_signature = _trim_text(
+            (
+                result.get("desktop_strategy", {}) if isinstance(result.get("desktop_strategy", {}), dict) else {}
+            ).get("target_signature", "")
+            or args.get("target_signature", ""),
+            limit=220,
+        ).lower()
+        if explicit_target_signature:
+            return explicit_target_signature
         if tool_name == "desktop_open_target":
             open_target = result.get("open_target", {}) if isinstance(result.get("open_target", {}), dict) else {}
             value = _trim_text(
@@ -475,6 +484,241 @@ def _classify_desktop_open_target(
     }
 
 
+def _desktop_strategy_family(args: Dict[str, Any], result: Dict[str, Any]) -> str:
+    desktop_strategy = result.get("desktop_strategy", {}) if isinstance(result.get("desktop_strategy", {}), dict) else {}
+    return _trim_text(
+        desktop_strategy.get("strategy_family", "")
+        or args.get("strategy_family", ""),
+        limit=60,
+    )
+
+
+def _desktop_validator_family(args: Dict[str, Any], result: Dict[str, Any]) -> str:
+    desktop_verification = result.get("desktop_verification", {}) if isinstance(result.get("desktop_verification", {}), dict) else {}
+    desktop_strategy = result.get("desktop_strategy", {}) if isinstance(result.get("desktop_strategy", {}), dict) else {}
+    return _trim_text(
+        desktop_verification.get("validator_family", "")
+        or desktop_strategy.get("validator_family", "")
+        or args.get("validator_family", ""),
+        limit=60,
+    )
+
+
+def _classify_desktop_with_verification(
+    tool_name: str,
+    args: Dict[str, Any],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    desktop_verification = result.get("desktop_verification", {}) if isinstance(result.get("desktop_verification", {}), dict) else {}
+    if not desktop_verification:
+        return {}
+    validator_family = _desktop_validator_family(args, result)
+    verification_status = _trim_text(desktop_verification.get("status", ""), limit=60)
+    if not validator_family or not verification_status:
+        return {}
+    strategy_family = _desktop_strategy_family(args, result)
+    target_description = _trim_text(desktop_verification.get("target_description", ""), limit=160)
+    observed = _trim_text(
+        desktop_verification.get("matched_window_title", "")
+        or desktop_verification.get("matched_process_name", "")
+        or desktop_verification.get("note", ""),
+        limit=180,
+    )
+    confidence = _trim_text(desktop_verification.get("confidence", ""), limit=20) or "low"
+
+    if validator_family == "focus_switch":
+        if verification_status == "verified_focus":
+            return {
+                "status": "success",
+                "reason": "focus_verified",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The target window became active.",
+                "progress_made": True,
+                "expected_change": target_description or "Target window becomes foreground.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "focus_improved":
+            return {
+                "status": "partial_success",
+                "reason": "focus_improved",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The focus moved toward the requested target, but the result is not fully confirmed.",
+                "progress_made": True,
+                "expected_change": target_description or "Target window becomes foreground.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "target_visible_not_foreground":
+            return {
+                "status": "uncertain",
+                "reason": "focus_not_foreground",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The target window was detected but did not clearly become foreground.",
+                "progress_made": False,
+                "expected_change": target_description or "Target window becomes foreground.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status in {"no_focus_change", "timing_expired"}:
+            return {
+                "status": "no_progress" if verification_status == "no_focus_change" else "uncertain",
+                "reason": "focus_no_progress" if verification_status == "no_focus_change" else "focus_timing_expired",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The focus request did not produce enough proof.",
+                "progress_made": False,
+                "expected_change": target_description or "Target window becomes foreground.",
+                "observed_change": observed or "No clear focus change detected.",
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+
+    if validator_family == "click_navigation":
+        if verification_status == "verified_navigation_change":
+            return {
+                "status": "success",
+                "reason": "navigation_verified",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The bounded interaction produced a visible desktop change.",
+                "progress_made": True,
+                "expected_change": target_description or "Visible desktop navigation or target-state change.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "focus_reacquired_only":
+            return {
+                "status": "partial_success",
+                "reason": "focus_reacquired_only",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The retry reacquired the intended surface, but no stronger visible progress was confirmed.",
+                "progress_made": True,
+                "expected_change": target_description or "Visible desktop navigation or target-state change.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status in {"no_visible_change", "timing_expired"}:
+            return {
+                "status": "no_progress" if verification_status == "no_visible_change" else "uncertain",
+                "reason": "navigation_no_visible_change" if verification_status == "no_visible_change" else "navigation_timing_expired",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The interaction ran, but the visible result could not be confirmed.",
+                "progress_made": False,
+                "expected_change": target_description or "Visible desktop navigation or target-state change.",
+                "observed_change": observed or "No visible change detected.",
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+
+    if validator_family == "text_input":
+        if verification_status == "verified_input_change":
+            return {
+                "status": "success",
+                "reason": "input_verified",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The bounded input step produced a visible desktop change.",
+                "progress_made": True,
+                "expected_change": target_description or "Visible input or field-state change.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "focus_confirmed_only":
+            return {
+                "status": "partial_success",
+                "reason": "input_focus_confirmed_only",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The target kept focus, but the visible input result could not be confirmed.",
+                "progress_made": True,
+                "expected_change": target_description or "Visible input or field-state change.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "focus_lost_or_unverified":
+            return {
+                "status": "failure",
+                "reason": "input_focus_unverified",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The intended input surface could not be verified after the action.",
+                "progress_made": False,
+                "expected_change": target_description or "Visible input or field-state change.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status in {"no_visible_change", "timing_expired"}:
+            return {
+                "status": "uncertain",
+                "reason": "input_no_visible_change" if verification_status == "no_visible_change" else "input_timing_expired",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The input step ran, but the intended visible change could not be confirmed.",
+                "progress_made": False,
+                "expected_change": target_description or "Visible input or field-state change.",
+                "observed_change": observed or "No visible change detected.",
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+
+    if validator_family == "open_launch":
+        if verification_status == "verified_launch_visible":
+            return {
+                "status": "success",
+                "reason": "launch_verified",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The launch-like action produced a visible desktop surface.",
+                "progress_made": True,
+                "expected_change": target_description or "Visible app or document surface opens.",
+                "observed_change": observed,
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status in {"launch_likely_background", "process_started_only", "timing_expired"}:
+            return {
+                "status": "uncertain",
+                "reason": "launch_likely_background" if verification_status == "launch_likely_background" else "launch_process_started_only" if verification_status == "process_started_only" else "launch_timing_expired",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The launch-like step returned, but the visible surface could not be confirmed.",
+                "progress_made": False,
+                "expected_change": target_description or "Visible app or document surface opens.",
+                "observed_change": observed or "No clear visible launch signal was confirmed.",
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+        if verification_status == "no_visible_change":
+            return {
+                "status": "failure",
+                "reason": "launch_no_visible_change",
+                "summary": _trim_text(desktop_verification.get("note", ""), limit=220) or "The launch-like step completed, but the expected app or document surface did not appear.",
+                "progress_made": False,
+                "expected_change": target_description or "Visible app or document surface opens.",
+                "observed_change": observed or "No clear visible launch signal was confirmed.",
+                "confidence": confidence,
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+                "verification_status": verification_status,
+            }
+
+    return {}
+
+
 def _classify_desktop(
     tool_name: str,
     args: Dict[str, Any],
@@ -487,6 +731,8 @@ def _classify_desktop(
     scene = result.get("scene", {}) if isinstance(result.get("scene", {}), dict) else {}
     target_window = result.get("target_window", {}) if isinstance(result.get("target_window", {}), dict) else {}
     command_result = result.get("command_result", {}) if isinstance(result.get("command_result", {}), dict) else {}
+    strategy_family = _desktop_strategy_family(args, result)
+    validator_family = _desktop_validator_family(args, result)
 
     before_window = _trim_text(before_context.get("active_window_title", ""), limit=180)
     after_window = _trim_text(after_context.get("active_window_title", ""), limit=180)
@@ -528,7 +774,13 @@ def _classify_desktop(
             "expected_change": target_title or "Visible desktop change.",
             "observed_change": after_window or after_process,
             "confidence": "medium",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
         }
+
+    verified = _classify_desktop_with_verification(tool_name, args, result)
+    if verified:
+        return verified
 
     if tool_name == "desktop_focus_window":
         if recovery_state == "ready" or active_matches_target or window_changed or process_changed:
@@ -541,6 +793,8 @@ def _classify_desktop(
                 "expected_change": target_title or "Target window becomes active.",
                 "observed_change": observed,
                 "confidence": "high" if active_matches_target or recovery_state == "ready" else "medium",
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
             }
         return {
             "status": "uncertain",
@@ -550,6 +804,8 @@ def _classify_desktop(
             "expected_change": target_title or "Target window becomes active.",
             "observed_change": after_window or after_process,
             "confidence": "low",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
         }
 
     if tool_name == "desktop_run_command":
@@ -564,11 +820,13 @@ def _classify_desktop(
                     "status": "success",
                     "reason": "open_command_verified",
                     "summary": summary or "The bounded desktop command appears to have opened the expected surface.",
-                    "progress_made": True,
-                    "expected_change": expected,
-                    "observed_change": observed,
-                    "confidence": "medium",
-                }
+                "progress_made": True,
+                "expected_change": expected,
+                "observed_change": observed,
+                "confidence": "medium",
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
+            }
             return {
                 "status": "uncertain",
                 "reason": "open_command_unverified",
@@ -577,6 +835,8 @@ def _classify_desktop(
                 "expected_change": expected,
                 "observed_change": after_window or after_process or "No visible change detected.",
                 "confidence": "low",
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
             }
         if exit_code == 0:
             return {
@@ -587,6 +847,8 @@ def _classify_desktop(
                 "expected_change": expected,
                 "observed_change": _trim_text(command_result.get("stdout_excerpt", ""), limit=160),
                 "confidence": "medium",
+                "strategy_family": strategy_family,
+                "validator_family": validator_family,
             }
         return {
             "status": "failure",
@@ -596,6 +858,8 @@ def _classify_desktop(
             "expected_change": expected,
             "observed_change": _trim_text(command_result.get("stderr_excerpt", ""), limit=160),
             "confidence": "medium",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
         }
 
     if _read_only_desktop_tool(tool_name):
@@ -608,6 +872,8 @@ def _classify_desktop(
             "expected_change": "Fresh desktop evidence or state.",
             "observed_change": observed,
             "confidence": "high" if evidence_changed or tool_name == "desktop_capture_screenshot" else "medium",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
         }
 
     if evidence_changed or scene_changed or window_changed or process_changed:
@@ -620,6 +886,8 @@ def _classify_desktop(
             "expected_change": target_title or "Desktop state changes in the intended direction.",
             "observed_change": observed,
             "confidence": "medium",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
         }
 
     return {
@@ -630,6 +898,8 @@ def _classify_desktop(
         "expected_change": target_title or "Visible desktop change.",
         "observed_change": after_window or after_process or "No visible change detected.",
         "confidence": "low",
+        "strategy_family": strategy_family,
+        "validator_family": validator_family,
     }
 
 
@@ -909,16 +1179,35 @@ def evaluate_action_outcome(
     context_after = capture_action_context(task_state, tool_name, safe_args)
     domain = action_domain(tool_name)
     action_signature = build_action_signature(tool_name, safe_args)
-    if tool_name == "desktop_open_target":
+    if domain == "desktop":
+        desktop_strategy = safe_result.get("desktop_strategy", {}) if isinstance(safe_result.get("desktop_strategy", {}), dict) else {}
+        desktop_verification = safe_result.get("desktop_verification", {}) if isinstance(safe_result.get("desktop_verification", {}), dict) else {}
         open_target = safe_result.get("open_target", {}) if isinstance(safe_result.get("open_target", {}), dict) else {}
         open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
-        target_class = _trim_text(open_target.get("target_classification", safe_args.get("target_type", "")), limit=60)
-        strategy_family = _trim_text(open_strategy.get("strategy_family", safe_args.get("preferred_method", "")), limit=60)
+        target_class = _trim_text(
+            open_target.get("target_classification", safe_args.get("target_type", "")),
+            limit=60,
+        )
+        strategy_family = _trim_text(
+            open_strategy.get("strategy_family", "")
+            or desktop_strategy.get("strategy_family", "")
+            or safe_args.get("strategy_family", "")
+            or safe_args.get("preferred_method", ""),
+            limit=60,
+        )
+        validator_family = _trim_text(
+            desktop_verification.get("validator_family", "")
+            or desktop_strategy.get("validator_family", "")
+            or safe_args.get("validator_family", ""),
+            limit=60,
+        )
         extra_parts = []
         if target_class:
             extra_parts.append(f"target_class={target_class}")
         if strategy_family:
             extra_parts.append(f"strategy_family={strategy_family}")
+        if validator_family:
+            extra_parts.append(f"validator_family={validator_family}")
         if extra_parts:
             action_signature = "::".join([action_signature, *extra_parts])
     target_signature = _infer_target_signature(tool_name, safe_args, safe_result, context_before, context_after)
@@ -955,6 +1244,7 @@ def evaluate_action_outcome(
         "target_signature": _trim_text(target_signature, limit=220),
         "attempt_number": attempts,
         "strategy_family": _trim_text(base.get("strategy_family", ""), limit=60),
+        "validator_family": _trim_text(base.get("validator_family", ""), limit=60),
         "target_classification": _trim_text(base.get("target_classification", ""), limit=60),
         "verification_status": _trim_text(base.get("verification_status", ""), limit=60),
         "retry": retry,
@@ -1035,6 +1325,7 @@ class OperatorMemoryStore:
                 "action_signature": _trim_text(evaluation.get("action_signature", ""), limit=220),
                 "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=220),
                 "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=60),
+                "validator_family": _trim_text(evaluation.get("validator_family", ""), limit=60),
                 "target_classification": _trim_text(evaluation.get("target_classification", ""), limit=60),
                 "verification_status": _trim_text(evaluation.get("verification_status", ""), limit=60),
                 "goal": _trim_text(goal, limit=220),
@@ -1092,6 +1383,7 @@ class OperatorMemoryStore:
                 "target_signature": entry_target,
                 "retry_action": _trim_text(entry.get("retry_action", ""), limit=40),
                 "strategy_family": _trim_text(entry.get("strategy_family", ""), limit=60),
+                "validator_family": _trim_text(entry.get("validator_family", ""), limit=60),
                 "target_classification": _trim_text(entry.get("target_classification", ""), limit=60),
             }
             if compact["status"] == "success" and len(prefer) < _MAX_HINT_ITEMS and compact not in prefer:
@@ -1116,6 +1408,8 @@ class OperatorMemoryStore:
                     "lesson": _trim_text(lesson.get("lesson", ""), limit=220),
                     "category": _trim_text(lesson.get("category", ""), limit=80),
                     "tool": lesson_tool,
+                    "strategy_family": _trim_text(lesson.get("strategy_family", ""), limit=60),
+                    "validator_family": _trim_text(lesson.get("validator_family", ""), limit=60),
                     "recorded_at": _trim_text(lesson.get("recorded_at", ""), limit=40),
                     "problem_key": _trim_text(lesson.get("problem_key", ""), limit=80),
                 }
@@ -1146,6 +1440,8 @@ class OperatorMemoryStore:
             "category": _trim_text(safe_lesson.get("category", ""), limit=80),
             "tool": _trim_text(safe_lesson.get("tool", ""), limit=80),
             "domain": _trim_text(safe_lesson.get("domain", ""), limit=40),
+            "strategy_family": _trim_text(safe_lesson.get("strategy_family", ""), limit=60),
+            "validator_family": _trim_text(safe_lesson.get("validator_family", ""), limit=60),
             "problem_key": _trim_text(safe_lesson.get("problem_key", ""), limit=80),
             "recorded_at": _iso_now(),
         }
@@ -1176,6 +1472,7 @@ def _recent_evaluation_items(task_state, *, limit: int = 6) -> List[Dict[str, An
                 "retry": evaluation.get("retry", {}) if isinstance(evaluation.get("retry", {}), dict) else {},
                 "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=180),
                 "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=60),
+                "validator_family": _trim_text(evaluation.get("validator_family", ""), limit=60),
                 "observed_change": _trim_text(evaluation.get("observed_change", ""), limit=120),
                 "evaluated_at": _trim_text(evaluation.get("evaluated_at", ""), limit=40),
             }
@@ -1288,6 +1585,8 @@ def apply_outcome_evaluation(
                     "category": problem.get("failure_category", ""),
                     "tool": problem.get("tool", ""),
                     "domain": problem.get("domain", ""),
+                    "strategy_family": problem.get("desktop_strategy_family", "") or problem.get("open_strategy_family", ""),
+                    "validator_family": problem.get("desktop_validator_family", ""),
                     "problem_key": problem.get("problem_key", ""),
                 }
             )
@@ -1313,6 +1612,53 @@ def guard_repeated_failed_action(task_state, tool_name: str, args: Dict[str, Any
             "reasons": [
                 "The recent run history for this exact action signature already shows repeated failure or no progress.",
             ],
+        },
+    }
+
+
+def guard_repeated_failed_desktop_strategy(task_state, tool_name: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    safe_args = args if isinstance(args, dict) else {}
+    target_signature = _trim_text(safe_args.get("target_signature", ""), limit=220)
+    strategy_family = _trim_text(safe_args.get("strategy_family", ""), limit=60)
+    validator_family = _trim_text(safe_args.get("validator_family", ""), limit=60)
+    if not target_signature or not strategy_family:
+        return {}
+    force_switch = bool(safe_args.get("force_strategy_switch", False))
+    recent_failures = 0
+    for item in _recent_evaluation_items(task_state, limit=10):
+        if _trim_text(item.get("tool", ""), limit=80) != _trim_text(tool_name, limit=80):
+            continue
+        if _trim_text(item.get("target_signature", ""), limit=220) != target_signature:
+            continue
+        if _trim_text(item.get("strategy_family", ""), limit=60) != strategy_family:
+            continue
+        if _trim_text(item.get("status", ""), limit=40) in _FAIL_LIKE_OUTCOMES:
+            recent_failures += 1
+    if recent_failures < (1 if force_switch else 2):
+        return {}
+    summary = (
+        "Stopped the bounded desktop step because the same strategy family already failed for this target and the next attempt needs a materially different method."
+        if force_switch
+        else "Stopped repeating the same bounded desktop strategy family after repeated failure or no visible progress for this target."
+    )
+    return {
+        "ok": False,
+        "blocked": True,
+        "reason": "desktop_strategy_family_exhausted",
+        "summary": summary,
+        "message": summary,
+        "policy": {
+            "decision": "block",
+            "summary": summary,
+            "reasons": [
+                "The recent run history for this desktop target already shows repeated failure or no progress for the same strategy family.",
+            ],
+        },
+        "desktop_strategy": {
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
+            "target_signature": target_signature,
+            "force_strategy_switch": force_switch,
         },
     }
 

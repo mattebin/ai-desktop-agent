@@ -119,6 +119,8 @@ DESKTOP_MAX_HOVER_MS = 2_000
 DESKTOP_DEFAULT_SCROLL_UNITS = 3
 DESKTOP_MAX_SCROLL_UNITS = 8
 DESKTOP_DEFAULT_PROCESS_LIMIT = 8
+DESKTOP_DEFAULT_VERIFICATION_SAMPLES = 3
+DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS = 140
 DESKTOP_MAX_PROCESS_LIMIT = 16
 DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS = 8
 DESKTOP_MAX_COMMAND_TIMEOUT_SECONDS = 20
@@ -1403,6 +1405,8 @@ def _desktop_result(
     visual_stability: Dict[str, Any] | None = None,
     process_context: Dict[str, Any] | None = None,
     scene: Dict[str, Any] | None = None,
+    desktop_strategy: Dict[str, Any] | None = None,
+    desktop_verification: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     state = desktop_state if isinstance(desktop_state, dict) else {}
     evidence = desktop_evidence if isinstance(desktop_evidence, dict) else {}
@@ -1413,6 +1417,8 @@ def _desktop_result(
     stability = visual_stability if isinstance(visual_stability, dict) else {}
     process_view = process_context if isinstance(process_context, dict) else {}
     scene_view = scene if isinstance(scene, dict) else {}
+    strategy_view = desktop_strategy if isinstance(desktop_strategy, dict) else {}
+    verification_view = desktop_verification if isinstance(desktop_verification, dict) else {}
     pointer_view = normalize_desktop_pointer_action(mouse_action if isinstance(mouse_action, dict) else {})
     process_action_view = normalize_desktop_process_action(process_action if isinstance(process_action, dict) else {})
     command_view = normalize_desktop_command_result(command_result if isinstance(command_result, dict) else {})
@@ -1456,9 +1462,402 @@ def _desktop_result(
         "visual_stability": stability,
         "process_context": process_view,
         "scene": scene_view,
+        "desktop_strategy": strategy_view,
+        "desktop_verification": verification_view,
         "recovery": recovery_view,
         "recovery_attempts": [dict(item) for item in list(recovery_attempts or [])[:6] if isinstance(item, dict)],
     }
+
+
+def _desktop_strategy_view(
+    args: Dict[str, Any],
+    *,
+    action: str,
+    default_strategy_family: str = "",
+    default_validator_family: str = "",
+) -> Dict[str, Any]:
+    safe_args = args if isinstance(args, dict) else {}
+    strategy_family = str(safe_args.get("strategy_family", "") or default_strategy_family).strip()
+    validator_family = str(safe_args.get("validator_family", "") or default_validator_family).strip()
+    target_signature = _trim_text(safe_args.get("target_signature", ""), limit=220).lower()
+    return {
+        "desktop_intent": validator_family or action,
+        "strategy_family": strategy_family,
+        "validator_family": validator_family,
+        "target_signature": target_signature,
+        "pre_action_recovery": bool(safe_args.get("pre_action_recovery", False)),
+        "force_strategy_switch": bool(safe_args.get("force_strategy_switch", False)),
+    }
+
+
+def _normalize_expected_process_names(*values: Any) -> List[str]:
+    normalized: List[str] = []
+    for value in values:
+        if isinstance(value, list):
+            items = value
+        else:
+            items = [value]
+        for item in items:
+            token = str(item or "").strip().lower()
+            if not token or token in normalized:
+                continue
+            normalized.append(token)
+    return normalized[:6]
+
+
+def _window_expectation_score(
+    window: Dict[str, Any],
+    *,
+    expected_title: str = "",
+    expected_window_id: str = "",
+    expected_process_names: List[str] | None = None,
+) -> Dict[str, Any]:
+    if not isinstance(window, dict):
+        return {"score": 0, "reasons": []}
+    title = str(window.get("title", "")).strip().lower()
+    window_id = str(window.get("window_id", "")).strip().lower()
+    process_name = str(window.get("process_name", "")).strip().lower()
+    expected_title_text = str(expected_title or "").strip().lower()
+    expected_window_id_text = str(expected_window_id or "").strip().lower()
+    process_hints = _normalize_expected_process_names(expected_process_names or [])
+    score = 0
+    reasons: List[str] = []
+    if expected_window_id_text and window_id == expected_window_id_text:
+        score += 92
+        reasons.append("window_id_match")
+    if expected_title_text:
+        if title == expected_title_text:
+            score += 84
+            reasons.append("title_exact")
+        elif expected_title_text in title:
+            score += 68
+            reasons.append("title_contains")
+    for hint in process_hints:
+        if process_name == hint:
+            score += 54
+            reasons.append(f"process_exact:{hint}")
+            break
+        if hint and hint in process_name:
+            score += 34
+            reasons.append(f"process_contains:{hint}")
+            break
+    if bool(window.get("is_active", False)) and score > 0:
+        score += 8
+        reasons.append("active_window")
+    if bool(window.get("is_visible", False)) and score > 0:
+        score += 4
+        reasons.append("visible_window")
+    return {"score": min(score, 100), "reasons": reasons[:4]}
+
+
+def _best_desktop_window_candidate(
+    windows: List[Dict[str, Any]],
+    *,
+    expected_title: str = "",
+    expected_window_id: str = "",
+    expected_process_names: List[str] | None = None,
+) -> Dict[str, Any]:
+    best_window: Dict[str, Any] = {}
+    best_score = 0
+    best_reasons: List[str] = []
+    for window in list(windows or []):
+        scored = _window_expectation_score(
+            window,
+            expected_title=expected_title,
+            expected_window_id=expected_window_id,
+            expected_process_names=expected_process_names,
+        )
+        score = int(scored.get("score", 0) or 0)
+        if score <= best_score:
+            continue
+        best_window = dict(window)
+        best_score = score
+        best_reasons = list(scored.get("reasons", [])) if isinstance(scored.get("reasons", []), list) else []
+    if not best_window:
+        return {}
+    return {**best_window, "match_score": best_score, "match_reasons": best_reasons[:4]}
+
+
+def _probe_expected_process(expected_process_names: List[str], *, launched_pid: int = 0) -> Dict[str, Any]:
+    if launched_pid > 0:
+        result = probe_process_context(pid=launched_pid)
+        data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+        if data:
+            return data
+    for process_name in _normalize_expected_process_names(expected_process_names):
+        result = probe_process_context(process_name=process_name)
+        data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+        if data.get("running", False):
+            return data
+    return {}
+
+
+def _sample_desktop_action_verification(
+    *,
+    action: str,
+    validator_family: str,
+    strategy_family: str,
+    before_active_window: Dict[str, Any],
+    before_windows: List[Dict[str, Any]],
+    expected_title: str = "",
+    expected_window_id: str = "",
+    expected_process_names: List[str] | None = None,
+    target_description: str = "",
+    launched_pid: int = 0,
+    sample_count: int = DESKTOP_DEFAULT_VERIFICATION_SAMPLES,
+    interval_ms: int = DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS,
+) -> Dict[str, Any]:
+    bounded_samples = max(2, min(4, int(sample_count or DESKTOP_DEFAULT_VERIFICATION_SAMPLES)))
+    bounded_interval = max(80, min(320, int(interval_ms or DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS))) / 1000.0
+    normalized_process_hints = _normalize_expected_process_names(expected_process_names or [])
+    before_ids = {
+        str(item.get("window_id", "")).strip()
+        for item in list(before_windows or [])
+        if isinstance(item, dict) and str(item.get("window_id", "")).strip()
+    }
+    before_active_id = str(before_active_window.get("window_id", "")).strip()
+    before_active_title = str(before_active_window.get("title", "")).strip()
+    before_active_process = str(before_active_window.get("process_name", "")).strip()
+    before_candidate = _best_desktop_window_candidate(
+        _dedupe_windows([before_active_window], before_windows),
+        expected_title=expected_title,
+        expected_window_id=expected_window_id,
+        expected_process_names=normalized_process_hints,
+    )
+    before_match_score = int(before_candidate.get("match_score", 0) or 0)
+    best_candidate: Dict[str, Any] = {}
+    samples: List[Dict[str, Any]] = []
+    process_snapshot: Dict[str, Any] = {}
+    saw_new_window = False
+    saw_active_change = False
+    saw_target_active = False
+    saw_target_match_improved = False
+    saw_process_detected = False
+
+    for index in range(bounded_samples):
+        if index > 0:
+            time.sleep(bounded_interval)
+        active_window = _active_window_info()
+        visible_windows = _enum_windows(include_minimized=True, include_hidden=True, limit=24)
+        candidate = _best_desktop_window_candidate(
+            _dedupe_windows([active_window], visible_windows),
+            expected_title=expected_title,
+            expected_window_id=expected_window_id,
+            expected_process_names=normalized_process_hints,
+        )
+        process_snapshot = _probe_expected_process(normalized_process_hints, launched_pid=launched_pid) or process_snapshot
+        candidate_score = int(candidate.get("match_score", 0) or 0)
+        candidate_window_id = str(candidate.get("window_id", "")).strip()
+        active_window_id = str(active_window.get("window_id", "")).strip()
+        active_window_title = str(active_window.get("title", "")).strip()
+        active_window_process = str(active_window.get("process_name", "")).strip()
+        if candidate_score > int(best_candidate.get("match_score", 0) or 0):
+            best_candidate = dict(candidate)
+        if active_window_id and active_window_id != before_active_id:
+            saw_active_change = True
+        elif active_window_title and active_window_title != before_active_title:
+            saw_active_change = True
+        elif active_window_process and active_window_process != before_active_process:
+            saw_active_change = True
+        if candidate_window_id and candidate_window_id not in before_ids and candidate_score >= 68:
+            saw_new_window = True
+        if candidate_score >= max(70, before_match_score + 6):
+            saw_target_match_improved = True
+        if candidate_score >= 74 and (
+            bool(candidate.get("is_active", False))
+            or (candidate_window_id and candidate_window_id == active_window_id)
+        ):
+            saw_target_active = True
+        if process_snapshot.get("running", False):
+            saw_process_detected = True
+        samples.append(
+            {
+                "active_window_title": _trim_text(active_window_title, limit=140),
+                "active_window_process": _trim_text(active_window_process, limit=80),
+                "candidate_title": _trim_text(candidate.get("title", ""), limit=140),
+                "candidate_process": _trim_text(candidate.get("process_name", ""), limit=80),
+                "candidate_window_id": _trim_text(candidate_window_id, limit=40),
+                "candidate_score": candidate_score,
+            }
+        )
+
+    best_score = int(best_candidate.get("match_score", 0) or 0)
+    observed_signals: List[str] = []
+    if saw_new_window:
+        observed_signals.append("new_window_detected")
+    if saw_active_change:
+        observed_signals.append("active_window_changed")
+    if saw_target_match_improved:
+        observed_signals.append("target_match_improved")
+    if saw_target_active:
+        observed_signals.append("target_foreground")
+    if saw_process_detected:
+        observed_signals.append("process_detected")
+
+    status = "timing_expired"
+    confidence = "low"
+    note = "The bounded verification window ended without enough evidence to confirm the intended desktop result."
+    if validator_family == "focus_switch":
+        if saw_target_active:
+            status = "verified_focus"
+            confidence = "high" if expected_window_id else "medium"
+            note = "The requested target window became the foreground window."
+        elif best_score >= 70 and saw_target_match_improved:
+            status = "focus_improved"
+            confidence = "medium"
+            note = "The focus result moved closer to the requested target, but a full foreground switch was not clearly proven."
+        elif best_score >= 70:
+            status = "target_visible_not_foreground"
+            confidence = "low"
+            note = "The target window was detected, but it did not clearly become foreground."
+        else:
+            status = "no_focus_change"
+            note = "The active window did not move toward the requested target during the bounded verification window."
+    elif validator_family == "click_navigation":
+        if saw_new_window or saw_active_change or saw_target_match_improved:
+            status = "verified_navigation_change"
+            confidence = "high" if saw_new_window or saw_target_active else "medium"
+            note = "The click-like interaction produced a visible desktop navigation or window-state change."
+        elif best_score >= 70 and strategy_family.startswith("focus_recovery"):
+            status = "focus_reacquired_only"
+            confidence = "low"
+            note = "The retry appears to have reacquired the intended surface, but no stronger navigation proof appeared."
+        else:
+            status = "no_visible_change"
+            note = "The interaction ran, but no visible desktop navigation change was confirmed."
+    elif validator_family == "text_input":
+        if saw_new_window or saw_active_change or saw_target_match_improved:
+            status = "verified_input_change"
+            confidence = "medium"
+            note = "The text or keyboard input produced a visible desktop state change."
+        elif best_score >= 70 and saw_target_active:
+            status = "focus_confirmed_only"
+            confidence = "low"
+            note = "Input focus stayed on the intended surface, but the visible content change could not be confirmed."
+        elif best_score >= 70:
+            status = "focus_lost_or_unverified"
+            confidence = "low"
+            note = "The intended input surface was detected, but focus or visible input proof remained too weak."
+        else:
+            status = "no_visible_change"
+            note = "The input action ran, but no visible field or window change was confirmed."
+    elif validator_family == "open_launch":
+        if saw_new_window or (best_score >= 70 and saw_target_active):
+            status = "verified_launch_visible"
+            confidence = "high" if saw_new_window else "medium"
+            note = "A visible app or document surface appeared during the bounded launch verification window."
+        elif best_score >= 70:
+            status = "launch_likely_background"
+            confidence = "low"
+            note = "A matching app surface was detected, but it did not clearly come to the foreground."
+        elif saw_process_detected:
+            status = "process_started_only"
+            confidence = "low"
+            note = "The expected process appeared, but a visible surface was not clearly confirmed."
+        else:
+            status = "no_visible_change"
+            note = "The launch-like action completed, but the expected app or document surface was not visibly confirmed."
+
+    expected_signals: List[str]
+    if validator_family == "focus_switch":
+        expected_signals = ["target_foreground"]
+    elif validator_family == "click_navigation":
+        expected_signals = ["visible_navigation_change"]
+    elif validator_family == "text_input":
+        expected_signals = ["visible_input_change"]
+    elif validator_family == "open_launch":
+        expected_signals = ["visible_launch_change"]
+    else:
+        expected_signals = ["visible_desktop_change"]
+    missing_signals = [signal for signal in expected_signals if signal not in observed_signals]
+
+    return {
+        "status": status,
+        "confidence": confidence,
+        "note": note,
+        "action": _trim_text(action, limit=60),
+        "validator_family": _trim_text(validator_family, limit=60),
+        "strategy_family": _trim_text(strategy_family, limit=60),
+        "target_description": _trim_text(target_description, limit=160),
+        "expected_window_title": _trim_text(expected_title, limit=160),
+        "expected_window_id": _trim_text(expected_window_id, limit=60),
+        "matched_window_title": _trim_text(best_candidate.get("title", ""), limit=180),
+        "matched_window_id": _trim_text(best_candidate.get("window_id", ""), limit=40),
+        "matched_process_name": _trim_text(best_candidate.get("process_name", ""), limit=120),
+        "match_score": best_score,
+        "observed_signals": observed_signals,
+        "missing_signals": missing_signals,
+        "process_detected": saw_process_detected,
+        "timing_expired": status == "timing_expired",
+        "sample_count": bounded_samples,
+        "interval_ms": int(interval_ms or DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS),
+        "samples": samples[:4],
+    }
+
+
+def _prepare_desktop_strategy_context(
+    args: Dict[str, Any],
+    *,
+    action_name: str,
+    default_strategy_family: str,
+    default_validator_family: str,
+) -> Dict[str, Any]:
+    strategy_view = _desktop_strategy_view(
+        args,
+        action=action_name,
+        default_strategy_family=default_strategy_family,
+        default_validator_family=default_validator_family,
+    )
+    if not (
+        strategy_view.get("pre_action_recovery", False)
+        or str(strategy_view.get("strategy_family", "")).startswith("focus_recovery")
+    ):
+        return {"ok": True, "args": dict(args), "strategy": strategy_view}
+
+    recovery_args = dict(args)
+    if not any(str(recovery_args.get(key, "")).strip() for key in ("title", "match", "window_id")):
+        if str(recovery_args.get("expected_window_id", "")).strip():
+            recovery_args["window_id"] = str(recovery_args.get("expected_window_id", "")).strip()
+        elif str(recovery_args.get("expected_window_title", "")).strip():
+            recovery_args["title"] = str(recovery_args.get("expected_window_title", "")).strip()
+            recovery_args.setdefault("exact", True)
+
+    recovered = _execute_window_recovery(recovery_args, action_name=action_name)
+    recovery = recovered.get("recovery", {}) if isinstance(recovered.get("recovery", {}), dict) else {}
+    target_window = recovered.get("target_window", {}) if isinstance(recovered.get("target_window", {}), dict) else {}
+    observation = recovered.get("observation", {}) if isinstance(recovered.get("observation", {}), dict) else {}
+    if recovery.get("state") != "ready":
+        summary = str(recovery.get("summary", "")).strip() or "Could not recover the target window before the bounded desktop action."
+        return {
+            "ok": False,
+            "result": _desktop_result(
+                ok=False,
+                action=action_name,
+                summary=summary,
+                desktop_state=observation,
+                error=summary,
+                desktop_evidence=recovered.get("evidence_bundle", {}),
+                desktop_evidence_ref=recovered.get("evidence_ref", {}),
+                target_window=target_window,
+                recovery=recovery,
+                recovery_attempts=recovered.get("recovery_attempts", []),
+                window_readiness=recovered.get("readiness", {}),
+                visual_stability=recovered.get("visual_stability", {}),
+                process_context=recovered.get("process_context", {}),
+                scene=recovered.get("scene", {}),
+                desktop_strategy=strategy_view,
+            ),
+        }
+
+    adjusted_args = dict(args)
+    observation_token = str(observation.get("observation_token", "")).strip()
+    if observation_token:
+        adjusted_args["observation_token"] = observation_token
+    if str(target_window.get("window_id", "")).strip():
+        adjusted_args.setdefault("expected_window_id", str(target_window.get("window_id", "")).strip())
+    if str(target_window.get("title", "")).strip():
+        adjusted_args.setdefault("expected_window_title", str(target_window.get("title", "")).strip())
+    return {"ok": True, "args": adjusted_args, "strategy": strategy_view, "recovered": recovered}
 
 
 def _approval_granted(args: Dict[str, Any]) -> bool:
@@ -2413,10 +2812,34 @@ def desktop_recover_window(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
+    before_active_window, before_windows, _before_observation = _current_desktop_context(limit=20)
+    strategy_view = _desktop_strategy_view(
+        args,
+        action="desktop_focus_window",
+        default_strategy_family="focus_recovery_window",
+        default_validator_family="focus_switch",
+    )
     recovered = _execute_window_recovery(args, action_name="desktop_focus_window")
     recovery = recovered.get("recovery", {}) if isinstance(recovered.get("recovery", {}), dict) else {}
     ok = recovery.get("state") == "ready"
     target_window = recovered.get("target_window", {}) if isinstance(recovered.get("target_window", {}), dict) else {}
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_focus_window",
+            validator_family=str(strategy_view.get("validator_family", "") or "focus_switch"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "focus_recovery_window"),
+            before_active_window=before_active_window,
+            before_windows=before_windows,
+            expected_title=str(target_window.get("title", "") or args.get("title", "") or args.get("expected_window_title", "")).strip(),
+            expected_window_id=str(target_window.get("window_id", "") or args.get("window_id", "") or args.get("expected_window_id", "")).strip(),
+            expected_process_names=[str(target_window.get("process_name", "")).strip()],
+            target_description=str(target_window.get("title", "") or args.get("title", "") or "requested window").strip(),
+            sample_count=_coerce_int(args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if ok and (target_window or args.get("title") or args.get("expected_window_title") or args.get("window_id") or args.get("expected_window_id"))
+        else {}
+    )
     if ok:
         summary = f"Focused '{recovery.get('active_window', {}).get('title', '') or target_window.get('title', 'the requested window')}'."
         error = ""
@@ -2438,6 +2861,8 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
         visual_stability=recovered.get("visual_stability", {}),
         process_context=recovered.get("process_context", {}),
         scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -2816,7 +3241,19 @@ def desktop_hover_point(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
-    context = _prepare_pointer_action_context(args, action="desktop_click_mouse")
+    strategy_context = _prepare_desktop_strategy_context(
+        args,
+        action_name="desktop_click_mouse",
+        default_strategy_family="direct_interaction",
+        default_validator_family="click_navigation",
+    )
+    if not strategy_context.get("ok", False):
+        return strategy_context.get("result", {})
+    action_args = strategy_context.get("args", args) if isinstance(strategy_context.get("args", args), dict) else dict(args)
+    strategy_view = strategy_context.get("strategy", {}) if isinstance(strategy_context.get("strategy", {}), dict) else {}
+    recovered = strategy_context.get("recovered", {}) if isinstance(strategy_context.get("recovered", {}), dict) else {}
+
+    context = _prepare_pointer_action_context(action_args, action="desktop_click_mouse")
     if not context.get("ok", False):
         return context.get("result", {})
 
@@ -2826,14 +3263,14 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
     coordinate_mapping = context["coordinate_mapping"]
-    button = _normalize_mouse_button(args.get("button", "left"))
-    click_count = 2 if _coerce_bool(args.get("double_click", False), False) else _coerce_int(args.get("click_count", 1), 1, minimum=1, maximum=2)
+    button = _normalize_mouse_button(action_args.get("button", "left"))
+    click_count = 2 if _coerce_bool(action_args.get("double_click", False), False) else _coerce_int(action_args.get("click_count", 1), 1, minimum=1, maximum=2)
     click_label = f"{button} {'double-click' if click_count == 2 else 'click'}"
     checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} @ ({point.get('x')}, {point.get('y')}) :: {click_label}"
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"{click_label.title()}ing at ({point.get('x')}, {point.get('y')}) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
     )
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         if not _evidence_ref_has_screenshot(evidence_ref):
             state = _register_observation(active_window=active_window, windows=windows)
             message = "Approval-gated desktop mouse clicks need a screenshot-backed inspection of the active window first."
@@ -2868,7 +3305,7 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
                 "click_count": click_count,
                 "point": point,
                 "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
-                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "coordinate_mode": str(action_args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
                 "coordinate_mapping": coordinate_mapping,
                 "reason": "clicked",
                 "summary": f"Prepared a bounded {click_label} at ({point.get('x')}, {point.get('y')}).",
@@ -2885,13 +3322,30 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
         pass
     active_after = _active_window_info()
     observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_click_mouse",
+            validator_family=str(strategy_view.get("validator_family", "") or "click_navigation"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_interaction"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=str(target_window.get("title", "") or action_args.get("expected_window_title", "")).strip(),
+            expected_window_id=str(target_window.get("window_id", "") or action_args.get("expected_window_id", "")).strip(),
+            expected_process_names=[str(target_window.get("process_name", "")).strip()],
+            target_description=f"{click_label} in {target_window.get('title', active_window.get('title', 'the active window'))}",
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if clicked
+        else {}
+    )
     mouse_action = {
         "action": "click",
         "button": button,
         "click_count": click_count,
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
-        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mode": str(action_args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
         "coordinate_mapping": coordinate_mapping,
         "reason": "clicked" if clicked else "error",
         "summary": (
@@ -2907,11 +3361,19 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_state=observation_after,
         error="" if clicked else f"Could not perform the requested bounded {click_label}.",
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         point=point,
         mouse_action=mouse_action,
         desktop_evidence_ref=evidence_ref,
         target_window=target_window,
+        recovery=recovered.get("recovery", {}),
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -2934,7 +3396,19 @@ def desktop_click_point(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
-    context = _prepare_pointer_action_context(args, action="desktop_scroll", allow_default_center=True)
+    strategy_context = _prepare_desktop_strategy_context(
+        args,
+        action_name="desktop_scroll",
+        default_strategy_family="direct_interaction",
+        default_validator_family="click_navigation",
+    )
+    if not strategy_context.get("ok", False):
+        return strategy_context.get("result", {})
+    action_args = strategy_context.get("args", args) if isinstance(strategy_context.get("args", args), dict) else dict(args)
+    strategy_view = strategy_context.get("strategy", {}) if isinstance(strategy_context.get("strategy", {}), dict) else {}
+    recovered = strategy_context.get("recovered", {}) if isinstance(strategy_context.get("recovered", {}), dict) else {}
+
+    context = _prepare_pointer_action_context(action_args, action="desktop_scroll", allow_default_center=True)
     if not context.get("ok", False):
         return context.get("result", {})
 
@@ -2944,7 +3418,7 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
     evidence_ref = context["evidence_ref"]
     target_window = context["target_window"]
     coordinate_mapping = context["coordinate_mapping"]
-    direction = str(args.get("direction", "down")).strip().lower()
+    direction = str(action_args.get("direction", "down")).strip().lower()
     if direction not in {"up", "down"}:
         state = _register_observation(active_window=active_window, windows=windows)
         message = "desktop_scroll only supports bounded 'up' or 'down' directions."
@@ -2958,12 +3432,12 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
             target_window=target_window,
         )
-    scroll_units = _coerce_int(args.get("scroll_units", args.get("lines", DESKTOP_DEFAULT_SCROLL_UNITS)), DESKTOP_DEFAULT_SCROLL_UNITS, minimum=1, maximum=DESKTOP_MAX_SCROLL_UNITS)
+    scroll_units = _coerce_int(action_args.get("scroll_units", action_args.get("lines", DESKTOP_DEFAULT_SCROLL_UNITS)), DESKTOP_DEFAULT_SCROLL_UNITS, minimum=1, maximum=DESKTOP_MAX_SCROLL_UNITS)
     checkpoint_target = f"{target_window.get('title', active_window.get('title', 'active window'))} :: scroll {direction} x{scroll_units}"
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"Scrolling {direction} by {scroll_units} unit(s) in '{target_window.get('title', active_window.get('title', 'the active window'))}' requires explicit approval in this bounded control pass."
     )
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         if not _evidence_ref_has_screenshot(evidence_ref):
             state = _register_observation(active_window=active_window, windows=windows)
             message = "Approval-gated desktop scrolling needs a screenshot-backed inspection of the active window first."
@@ -2996,7 +3470,7 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
                 "action": "scroll",
                 "point": point,
                 "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
-                "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+                "coordinate_mode": str(action_args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
                 "coordinate_mapping": coordinate_mapping,
                 "scroll_direction": direction,
                 "scroll_units": scroll_units,
@@ -3015,11 +3489,28 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
         pass
     active_after = _active_window_info()
     observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_scroll",
+            validator_family=str(strategy_view.get("validator_family", "") or "click_navigation"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_interaction"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=str(target_window.get("title", "") or action_args.get("expected_window_title", "")).strip(),
+            expected_window_id=str(target_window.get("window_id", "") or action_args.get("expected_window_id", "")).strip(),
+            expected_process_names=[str(target_window.get("process_name", "")).strip()],
+            target_description=f"scroll {direction} in {target_window.get('title', active_window.get('title', 'the active window'))}",
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if scrolled
+        else {}
+    )
     mouse_action = {
         "action": "scroll",
         "point": point,
         "window_title": str(target_window.get("title", "") or active_window.get("title", "")),
-        "coordinate_mode": str(args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
+        "coordinate_mode": str(action_args.get("coordinate_mode", "absolute")).strip().lower() or "absolute",
         "coordinate_mapping": coordinate_mapping,
         "scroll_direction": direction,
         "scroll_units": scroll_units,
@@ -3037,11 +3528,19 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_state=observation_after,
         error="" if scrolled else "Could not perform the bounded desktop scroll.",
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         point=point,
         mouse_action=mouse_action,
         desktop_evidence_ref=evidence_ref,
         target_window=target_window,
+        recovery=recovered.get("recovery", {}),
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -3254,7 +3753,19 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             typed_text_preview=_trim_text(value, limit=60),
         )
 
-    token, observation, observation_error = _validate_fresh_observation(args)
+    strategy_context = _prepare_desktop_strategy_context(
+        args,
+        action_name="desktop_type_text",
+        default_strategy_family="direct_input",
+        default_validator_family="text_input",
+    )
+    if not strategy_context.get("ok", False):
+        return strategy_context.get("result", {})
+    action_args = strategy_context.get("args", args) if isinstance(strategy_context.get("args", args), dict) else dict(args)
+    strategy_view = strategy_context.get("strategy", {}) if isinstance(strategy_context.get("strategy", {}), dict) else {}
+    recovered = strategy_context.get("recovered", {}) if isinstance(strategy_context.get("recovered", {}), dict) else {}
+
+    token, observation, observation_error = _validate_fresh_observation(action_args)
     evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
@@ -3290,11 +3801,11 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
         )
 
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"Typing into '{field_label}' in '{active_window.get('title', 'the active window')}' requires explicit approval in this bounded control pass."
     )
     checkpoint_target = field_label
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         if not _evidence_ref_has_screenshot(evidence_ref):
             state = _register_observation(active_window=active_window, windows=windows)
             message = "Approval-gated desktop typing needs a screenshot-backed inspection of the active window first."
@@ -3328,6 +3839,23 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
     ok = _send_text(value)
     active_after = _active_window_info()
     observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_type_text",
+            validator_family=str(strategy_view.get("validator_family", "") or "text_input"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_input"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
+            expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
+            expected_process_names=[str(active_window.get("process_name", "")).strip()],
+            target_description=field_label,
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if ok
+        else {}
+    )
     if not ok:
         return _desktop_result(
             ok=False,
@@ -3338,6 +3866,13 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             approval_status="approved",
             typed_text_preview=_trim_text(value, limit=60),
             desktop_evidence_ref=evidence_ref,
+            recovery=recovered.get("recovery", {}),
+            recovery_attempts=recovered.get("recovery_attempts", []),
+            window_readiness=recovered.get("readiness", {}),
+            visual_stability=recovered.get("visual_stability", {}),
+            process_context=recovered.get("process_context", {}),
+            scene=recovered.get("scene", {}),
+            desktop_strategy=strategy_view,
         )
     return _desktop_result(
         ok=True,
@@ -3345,9 +3880,17 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
         summary=f"Typed into '{field_label}' in '{active_after.get('title', active_window.get('title', 'the active window'))}'.",
         desktop_state=observation_after,
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         typed_text_preview=_trim_text(value, limit=60),
         desktop_evidence_ref=evidence_ref,
+        recovery=recovered.get("recovery", {}),
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -3375,7 +3918,19 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
             key_sequence_preview=key_preview,
         )
 
-    token, observation, observation_error = _validate_fresh_observation(args)
+    strategy_context = _prepare_desktop_strategy_context(
+        args,
+        action_name="desktop_press_key",
+        default_strategy_family="direct_input",
+        default_validator_family="text_input",
+    )
+    if not strategy_context.get("ok", False):
+        return strategy_context.get("result", {})
+    action_args = strategy_context.get("args", args) if isinstance(strategy_context.get("args", args), dict) else dict(args)
+    strategy_view = strategy_context.get("strategy", {}) if isinstance(strategy_context.get("strategy", {}), dict) else {}
+    recovered = strategy_context.get("recovered", {}) if isinstance(strategy_context.get("recovered", {}), dict) else {}
+
+    token, observation, observation_error = _validate_fresh_observation(action_args)
     evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window = _active_window_info()
     windows = _enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT)
@@ -3411,11 +3966,11 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
         )
 
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"Pressing {key_preview} in '{active_window.get('title', 'the active window')}' requires explicit approval in this bounded control pass."
     )
     checkpoint_target = active_window.get("title", "") or "active window"
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         if not _evidence_ref_has_screenshot(evidence_ref):
             state = _register_observation(active_window=active_window, windows=windows)
             message = "Approval-gated desktop key presses need a screenshot-backed inspection of the active window first."
@@ -3451,6 +4006,23 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
     ok = _send_key_sequence(key_name, modifiers, repeat)
     active_after = _active_window_info()
     observation_after = _register_observation(active_window=active_after, windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_press_key",
+            validator_family=str(strategy_view.get("validator_family", "") or "text_input"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_input"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
+            expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
+            expected_process_names=[str(active_window.get("process_name", "")).strip()],
+            target_description=key_preview or "bounded key press",
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if ok
+        else {}
+    )
     if not ok:
         return _desktop_result(
             ok=False,
@@ -3459,9 +4031,16 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_state=observation_after,
             error=f"Could not press {key_preview} in '{active_window.get('title', 'the active window')}'.",
             approval_status="approved",
-            workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+            workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
             key_sequence_preview=key_preview,
             desktop_evidence_ref=evidence_ref,
+            recovery=recovered.get("recovery", {}),
+            recovery_attempts=recovered.get("recovery_attempts", []),
+            window_readiness=recovered.get("readiness", {}),
+            visual_stability=recovered.get("visual_stability", {}),
+            process_context=recovered.get("process_context", {}),
+            scene=recovered.get("scene", {}),
+            desktop_strategy=strategy_view,
         )
     return _desktop_result(
         ok=True,
@@ -3469,9 +4048,17 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
         summary=f"Pressed {key_preview} in '{active_after.get('title', active_window.get('title', 'the active window'))}'.",
         desktop_state=observation_after,
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         key_sequence_preview=key_preview,
         desktop_evidence_ref=evidence_ref,
+        recovery=recovered.get("recovery", {}),
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -3759,7 +4346,19 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
             target_window=active_window,
         )
 
-    token, observation, observation_error = _validate_fresh_observation(args)
+    strategy_context = _prepare_desktop_strategy_context(
+        args,
+        action_name="desktop_press_key_sequence",
+        default_strategy_family="direct_input",
+        default_validator_family="text_input",
+    )
+    if not strategy_context.get("ok", False):
+        return strategy_context.get("result", {})
+    action_args = strategy_context.get("args", args) if isinstance(strategy_context.get("args", args), dict) else dict(args)
+    strategy_view = strategy_context.get("strategy", {}) if isinstance(strategy_context.get("strategy", {}), dict) else {}
+    recovered = strategy_context.get("recovered", {}) if isinstance(strategy_context.get("recovered", {}), dict) else {}
+
+    token, observation, observation_error = _validate_fresh_observation(action_args)
     evidence_ref = _latest_evidence_ref_for_observation(token)
     active_window, windows, current_observation = _current_desktop_context()
     if observation_error:
@@ -3794,11 +4393,11 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
         )
 
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"Pressing the bounded key sequence {key_preview} in '{active_window.get('title', 'the active window')}' requires explicit approval in this control pass."
     )
     checkpoint_target = active_window.get("title", "") or "active window"
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         if not _evidence_ref_has_screenshot(evidence_ref):
             message = "Approval-gated desktop key sequences need a screenshot-backed inspection of the active window first."
             return _desktop_result(
@@ -3831,6 +4430,23 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
 
     ok = _send_key_sequence_chain(sequence_items)
     active_after, visible_after, observation_after = _current_desktop_context()
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_press_key_sequence",
+            validator_family=str(strategy_view.get("validator_family", "") or "text_input"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_input"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
+            expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
+            expected_process_names=[str(active_window.get("process_name", "")).strip()],
+            target_description=key_preview or "bounded key sequence",
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if ok
+        else {}
+    )
     return _desktop_result(
         ok=ok,
         action="desktop_press_key_sequence",
@@ -3842,10 +4458,18 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_state=observation_after,
         error="" if ok else f"Could not press the bounded key sequence {key_preview}.",
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         key_sequence_preview=key_preview,
         desktop_evidence_ref=evidence_ref,
         target_window=active_after or active_window,
+        recovery=recovered.get("recovery", {}),
+        recovery_attempts=recovered.get("recovery_attempts", []),
+        window_readiness=recovered.get("readiness", {}),
+        visual_stability=recovered.get("visual_stability", {}),
+        process_context=recovered.get("process_context", {}),
+        scene=recovered.get("scene", {}),
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -3932,17 +4556,24 @@ def desktop_inspect_process(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    action_args = dict(args)
+    strategy_view = _desktop_strategy_view(
+        action_args,
+        action="desktop_start_process",
+        default_strategy_family="direct_launch",
+        default_validator_family="open_launch",
+    )
     active_window, windows, observation = _current_desktop_context()
-    token = str(args.get("observation_token", "")).strip()
+    token = str(action_args.get("observation_token", "")).strip()
     evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
-    executable = str(args.get("executable", "")).strip()
-    arguments = args.get("arguments", [])
+    executable = str(action_args.get("executable", "")).strip()
+    arguments = action_args.get("arguments", [])
     if not isinstance(arguments, list):
         arguments = []
     bounded_arguments = [_trim_text(item, limit=180) for item in arguments[:8] if _trim_text(item, limit=180)]
-    owned_label = str(args.get("owned_label", "")).strip() or Path(executable).stem
+    owned_label = str(action_args.get("owned_label", "")).strip() or Path(executable).stem
     checkpoint_target = owned_label or executable or "bounded desktop process"
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         f"Starting the bounded process '{checkpoint_target}' requires explicit approval in this control pass."
     )
     if not executable:
@@ -3956,7 +4587,7 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
             target_window=active_window,
         )
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         return _pause_desktop_action(
             action="desktop_start_process",
             summary=f"Approval required before starting '{checkpoint_target}'.",
@@ -3967,9 +4598,9 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
             checkpoint_resume_args={
                 "executable": executable,
                 "arguments": bounded_arguments,
-                "cwd": str(args.get("cwd", "")).strip(),
+                "cwd": str(action_args.get("cwd", "")).strip(),
                 "owned_label": owned_label,
-                "shell_kind": str(args.get("shell_kind", "")).strip(),
+                "shell_kind": str(action_args.get("shell_kind", "")).strip(),
                 "observation_token": token,
                 "evidence_id": evidence_ref.get("evidence_id", ""),
             },
@@ -3979,14 +4610,31 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
     process_result = start_owned_process(
         executable=executable,
         args=bounded_arguments,
-        cwd=str(args.get("cwd", "")).strip(),
-        env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        cwd=str(action_args.get("cwd", "")).strip(),
+        env=action_args.get("env", {}) if isinstance(action_args.get("env", {}), dict) else {},
         owned_label=owned_label,
     )
     payload = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
     process_context = payload.get("process", {}) if isinstance(payload.get("process", {}), dict) else {}
     observation_after = _register_observation(active_window=_active_window_info(), windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
     summary = str(process_result.get("message", "")).strip() or "Started the requested bounded process."
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_start_process",
+            validator_family=str(strategy_view.get("validator_family", "") or "open_launch"),
+            strategy_family=str(strategy_view.get("strategy_family", "") or "direct_launch"),
+            before_active_window=active_window,
+            before_windows=windows,
+            expected_title=Path(executable).stem,
+            expected_process_names=[str(process_context.get("process_name", "")).strip() or Path(executable).name.lower()],
+            target_description=checkpoint_target,
+            launched_pid=int(process_context.get("pid", 0) or 0),
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if bool(process_result.get("ok", False))
+        else {}
+    )
     return _desktop_result(
         ok=bool(process_result.get("ok", False)),
         action="desktop_start_process",
@@ -3994,7 +4642,7 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_state=observation_after,
         error=str(process_result.get("error", "")).strip(),
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         process_context=process_context,
         process_action={
             "action": "start",
@@ -4006,6 +4654,8 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
             "summary": summary,
         },
         target_window=active_window,
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 
@@ -4083,18 +4733,25 @@ def desktop_stop_process(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
+    action_args = dict(args)
+    strategy_view = _desktop_strategy_view(
+        action_args,
+        action="desktop_run_command",
+        default_strategy_family="command_open" if str(action_args.get("validator_family", "")).strip() == "open_launch" else "bounded_command",
+        default_validator_family=str(action_args.get("validator_family", "")).strip(),
+    )
     active_window, windows, observation = _current_desktop_context()
-    token = str(args.get("observation_token", "")).strip()
+    token = str(action_args.get("observation_token", "")).strip()
     evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
-    command = str(args.get("command", "")).strip()
-    shell_kind = str(args.get("shell_kind", "powershell")).strip().lower() or "powershell"
+    command = str(action_args.get("command", "")).strip()
+    shell_kind = str(action_args.get("shell_kind", "powershell")).strip().lower() or "powershell"
     timeout_seconds = _coerce_int(
-        args.get("timeout_seconds", DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        action_args.get("timeout_seconds", DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS),
         DESKTOP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
         minimum=1,
         maximum=DESKTOP_MAX_COMMAND_TIMEOUT_SECONDS,
     )
-    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+    checkpoint_reason = str(action_args.get("checkpoint_reason", "")).strip() or (
         "Running the requested bounded local command requires explicit approval in this control pass."
     )
     checkpoint_target = _trim_text(command, limit=120) or "bounded command"
@@ -4109,7 +4766,7 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
             desktop_evidence_ref=evidence_ref,
             target_window=active_window,
         )
-    if not _approval_granted(args):
+    if not _approval_granted(action_args):
         return _pause_desktop_action(
             action="desktop_run_command",
             summary=f"Approval required before running '{checkpoint_target}'.",
@@ -4119,7 +4776,7 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
             checkpoint_target=checkpoint_target,
             checkpoint_resume_args={
                 "command": command,
-                "cwd": str(args.get("cwd", "")).strip(),
+                "cwd": str(action_args.get("cwd", "")).strip(),
                 "shell_kind": shell_kind,
                 "timeout_seconds": timeout_seconds,
                 "observation_token": token,
@@ -4130,14 +4787,29 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
 
     command_result = run_bounded_command(
         command=command,
-        cwd=str(args.get("cwd", "")).strip(),
-        env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        cwd=str(action_args.get("cwd", "")).strip(),
+        env=action_args.get("env", {}) if isinstance(action_args.get("env", {}), dict) else {},
         timeout_seconds=float(timeout_seconds),
         shell_kind=shell_kind,
     )
     payload = command_result.get("data", {}) if isinstance(command_result.get("data", {}), dict) else {}
     observation_after = _register_observation(active_window=_active_window_info(), windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT))
     summary = str(command_result.get("message", "")).strip() or str(payload.get("summary", "")).strip() or "Ran the bounded local command."
+    verification_family = str(strategy_view.get("validator_family", "")).strip()
+    verification = (
+        _sample_desktop_action_verification(
+            action="desktop_run_command",
+            validator_family=verification_family,
+            strategy_family=str(strategy_view.get("strategy_family", "") or "command_open"),
+            before_active_window=active_window,
+            before_windows=windows,
+            target_description=checkpoint_target,
+            sample_count=_coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
+            interval_ms=_coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
+        )
+        if bool(command_result.get("ok", False)) and verification_family == "open_launch"
+        else {}
+    )
     return _desktop_result(
         ok=bool(command_result.get("ok", False)),
         action="desktop_run_command",
@@ -4145,9 +4817,11 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_state=observation_after,
         error=str(command_result.get("error", "")).strip(),
         approval_status="approved",
-        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        workflow_resumed=_coerce_bool(action_args.get("resume_from_checkpoint", False), False),
         command_result=payload,
         target_window=active_window,
+        desktop_strategy=strategy_view,
+        desktop_verification=verification,
     )
 
 

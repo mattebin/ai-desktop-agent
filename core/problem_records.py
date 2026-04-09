@@ -31,6 +31,20 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _normalized_signal_list(value: Any, *, limit: int = 4, text_limit: int = 80) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    items: List[str] = []
+    for raw in value:
+        text = _trim_text(raw, limit=text_limit)
+        if not text or text in items:
+            continue
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -111,16 +125,22 @@ def classify_failure_category(
     open_target = safe_result.get("open_target", {}) if isinstance(safe_result.get("open_target", {}), dict) else {}
     open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
     open_verification = safe_result.get("open_verification", {}) if isinstance(safe_result.get("open_verification", {}), dict) else {}
+    desktop_strategy = safe_result.get("desktop_strategy", {}) if isinstance(safe_result.get("desktop_strategy", {}), dict) else {}
+    desktop_verification = safe_result.get("desktop_verification", {}) if isinstance(safe_result.get("desktop_verification", {}), dict) else {}
     target_classification = _trim_text(
         open_target.get("target_classification", safe_evaluation.get("target_classification", "")),
         limit=80,
     ).lower()
     strategy_family = _trim_text(
-        open_strategy.get("strategy_family", safe_evaluation.get("strategy_family", "")),
+        open_strategy.get("strategy_family", desktop_strategy.get("strategy_family", safe_evaluation.get("strategy_family", ""))),
         limit=80,
     ).lower()
     verification_status = _trim_text(
-        open_verification.get("status", safe_evaluation.get("verification_status", "")),
+        open_verification.get("status", desktop_verification.get("status", safe_evaluation.get("verification_status", ""))),
+        limit=80,
+    ).lower()
+    validator_family = _trim_text(
+        desktop_verification.get("validator_family", desktop_strategy.get("validator_family", safe_evaluation.get("validator_family", ""))),
         limit=80,
     ).lower()
 
@@ -140,6 +160,8 @@ def classify_failure_category(
         or "open strategy family" in summary
     ):
         return "strategy_reuse_after_failure"
+    if tool.startswith("desktop_") and _trim_text(safe_result.get("reason", ""), limit=80).lower() == "desktop_strategy_family_exhausted":
+        return "strategy_reuse_after_failure"
     if tool == "desktop_open_target" and any(
         token in reason or token in error_text or token in summary
         for token in ("target_missing", "does not exist", "path missing")
@@ -156,6 +178,10 @@ def classify_failure_category(
     if alternate_strategy_attempted and status in {"failure", "no_progress", "uncertain"}:
         return "strategy_reuse_after_failure"
     if tool == "desktop_open_target" and verification_status in {"likely_opened_background", "process_started_only", "brief_signal_only"}:
+        return "no_visible_progress_after_action"
+    if tool.startswith("desktop_") and validator_family == "focus_switch" and verification_status in {"target_visible_not_foreground", "focus_lost_or_unverified", "no_focus_change"}:
+        return "focus_recovery_issue"
+    if tool.startswith("desktop_") and validator_family in {"click_navigation", "text_input", "open_launch"} and verification_status in {"no_visible_change", "timing_expired", "process_started_only", "launch_likely_background"}:
         return "no_visible_progress_after_action"
     if any(token in reason or token in error_text or token in summary for token in ("focus", "recover", "restore", "foreground", "active window", "window ready")):
         return "focus_recovery_issue"
@@ -176,6 +202,8 @@ def build_improvement_hint(problem: Dict[str, Any] | None) -> str:
     strategy_family = _trim_text(safe_problem.get("open_strategy_family", ""), limit=80)
     target_classification = _trim_text(safe_problem.get("open_target_classification", ""), limit=80)
     verification_status = _trim_text(safe_problem.get("open_verification_status", ""), limit=80)
+    desktop_strategy_family = _trim_text(safe_problem.get("desktop_strategy_family", ""), limit=80)
+    desktop_verification_status = _trim_text(safe_problem.get("desktop_verification_status", ""), limit=80)
     if category == "launcher_file_open_semantics":
         if target_classification in {"document_file", "image_media_file", "text_code_file"}:
             return "Open the file through its associated app or Explorer fallback instead of treating it like an executable."
@@ -183,6 +211,8 @@ def build_improvement_hint(problem: Dict[str, Any] | None) -> str:
     if category == "wrong_target_or_bad_target_proposal":
         return "Refresh evidence and choose a stronger target proposal before retrying the action."
     if category == "focus_recovery_issue":
+        if desktop_strategy_family in {"direct_interaction", "direct_input"}:
+            return "Recover or refocus the intended window first, then retry with a focus-first desktop strategy instead of repeating the direct action."
         return "Run a focus or recovery step first, then retry only after the correct window is active."
     if category == "environment_mismatch":
         return "Check feature availability and local environment constraints before repeating the same step."
@@ -197,6 +227,8 @@ def build_improvement_hint(problem: Dict[str, Any] | None) -> str:
     if category == "no_visible_progress_after_action":
         if strategy_family in {"association_open", "executable_launch"} and verification_status in {"likely_opened_background", "brief_signal_only"}:
             return "Check whether an existing viewer window was reused or opened behind another window before retrying; if not, switch to Explorer-assisted fallback."
+        if desktop_strategy_family in {"direct_interaction", "direct_input"} and desktop_verification_status in {"no_visible_change", "timing_expired"}:
+            return "Do not repeat the same direct desktop action; reacquire the target window first or switch to a materially different bounded method."
         return "Verify a visible state change happened before marking the action successful or trying it again."
     if category == "strategy_reuse_after_failure":
         return "Do not reuse the same failed path again; switch method or stop and ask for guidance."
@@ -210,6 +242,8 @@ def build_failure_lesson(problem: Dict[str, Any] | None) -> Dict[str, Any]:
     error_code = _trim_text(safe_problem.get("error_code", ""), limit=80)
     strategy_family = _trim_text(safe_problem.get("open_strategy_family", ""), limit=80)
     target_classification = _trim_text(safe_problem.get("open_target_classification", ""), limit=80)
+    desktop_strategy_family = _trim_text(safe_problem.get("desktop_strategy_family", ""), limit=80)
+    desktop_verification_status = _trim_text(safe_problem.get("desktop_verification_status", ""), limit=80)
     if category == "launcher_file_open_semantics":
         if target_classification in {"document_file", "image_media_file", "text_code_file"}:
             lesson_text = "Do not launch non-executable files directly on Windows; use association-open semantics and prefer Explorer fallback after launcher failure."
@@ -219,6 +253,8 @@ def build_failure_lesson(problem: Dict[str, Any] | None) -> Dict[str, Any]:
         lesson_text = "Prefer focus or recovery steps before repeating a desktop action against the same window."
     elif category == "no_visible_progress_after_action" and strategy_family in {"association_open", "executable_launch"}:
         lesson_text = "If a Windows open path shows no clear progress, check for reused or background viewer windows before retrying, then switch to Explorer-assisted fallback."
+    elif category == "no_visible_progress_after_action" and desktop_strategy_family in {"direct_interaction", "direct_input"} and desktop_verification_status in {"no_visible_change", "timing_expired"}:
+        lesson_text = "If a bounded desktop action shows no visible progress, do not repeat the same direct method; refocus the target first or choose a different bounded strategy family."
     elif category == "strategy_reuse_after_failure" or bool(safe_problem.get("retry_budget_exhausted", False)):
         lesson_text = "Do not repeat the same failed action signature after the retry budget is exhausted."
     elif category == "no_visible_progress_after_action":
@@ -233,6 +269,7 @@ def build_failure_lesson(problem: Dict[str, Any] | None) -> Dict[str, Any]:
         "category": category,
         "tool": tool,
         "strategy_family": strategy_family,
+        "validator_family": _trim_text(safe_problem.get("desktop_validator_family", ""), limit=80),
         "target_classification": target_classification,
     }
 
@@ -268,6 +305,8 @@ def build_problem_record(
     open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
     open_verification = safe_result.get("open_verification", {}) if isinstance(safe_result.get("open_verification", {}), dict) else {}
     open_result = safe_result.get("open_result", {}) if isinstance(safe_result.get("open_result", {}), dict) else {}
+    desktop_strategy = safe_result.get("desktop_strategy", {}) if isinstance(safe_result.get("desktop_strategy", {}), dict) else {}
+    desktop_verification = safe_result.get("desktop_verification", {}) if isinstance(safe_result.get("desktop_verification", {}), dict) else {}
     category = classify_failure_category(
         tool_name,
         safe_evaluation,
@@ -351,6 +390,17 @@ def build_problem_record(
         "open_process_detected": bool(open_verification.get("process_detected", False)),
         "open_backend": _trim_text(open_result.get("backend", ""), limit=40),
         "open_backend_reason": _trim_text(open_result.get("reason", ""), limit=80),
+        "desktop_intent": _trim_text(desktop_strategy.get("desktop_intent", ""), limit=80),
+        "desktop_strategy_family": _trim_text(desktop_strategy.get("strategy_family", ""), limit=80),
+        "desktop_validator_family": _trim_text(
+            desktop_verification.get("validator_family", desktop_strategy.get("validator_family", "")),
+            limit=80,
+        ),
+        "desktop_verification_status": _trim_text(desktop_verification.get("status", ""), limit=80),
+        "desktop_verification_note": _trim_text(desktop_verification.get("note", ""), limit=220),
+        "desktop_observed_signals": _normalized_signal_list(desktop_verification.get("observed_signals", [])),
+        "desktop_missing_signals": _normalized_signal_list(desktop_verification.get("missing_signals", [])),
+        "desktop_timing_expired": bool(desktop_verification.get("timing_expired", False)),
         "stored_lesson": "",
     }
     problem["improvement_hint"] = build_improvement_hint(problem)

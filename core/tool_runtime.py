@@ -231,6 +231,118 @@ class ToolRuntime:
     def goal_has_explicit_desktop_approval(self, goal: str) -> bool:
         return self._goal_has_explicit_desktop_approval(goal)
 
+    def _goal_requests_desktop_strategy_switch(self, goal: str) -> bool:
+        text = " ".join(str(goal or "").strip().lower().split())
+        if not text:
+            return False
+        return any(
+            phrase in text
+            for phrase in (
+                "another method",
+                "another way",
+                "different method",
+                "different way",
+                "focus first",
+                "recover first",
+                "reacquire first",
+                "try a different desktop path",
+                "use the desktop ui",
+                "use a ui path",
+                "instead",
+                "fallback",
+            )
+        )
+
+    def _command_looks_like_open_intent(self, command: str) -> bool:
+        text = " ".join(str(command or "").strip().lower().split())
+        if not text:
+            return False
+        return any(token in text for token in (".exe", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".pdf", ".txt", ".md", "start ", "explorer ", "notepad ", "code "))
+
+    def _desktop_validator_family(self, tool_name: str, args: Dict[str, Any]) -> str:
+        if tool_name == "desktop_focus_window":
+            return "focus_switch"
+        if tool_name in {
+            "desktop_click_mouse",
+            "desktop_click_point",
+            "desktop_scroll",
+        }:
+            return "click_navigation"
+        if tool_name in {"desktop_type_text", "desktop_press_key", "desktop_press_key_sequence"}:
+            return "text_input"
+        if tool_name in {"desktop_start_process", "desktop_open_target"}:
+            return "open_launch"
+        if tool_name == "desktop_run_command" and self._command_looks_like_open_intent(str(args.get("command", ""))):
+            return "open_launch"
+        return ""
+
+    def _desktop_default_strategy_family(self, tool_name: str, args: Dict[str, Any]) -> str:
+        if tool_name == "desktop_focus_window":
+            return "focus_recovery_window"
+        if tool_name in {
+            "desktop_click_mouse",
+            "desktop_click_point",
+            "desktop_scroll",
+        }:
+            return "direct_interaction"
+        if tool_name in {"desktop_type_text", "desktop_press_key", "desktop_press_key_sequence"}:
+            return "direct_input"
+        if tool_name == "desktop_start_process":
+            return "direct_launch"
+        if tool_name == "desktop_run_command":
+            return "command_open" if self._command_looks_like_open_intent(str(args.get("command", ""))) else "bounded_command"
+        return ""
+
+    def _desktop_alternate_strategy_family(self, tool_name: str, current: str) -> str:
+        if tool_name in {
+            "desktop_click_mouse",
+            "desktop_click_point",
+            "desktop_scroll",
+        }:
+            return "focus_recovery_interaction" if current != "focus_recovery_interaction" else "direct_interaction"
+        if tool_name in {"desktop_type_text", "desktop_press_key", "desktop_press_key_sequence"}:
+            return "focus_recovery_input" if current != "focus_recovery_input" else "direct_input"
+        return ""
+
+    def _desktop_target_signature(self, tool_name: str, task_state, args: Dict[str, Any]) -> str:
+        explicit = str(args.get("target_signature", "")).strip().lower()
+        if explicit:
+            return explicit[:220]
+        parts = [tool_name]
+        for key in (
+            "title",
+            "window_id",
+            "expected_window_title",
+            "expected_window_id",
+            "field_label",
+            "process_name",
+            "owned_label",
+            "executable",
+            "target",
+        ):
+            value = " ".join(str(args.get(key, "")).strip().lower().split())
+            if value:
+                parts.append(value)
+        if tool_name == "desktop_run_command":
+            command = " ".join(str(args.get("command", "")).strip().lower().split())
+            if command:
+                parts.append(command[:120])
+        if tool_name in {"desktop_click_mouse", "desktop_click_point", "desktop_move_mouse", "desktop_hover_point", "desktop_scroll"}:
+            coord = "|".join(
+                str(args.get(key, "")).strip().lower()
+                for key in ("coordinate_mode", "x", "y", "relative_x", "relative_y", "capture_x", "capture_y", "direction")
+                if str(args.get(key, "")).strip()
+            )
+            if coord:
+                parts.append(coord[:120])
+        checkpoint_target = str(getattr(task_state, "desktop_checkpoint_target", "")).strip().lower()
+        if checkpoint_target:
+            parts.append(checkpoint_target[:120])
+        active_title = str(getattr(task_state, "desktop_active_window_title", "")).strip().lower()
+        if active_title and len(parts) == 1:
+            parts.append(active_title[:120])
+        return "|".join(part for part in parts if part)[:220]
+
     def _prepare_browser_args(self, tool_name: str, task_state, args: Dict[str, Any], planning_goal: str | None = None):
         args.setdefault("session_id", task_state.browser_session_id or "default")
         args.setdefault("timeout_ms", 6000)
@@ -487,6 +599,89 @@ class ToolRuntime:
                             avoid_families.append(lesson_strategy)
                 if avoid_families:
                     args["avoid_strategy_families"] = avoid_families[:4]
+
+        if tool_name != "desktop_open_target":
+            validator_family = self._desktop_validator_family(tool_name, args)
+            default_strategy_family = self._desktop_default_strategy_family(tool_name, args)
+            if validator_family:
+                args.setdefault("validator_family", validator_family)
+                args.setdefault(
+                    "verification_samples",
+                    3 if validator_family != "open_launch" else 3,
+                )
+                args.setdefault(
+                    "verification_interval_ms",
+                    140 if validator_family in {"focus_switch", "click_navigation", "text_input"} else 180,
+                )
+
+            target_signature = self._desktop_target_signature(tool_name, task_state, args)
+            if target_signature:
+                args.setdefault("target_signature", target_signature)
+
+            store = getattr(task_state, "_operator_memory_store", None)
+            hints: Dict[str, Any] = {}
+            if store is not None and hasattr(store, "lookup_patterns") and target_signature:
+                try:
+                    hints = store.lookup_patterns(
+                        domain="desktop",
+                        tool_name=tool_name,
+                        target_signature=target_signature,
+                        goal=goal_text,
+                    )
+                except Exception:
+                    hints = {}
+
+            avoid_families = [
+                str(item).strip()
+                for item in list(args.get("avoid_strategy_families", []))
+                if str(item).strip()
+            ]
+            prefer = hints.get("prefer", []) if isinstance(hints.get("prefer", []), list) else []
+            avoid = hints.get("avoid", []) if isinstance(hints.get("avoid", []), list) else []
+            lessons = hints.get("lessons", []) if isinstance(hints.get("lessons", []), list) else []
+
+            for item in avoid:
+                strategy_family = str((item or {}).get("strategy_family", "")).strip()
+                if strategy_family and strategy_family not in avoid_families:
+                    avoid_families.append(strategy_family)
+            for lesson in lessons:
+                category = str((lesson or {}).get("category", "")).strip().lower()
+                lesson_strategy = str((lesson or {}).get("strategy_family", "")).strip()
+                if lesson_strategy and lesson_strategy not in avoid_families:
+                    avoid_families.append(lesson_strategy)
+                if category in {"focus_recovery_issue", "no_visible_progress_after_action", "strategy_reuse_after_failure"}:
+                    if default_strategy_family and default_strategy_family not in avoid_families:
+                        avoid_families.append(default_strategy_family)
+
+            preferred_strategy_family = ""
+            for item in prefer:
+                strategy_family = str((item or {}).get("strategy_family", "")).strip()
+                if strategy_family and strategy_family not in avoid_families:
+                    preferred_strategy_family = strategy_family
+                    break
+
+            force_strategy_switch = bool(args.get("force_strategy_switch", False) or self._goal_requests_desktop_strategy_switch(goal_text))
+            chosen_strategy_family = str(args.get("strategy_family", "")).strip() or default_strategy_family
+            alternate_strategy_family = self._desktop_alternate_strategy_family(tool_name, chosen_strategy_family)
+            if force_strategy_switch and alternate_strategy_family:
+                chosen_strategy_family = alternate_strategy_family
+            elif chosen_strategy_family in avoid_families and alternate_strategy_family:
+                chosen_strategy_family = alternate_strategy_family
+            elif not str(args.get("strategy_family", "")).strip() and preferred_strategy_family:
+                chosen_strategy_family = preferred_strategy_family
+
+            if chosen_strategy_family:
+                args["strategy_family"] = chosen_strategy_family
+            if avoid_families:
+                args["avoid_strategy_families"] = avoid_families[:4]
+            if chosen_strategy_family in {"focus_recovery_interaction", "focus_recovery_input"}:
+                args["pre_action_recovery"] = True
+                if not any(str(args.get(key, "")).strip() for key in ("title", "match", "window_id")):
+                    if str(args.get("expected_window_id", "")).strip():
+                        args.setdefault("window_id", str(args.get("expected_window_id", "")).strip())
+                    elif str(args.get("expected_window_title", "")).strip():
+                        args.setdefault("title", str(args.get("expected_window_title", "")).strip())
+                        args.setdefault("exact", True)
 
         if tool_name in DESKTOP_APPROVAL_CONTROLLED_TOOLS:
             approval_status = str(args.get("approval_status", "")).strip().lower()
