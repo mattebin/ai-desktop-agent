@@ -782,6 +782,24 @@ def _classify_desktop(
     if verified:
         return verified
 
+    post_verification = result.get("post_action_verification", {}) if isinstance(result.get("post_action_verification", {}), dict) else {}
+    if post_verification.get("verified") and not post_verification.get("consistent_with_tool", True):
+        fg_title = _trim_text(post_verification.get("foreground_title", ""), limit=180)
+        return {
+            "status": "uncertain",
+            "reason": "independent_verification_mismatch",
+            "summary": (
+                f"The tool reported success, but an independent check found "
+                f"'{fg_title or 'a different window'}' in the foreground instead of the expected target."
+            ),
+            "progress_made": False,
+            "expected_change": target_title or "Target window remains active.",
+            "observed_change": fg_title,
+            "confidence": "high",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
+        }
+
     if tool_name == "desktop_focus_window":
         if recovery_state == "ready" or active_matches_target or window_changed or process_changed:
             observed = after_window or after_process or target_title

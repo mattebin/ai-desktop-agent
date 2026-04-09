@@ -57,6 +57,13 @@ except Exception:
     psutil = None  # type: ignore[assignment]
 
 try:
+    import imagehash
+    from PIL import Image as _PILImage
+except Exception:
+    imagehash = None  # type: ignore[assignment]
+    _PILImage = None  # type: ignore[assignment]
+
+try:
     import ctypes
     _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 except Exception:
@@ -1868,14 +1875,19 @@ def probe_visual_stability(*, x: int, y: int, width: int, height: int, samples: 
     signatures: List[str] = []
     sample_total = max(2, min(4, int(samples or 3)))
     interval_seconds = max(0.03, min(0.4, int(interval_ms or 120) / 1000.0))
+    hash_backend = "mss+dhash" if imagehash is not None and _PILImage is not None else "mss"
     try:
         with mss.mss() as capture:
             for index in range(sample_total):
                 shot = capture.grab({"left": int(x), "top": int(y), "width": int(width), "height": int(height)})
-                signatures.append(hashlib.sha1(bytes(shot.rgb)).hexdigest()[:20])
+                if imagehash is not None and _PILImage is not None:
+                    img = _PILImage.frombytes("RGB", (shot.width, shot.height), bytes(shot.rgb))
+                    signatures.append(str(imagehash.dhash(img)))
+                else:
+                    signatures.append(hashlib.sha1(bytes(shot.rgb)).hexdigest()[:20])
                 if index < sample_total - 1:
                     time.sleep(interval_seconds)
-        stability = assess_visual_sample_signatures(signatures, backend="mss")
+        stability = assess_visual_sample_signatures(signatures, backend=hash_backend)
         return result_envelope(
             "desktop_visual_stability",
             ok=bool(stability.get("stable", False)),

@@ -15,6 +15,51 @@ from core.safety import stop_requested
 from core.tool_runtime import ToolRuntime
 
 
+_DESKTOP_MUTATING_TOOLS = {
+    "desktop_click_mouse", "desktop_click_point",
+    "desktop_press_key", "desktop_type_text",
+    "desktop_scroll", "desktop_move_mouse", "desktop_hover_point",
+    "desktop_focus_window", "desktop_recover_window",
+    "desktop_start_process", "desktop_stop_process",
+    "desktop_open_target", "desktop_run_command",
+}
+
+
+def _desktop_post_action_verification(before_context: dict, result: dict) -> dict:
+    """Lightweight independent check of the desktop foreground after a tool claims success."""
+    try:
+        import ctypes
+        _u32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        hwnd = int(_u32.GetForegroundWindow() or 0)
+        if hwnd <= 0:
+            return {"verified": False, "reason": "no_foreground_window"}
+        length = _u32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(max(1, length + 1))
+        _u32.GetWindowTextW(hwnd, buf, len(buf))
+        fg_title = str(buf.value or "").strip()[:180]
+        before_title = str(before_context.get("active_window_title", "")).strip()
+        title_changed = fg_title.lower() != before_title.lower() if before_title else False
+        result_window = (
+            result.get("active_window", {})
+            if isinstance(result.get("active_window", {}), dict)
+            else {}
+        )
+        tool_reported_title = str(result_window.get("title", "")).strip()[:180]
+        consistent = (
+            fg_title.lower() == tool_reported_title.lower()
+            if tool_reported_title
+            else True
+        )
+        return {
+            "verified": True,
+            "foreground_title": fg_title,
+            "title_changed": title_changed,
+            "consistent_with_tool": consistent,
+        }
+    except Exception:
+        return {"verified": False, "reason": "verification_error"}
+
+
 NON_MUTATING_REPEAT_GUARD_TOOLS = {
     "compare_files",
     "inspect_project",
@@ -294,6 +339,12 @@ def _finalize_control_request(llm, task_state, request, *, session_store=None, p
 
 def _record_tool_result(task_state, tool_name, args, result, *, before_context=None):
     step_status = "paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed")
+    if (
+        tool_name in _DESKTOP_MUTATING_TOOLS
+        and result.get("ok", False)
+        and isinstance(before_context, dict)
+    ):
+        result["post_action_verification"] = _desktop_post_action_verification(before_context, result)
     target_proposals = _desktop_active_target_proposals(task_state) if tool_name.startswith("desktop_") else {}
     step = {
         "type": "tool",
