@@ -22,6 +22,13 @@ LAB_BLOCKED = "block"
 _HOST_PATH_PATTERN = re.compile(
     r"(?i)(?:[a-z]:\\|\\\\|hklm:|hkcu:|registry::|%userprofile%|%appdata%|%localappdata%|%programdata%|%windir%|%systemroot%|\$env:(?:userprofile|appdata|localappdata|programdata|windir|systemroot|temp|tmp))"
 )
+_SHORT_PATH_PATTERN = re.compile(r"(?i)\b[A-Z][A-Z0-9]{0,5}~[0-9]\b")
+_DOTNET_DOWNLOAD_PATTERN = re.compile(
+    r"(?i)(?:net\.webclient|net\.webrequest|httpwebrequest|httpclient|webclient)\b.*(?:download|upload|send|get(?:response|string)|openread)"
+)
+_DANGEROUS_UTILITY_PATTERN = re.compile(
+    r"(?i)\b(?:certutil|bitsadmin)\b.*(?:-urlcache|-f\b|/transfer)"
+)
 _PARENT_TRAVERSAL_PATTERN = re.compile(r"(?<![A-Za-z0-9_])\.\.(?![A-Za-z0-9_])")
 _CHAINED_COMMAND_PATTERN = re.compile(r"(?:&&|\|\||;)")
 _NESTED_EXECUTION_PATTERN = re.compile(
@@ -63,6 +70,8 @@ _BLOCK_CATEGORY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"(?i)\b(?:invoke-webrequest|invoke-restmethod|curl|wget|bitsadmin|ftp|scp|sftp|net\s+use)\b"),
         re.compile(r"(?i)\b(?:mimikatz|lsass|sam|securityaccountmanager|browser[-_\s]?credentials?|cookies?)\b"),
         re.compile(r"(?i)\b(?:password|secret|token|credential)\b.*\b(?:export|send|upload|post|copy)\b"),
+        re.compile(r"(?i)(?:net\.webclient|net\.webrequest|httpwebrequest|httpclient|webclient)\b.*(?:download|upload|send|getresponse|getstring|openread)"),
+        re.compile(r"(?i)\b(?:certutil)\b.*(?:-urlcache|-f\b)"),
     ),
     "security_control_disabling": (
         re.compile(r"(?i)\b(?:set-mppreference|disable[-_\s]?realtime|disable[-_\s]?behavior|netsh\s+advfirewall|sc\s+(?:stop|config)\s+windefend|set-service\b.*disabled)\b"),
@@ -205,6 +214,8 @@ def _path_scope_reasons(command_text: str) -> List[str]:
         reasons.append("Command references host paths, registry hives, or environment shortcuts outside the disposable lab workspace.")
     if _PARENT_TRAVERSAL_PATTERN.search(command_text):
         reasons.append("Command attempts parent-directory traversal outside the disposable lab workspace.")
+    if _SHORT_PATH_PATTERN.search(command_text):
+        reasons.append("Command contains a Windows 8.3 short path name that could alias a host directory.")
     return reasons
 
 
@@ -238,22 +249,12 @@ def classify_lab_command(
     blocked_categories.extend(sorted(category_hits.keys()))
     lowered_command = normalized_command.lower()
 
-    if "|" in normalized_command and any(
-        token in lowered_command
-        for token in (
-            "remove-item",
-            " del ",
-            "erase ",
-            "set-content",
-            "add-content",
-            "out-file",
-            "rename-item",
-            "taskkill",
-            "stop-process",
-        )
-    ):
-        blocked_categories.append("indirect_mutation_pipeline")
-        reasons.append("Indirect shell pipelines that mix inspection with mutation are blocked in lab mode.")
+    if "|" in normalized_command:
+        pipe_rhs = normalized_command.split("|", 1)[1].strip().lower() if "|" in normalized_command else ""
+        mutation_tokens = ("remove-item", "del", "erase", "set-content", "add-content", "out-file", "rename-item", "taskkill", "stop-process")
+        if any(pipe_rhs.startswith(tok) or f" {tok}" in lowered_command for tok in mutation_tokens):
+            blocked_categories.append("indirect_mutation_pipeline")
+            reasons.append("Indirect shell pipelines that mix inspection with mutation are blocked in lab mode.")
 
     if not normalized_command:
         reasons.append("A command is required before lab execution can be evaluated.")
@@ -458,6 +459,8 @@ def execute_lab_command(
             float(effective_settings.get("lab_shell_timeout_seconds", DEFAULT_LAB_SHELL_TIMEOUT_SECONDS) or DEFAULT_LAB_SHELL_TIMEOUT_SECONDS),
         ),
     )
+    workspace_root = Path(str(environment.get("lab_root", "")).strip())
+    pre_snapshot = _snapshot_workspace(workspace_root) if workspace_root.is_dir() else {}
     backend_result = run_bounded_command(
         command=command,
         cwd=str(environment.get("cwd", "")).strip(),
@@ -499,7 +502,42 @@ def execute_lab_command(
             "stderr_excerpt": stderr_excerpt,
         }
     )
+    post_snapshot = _snapshot_workspace(workspace_root) if workspace_root.is_dir() else {}
+    if pre_snapshot or post_snapshot:
+        result["workspace_audit"] = audit_workspace_changes(pre_snapshot, post_snapshot)
     return result
+
+
+def _snapshot_workspace(workspace_root: Path) -> Dict[str, str]:
+    """Capture a hash-map of every file in the workspace for diffing."""
+    import hashlib
+
+    snapshot: Dict[str, str] = {}
+    try:
+        for item in workspace_root.rglob("*"):
+            if item.is_file():
+                rel = str(item.relative_to(workspace_root))
+                try:
+                    snapshot[rel] = hashlib.sha256(item.read_bytes()).hexdigest()[:16]
+                except Exception:
+                    snapshot[rel] = "unreadable"
+    except Exception:
+        pass
+    return snapshot
+
+
+def audit_workspace_changes(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, Any]:
+    """Compare workspace snapshots and classify changes."""
+    created = sorted(set(after) - set(before))
+    deleted = sorted(set(before) - set(after))
+    modified = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    return {
+        "created": created,
+        "deleted": deleted,
+        "modified": modified,
+        "total_changes": len(created) + len(deleted) + len(modified),
+        "workspace_only": True,
+    }
 
 
 def lab_status_snapshot(*, settings: Dict[str, Any] | None = None, armed: bool = False) -> Dict[str, Any]:
