@@ -54,6 +54,7 @@ EXPLICIT_APPROVAL_TOOLS = {
     "desktop_start_process",
     "desktop_stop_process",
     "desktop_run_command",
+    "desktop_open_target",
     "email_send_draft",
 }
 
@@ -126,6 +127,8 @@ def classify_tool_risk(tool_name: str, args: Dict[str, Any] | None = None) -> Di
         summary = "Explicit approval is required before executing this bounded mutation."
         if name == "desktop_run_command":
             summary = "Explicit approval is required before running a bounded local command."
+        if name == "desktop_open_target":
+            summary = "Explicit approval is required before opening a local Windows target through the bounded desktop runtime."
         if name == "email_send_draft":
             summary = "Explicit approval is required before sending the prepared email draft."
         return {
@@ -228,7 +231,7 @@ def build_tool_policy_snapshot(tool_names: Iterable[str]) -> Dict[str, Any]:
     return {
         "summary": (
             "Read-only inspection may proceed automatically. Browser transitions and shell work stay conditional. "
-            "Desktop mutations, process control, command execution, file edits, and email sending require explicit approval. "
+            "Desktop mutations, open-target actions, process control, command execution, file edits, and email sending require explicit approval. "
             "Experimental lab shell access remains separately gated and fail-closed."
         ),
         "read_only_tools": read_only,

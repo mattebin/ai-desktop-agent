@@ -9,6 +9,7 @@ from core.browser_tasks import (
     infer_browser_task_step,
 )
 from core.tool_policy import build_tool_policy_snapshot, classify_tool_risk
+from core.windows_opening import classify_open_target, infer_open_request_preferences, open_target_signature
 
 
 ToolFunc = Callable[[Dict[str, Any]], Dict[str, Any]]
@@ -30,6 +31,7 @@ DESKTOP_APPROVAL_CONTROLLED_TOOLS = {
     "desktop_start_process",
     "desktop_stop_process",
     "desktop_run_command",
+    "desktop_open_target",
 }
 BROWSER_APPROVAL_POSITIVE_PHRASES = (
     "approval granted",
@@ -68,10 +70,13 @@ DESKTOP_APPROVAL_POSITIVE_PHRASES = (
     "approved to move the mouse",
     "approved to press",
     "approved to type",
+    "approved to open",
+    "approved to open the target",
     "approved to run the command",
     "approved to start the process",
     "approved to stop the process",
     "desktop action is now approved",
+    "desktop open is now approved",
     "desktop step is now approved",
     "explicitly approve the paused desktop action",
     "resume the exact paused desktop tool immediately with approval_status=approved",
@@ -419,6 +424,69 @@ class ToolRuntime:
         elif tool_name == "desktop_run_command":
             args.setdefault("timeout_seconds", 8)
             args.setdefault("shell_kind", "powershell")
+        elif tool_name == "desktop_open_target":
+            args.setdefault("cwd", "")
+            args.setdefault("verification_samples", 3)
+            args.setdefault("verification_interval_ms", 180)
+            request_preferences = infer_open_request_preferences(goal_text, args)
+            if request_preferences.get("target_type") and not str(args.get("target_type", "")).strip():
+                args["target_type"] = request_preferences.get("target_type", "")
+            if request_preferences.get("preferred_method") and not str(args.get("preferred_method", "")).strip():
+                args["preferred_method"] = request_preferences.get("preferred_method", "")
+            if request_preferences.get("force_strategy_switch", False) and "force_strategy_switch" not in args:
+                args["force_strategy_switch"] = True
+
+            target_text = str(args.get("target", "")).strip()
+            if target_text:
+                target_info = classify_open_target(
+                    target_text,
+                    cwd=str(args.get("cwd", "")).strip(),
+                    explicit_target_type=str(args.get("target_type", "")).strip(),
+                )
+                target_signature = open_target_signature(target_info)
+                if target_signature:
+                    args.setdefault("target_signature", target_signature)
+                if target_info.get("target_classification") and not str(args.get("target_type", "")).strip():
+                    args["target_type"] = str(target_info.get("target_classification", "")).strip()
+
+                avoid_families = [
+                    str(item).strip()
+                    for item in list(args.get("avoid_strategy_families", []))
+                    if str(item).strip()
+                ]
+                store = getattr(task_state, "_operator_memory_store", None)
+                if store is not None and hasattr(store, "lookup_patterns"):
+                    try:
+                        hints = store.lookup_patterns(
+                            domain="desktop",
+                            tool_name="desktop_open_target",
+                            target_signature=target_signature,
+                            goal=goal_text,
+                        )
+                    except Exception:
+                        hints = {}
+                    prefer = hints.get("prefer", []) if isinstance(hints.get("prefer", []), list) else []
+                    avoid = hints.get("avoid", []) if isinstance(hints.get("avoid", []), list) else []
+                    lessons = hints.get("lessons", []) if isinstance(hints.get("lessons", []), list) else []
+                    if not str(args.get("preferred_method", "")).strip():
+                        for item in prefer:
+                            strategy_family = str((item or {}).get("strategy_family", "")).strip()
+                            if strategy_family:
+                                args["preferred_method"] = strategy_family
+                                break
+                    for item in avoid:
+                        strategy_family = str((item or {}).get("strategy_family", "")).strip()
+                        if strategy_family and strategy_family not in avoid_families:
+                            avoid_families.append(strategy_family)
+                    for lesson in lessons:
+                        category = str((lesson or {}).get("category", "")).strip().lower()
+                        lesson_strategy = str((lesson or {}).get("strategy_family", "")).strip()
+                        if category == "launcher_file_open_semantics" and "executable_launch" not in avoid_families:
+                            avoid_families.append("executable_launch")
+                        if lesson_strategy and lesson_strategy not in avoid_families:
+                            avoid_families.append(lesson_strategy)
+                if avoid_families:
+                    args["avoid_strategy_families"] = avoid_families[:4]
 
         if tool_name in DESKTOP_APPROVAL_CONTROLLED_TOOLS:
             approval_status = str(args.get("approval_status", "")).strip().lower()

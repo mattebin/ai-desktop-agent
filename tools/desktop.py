@@ -29,6 +29,12 @@ from core.desktop_mapping import (
 from core.desktop_matching import select_window_candidate
 from core.desktop_recovery import classify_window_recovery_state, select_window_recovery_strategy
 from core.desktop_scene import interpret_desktop_scene
+from core.windows_opening import (
+    choose_windows_open_strategy,
+    classify_open_target,
+    infer_open_request_preferences,
+    open_target_signature,
+)
 from tools.desktop_backends import (
     create_screenshot_backend,
     create_ui_evidence_backend,
@@ -39,6 +45,10 @@ from tools.desktop_backends import (
     probe_process_context,
     probe_visual_stability,
     probe_window_readiness,
+    launch_unowned_process,
+    open_in_explorer,
+    open_path_with_association,
+    open_url_with_shell,
     run_bounded_command,
     start_owned_process,
     stop_owned_process,
@@ -73,6 +83,7 @@ DESKTOP_TOOL_NAMES = {
     "desktop_start_process",
     "desktop_stop_process",
     "desktop_run_command",
+    "desktop_open_target",
 }
 DESKTOP_APPROVAL_TOOL_NAMES = {
     "desktop_click_point",
@@ -86,6 +97,7 @@ DESKTOP_APPROVAL_TOOL_NAMES = {
     "desktop_start_process",
     "desktop_stop_process",
     "desktop_run_command",
+    "desktop_open_target",
 }
 DESKTOP_SENSITIVE_FIELD_TERMS = {
     "2fa",
@@ -3470,6 +3482,258 @@ def _current_desktop_context(*, limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT) -> Tu
     return active_window, windows, observation
 
 
+def _dedupe_windows(*windows_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in windows_groups:
+        for item in list(group or []):
+            if not isinstance(item, dict):
+                continue
+            window_id = str(item.get("window_id", "")).strip()
+            dedupe_key = window_id or f"{item.get('title', '')}|{item.get('pid', '')}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(item)
+    return merged
+
+
+def _open_match_score(window: Dict[str, Any], target_info: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(window, dict) or not isinstance(target_info, dict):
+        return {"score": 0, "reasons": []}
+
+    title = str(window.get("title", "")).strip().lower()
+    process_name = str(window.get("process_name", "")).strip().lower()
+    class_name = str(window.get("class_name", "")).strip().lower()
+    basename = str(target_info.get("basename", "")).strip().lower()
+    stem = str(target_info.get("stem", "")).strip().lower()
+    parent_name = str(target_info.get("parent_name", "")).strip().lower()
+    target_class = str(target_info.get("target_classification", "")).strip().lower()
+    title_hints = [str(item).strip().lower() for item in list(target_info.get("viewer_title_hints", [])) if str(item).strip()]
+    process_hints = [str(item).strip().lower() for item in list(target_info.get("viewer_process_hints", [])) if str(item).strip()]
+
+    score = 0
+    reasons: List[str] = []
+    if basename and basename in title:
+        score += 85
+        reasons.append("basename_in_title")
+    elif stem and stem in title:
+        score += 62
+        reasons.append("stem_in_title")
+    elif parent_name and parent_name in title and target_class == "folder_directory":
+        score += 62
+        reasons.append("folder_name_in_title")
+    elif parent_name and parent_name in title and target_class in {"document_file", "image_media_file", "text_code_file"}:
+        score += 24
+        reasons.append("parent_in_title")
+
+    for hint in title_hints:
+        if hint and hint in title:
+            score += 18
+            reasons.append(f"title_hint:{hint}")
+            break
+
+    for hint in process_hints:
+        if hint and (process_name == hint or hint in process_name):
+            score += 34
+            reasons.append(f"process_hint:{hint}")
+            break
+
+    if target_class == "folder_directory":
+        if process_name == "explorer.exe":
+            score += 24
+            reasons.append("explorer_process")
+        if "cabinetwclass" in class_name or "explorer" in title:
+            score += 12
+            reasons.append("explorer_window")
+    elif target_class == "url_web_resource" and process_name in {"msedge.exe", "chrome.exe", "firefox.exe"}:
+        score += 22
+        reasons.append("browser_process")
+    elif target_class == "executable_program":
+        expected_process = f"{stem}.exe" if stem and not basename.endswith(".exe") else basename
+        if expected_process and process_name == expected_process:
+            score += 82
+            reasons.append("exact_process")
+        elif stem and stem in process_name:
+            score += 54
+            reasons.append("stem_in_process")
+
+    if bool(window.get("is_active", False)) and score > 0:
+        score += 8
+        reasons.append("active_window")
+    if bool(window.get("is_visible", False)) and score > 0:
+        score += 4
+        reasons.append("visible_window")
+    return {"score": min(score, 100), "reasons": reasons}
+
+
+def _best_open_window_candidate(windows: List[Dict[str, Any]], target_info: Dict[str, Any]) -> Dict[str, Any]:
+    best_window: Dict[str, Any] = {}
+    best_score = 0
+    best_reasons: List[str] = []
+    for window in list(windows or []):
+        scored = _open_match_score(window, target_info)
+        score = int(scored.get("score", 0) or 0)
+        if score <= best_score:
+            continue
+        best_window = dict(window)
+        best_score = score
+        best_reasons = list(scored.get("reasons", [])) if isinstance(scored.get("reasons", []), list) else []
+    if not best_window:
+        return {}
+    return {
+        **best_window,
+        "match_score": best_score,
+        "match_reasons": best_reasons[:4],
+    }
+
+
+def _process_hint_snapshot(target_info: Dict[str, Any], *, launched_pid: int = 0) -> Dict[str, Any]:
+    if launched_pid > 0:
+        result = probe_process_context(pid=launched_pid)
+        data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+        if data:
+            return data
+    for process_name in list(target_info.get("viewer_process_hints", []))[:3]:
+        result = probe_process_context(process_name=str(process_name).strip())
+        data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+        if data.get("running", False):
+            return data
+    return {}
+
+
+def _sample_open_verification(
+    target_info: Dict[str, Any],
+    *,
+    strategy_family: str,
+    before_active_window: Dict[str, Any],
+    before_windows: List[Dict[str, Any]],
+    launched_pid: int = 0,
+    sample_count: int = 3,
+    interval_ms: int = 180,
+) -> Dict[str, Any]:
+    bounded_samples = max(2, min(4, int(sample_count or 3)))
+    bounded_interval = max(80, min(320, int(interval_ms or 180))) / 1000.0
+    before_ids = {
+        str(item.get("window_id", "")).strip()
+        for item in list(before_windows or [])
+        if isinstance(item, dict) and str(item.get("window_id", "")).strip()
+    }
+    before_active_id = str(before_active_window.get("window_id", "")).strip()
+    before_active_title = str(before_active_window.get("title", "")).strip()
+    best_candidate: Dict[str, Any] = {}
+    process_snapshot: Dict[str, Any] = {}
+    samples: List[Dict[str, Any]] = []
+    saw_new_match = False
+    saw_existing_match = False
+    saw_active_match = False
+    saw_brief_match = False
+
+    for index in range(bounded_samples):
+        if index > 0:
+            time.sleep(bounded_interval)
+        active_window = _active_window_info()
+        visible_windows = _enum_windows(include_minimized=True, include_hidden=True, limit=24)
+        candidate = _best_open_window_candidate(_dedupe_windows([active_window], visible_windows), target_info)
+        process_snapshot = _process_hint_snapshot(target_info, launched_pid=launched_pid) or process_snapshot
+        candidate_score = int(candidate.get("match_score", 0) or 0)
+        window_id = str(candidate.get("window_id", "")).strip()
+        if candidate_score > int(best_candidate.get("match_score", 0) or 0):
+            best_candidate = dict(candidate)
+        if candidate_score >= 65:
+            saw_brief_match = True
+        if candidate_score >= 78:
+            if window_id and window_id not in before_ids:
+                saw_new_match = True
+            elif window_id:
+                saw_existing_match = True
+            if bool(candidate.get("is_active", False)) or (window_id and window_id == str(active_window.get("window_id", "")).strip()):
+                saw_active_match = True
+        samples.append(
+            {
+                "active_window_title": _trim_text(active_window.get("title", ""), limit=140),
+                "active_window_process": _trim_text(active_window.get("process_name", ""), limit=80),
+                "candidate_title": _trim_text(candidate.get("title", ""), limit=140),
+                "candidate_process": _trim_text(candidate.get("process_name", ""), limit=80),
+                "candidate_window_id": _trim_text(candidate.get("window_id", ""), limit=40),
+                "candidate_score": candidate_score,
+            }
+        )
+
+    active_window_after = _active_window_info()
+    active_window_changed = bool(
+        str(active_window_after.get("window_id", "")).strip()
+        and str(active_window_after.get("window_id", "")).strip() != before_active_id
+    ) or bool(
+        str(active_window_after.get("title", "")).strip()
+        and str(active_window_after.get("title", "")).strip() != before_active_title
+    )
+    matched_window = bool(best_candidate)
+    matched_existing_window = matched_window and str(best_candidate.get("window_id", "")).strip() in before_ids
+    matched_active_window = matched_window and bool(best_candidate.get("is_active", False))
+    process_detected = bool(process_snapshot.get("running", False))
+
+    status = "not_observed"
+    confidence = "low"
+    note = "No clear window or process change confirmed that the target opened."
+    if saw_new_match and (saw_active_match or active_window_changed):
+        status = "verified_new_window"
+        confidence = "high"
+        note = "A new matching window surfaced and became active after the open attempt."
+    elif saw_new_match:
+        status = "verified_new_window"
+        confidence = "medium"
+        note = "A new matching window surfaced after the open attempt."
+    elif matched_existing_window and saw_active_match:
+        status = "verified_reused_window"
+        confidence = "medium"
+        note = "A matching existing viewer window appears to have been reused and surfaced."
+    elif matched_existing_window:
+        status = "likely_opened_background"
+        confidence = "low"
+        note = "A matching existing window was detected, but it did not clearly surface to the foreground."
+    elif process_detected and str(target_info.get("target_classification", "")).strip() == "executable_program":
+        status = "process_started_only"
+        confidence = "low"
+        note = "The target process started, but a visible window was not clearly confirmed."
+    elif saw_brief_match:
+        status = "brief_signal_only"
+        confidence = "low"
+        note = "A brief matching window signal appeared, but the result was not stable enough to confirm success."
+
+    return {
+        "status": status,
+        "confidence": confidence,
+        "note": note,
+        "matched_window": matched_window,
+        "matched_existing_window": matched_existing_window,
+        "matched_active_window": matched_active_window,
+        "likely_opened_behind": matched_existing_window and not saw_active_match,
+        "process_detected": process_detected,
+        "active_window_changed": active_window_changed,
+        "matched_window_title": _trim_text(best_candidate.get("title", ""), limit=180),
+        "matched_window_id": _trim_text(best_candidate.get("window_id", ""), limit=40),
+        "matched_process_name": _trim_text(best_candidate.get("process_name", ""), limit=120),
+        "match_score": int(best_candidate.get("match_score", 0) or 0),
+        "strategy_family": _trim_text(strategy_family, limit=60),
+        "samples": samples[:4],
+    }
+
+
+def _open_target_display(target_info: Dict[str, Any]) -> str:
+    return str(target_info.get("basename", "") or target_info.get("target", "")).strip() or "target"
+
+
+def _open_target_summary(target_info: Dict[str, Any], strategy_family: str, verification: Dict[str, Any]) -> str:
+    target_display = _open_target_display(target_info)
+    verification_note = str((verification or {}).get("note", "")).strip()
+    if strategy_family == "focus_existing_window":
+        return f"Focused the existing window for '{target_display}'."
+    if verification_note:
+        return f"Attempted to open '{target_display}'. {verification_note}"
+    return f"Attempted to open '{target_display}' via {strategy_family.replace('_', ' ')}."
+
+
 def _active_window_process_target(active_window: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(active_window, dict):
         return {}
@@ -3885,6 +4149,280 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
         command_result=payload,
         target_window=active_window,
     )
+
+
+def desktop_open_target(args: Dict[str, Any]) -> Dict[str, Any]:
+    active_window, windows, observation = _current_desktop_context(limit=20)
+    token = str(args.get("observation_token", "")).strip()
+    evidence_ref = _latest_evidence_ref_for_observation(token) if token else {}
+    target = str(args.get("target", "")).strip()
+    explicit_target_type = str(args.get("target_type", "")).strip()
+    cwd = str(args.get("cwd", "")).strip()
+    planning_goal = str(args.get("planning_goal", "") or args.get("goal", "")).strip()
+    requested_method = str(args.get("preferred_method", "") or args.get("requested_method", "")).strip()
+    bounded_arguments = [
+        _trim_text(item, limit=180)
+        for item in list(args.get("arguments", []))[:8]
+        if _trim_text(item, limit=180)
+    ]
+
+    if not target:
+        message = "Provide a Windows file, folder, URL, or executable target before trying to open it."
+        result = _desktop_result(
+            ok=False,
+            action="desktop_open_target",
+            summary=message,
+            desktop_state=observation,
+            error=message,
+            desktop_evidence_ref=evidence_ref,
+            target_window=active_window,
+        )
+        result["open_target"] = {
+            "target": "",
+            "target_classification": "unknown_ambiguous_path",
+            "target_signature": "",
+        }
+        return result
+
+    target_info = classify_open_target(target, cwd=cwd, explicit_target_type=explicit_target_type)
+    request_preferences = infer_open_request_preferences(
+        " ".join(part for part in (planning_goal, requested_method, explicit_target_type) if str(part).strip()),
+        args,
+    )
+    existing_window = _best_open_window_candidate(_dedupe_windows([active_window], windows), target_info)
+    existing_window_match = int(existing_window.get("match_score", 0) or 0) >= 78
+    avoid_strategy_families = [
+        str(item).strip()
+        for item in list(args.get("avoid_strategy_families", []))
+        if str(item).strip()
+    ]
+    strategy = choose_windows_open_strategy(
+        target_info,
+        preferred_method=request_preferences.get("preferred_method", "") or requested_method,
+        avoid_strategy_families=avoid_strategy_families,
+        existing_window_match=existing_window_match,
+        force_strategy_switch=bool(
+            request_preferences.get("force_strategy_switch", False) or _coerce_bool(args.get("force_strategy_switch", False), False)
+        ),
+    )
+    strategy_family = str(strategy.get("strategy_family", "")).strip()
+    if strategy_family == "focus_existing_window" and not existing_window_match:
+        strategy = choose_windows_open_strategy(
+            target_info,
+            preferred_method="",
+            avoid_strategy_families=[*avoid_strategy_families, "focus_existing_window"],
+            existing_window_match=False,
+            force_strategy_switch=True,
+        )
+        strategy_family = str(strategy.get("strategy_family", "")).strip()
+
+    target_display = _open_target_display(target_info)
+    checkpoint_reason = str(args.get("checkpoint_reason", "")).strip() or (
+        f"Opening '{target_display}' with the Windows {strategy_family.replace('_', ' ')} path requires explicit approval in this control pass."
+    )
+    checkpoint_target = target_display
+    if not _approval_granted(args):
+        paused = _pause_desktop_action(
+            action="desktop_open_target",
+            summary=f"Approval required before opening '{target_display}'.",
+            active_window=active_window,
+            windows=windows,
+            checkpoint_reason=checkpoint_reason,
+            checkpoint_target=checkpoint_target,
+            checkpoint_resume_args={
+                "target": target,
+                "target_type": explicit_target_type,
+                "preferred_method": requested_method or request_preferences.get("preferred_method", ""),
+                "force_strategy_switch": bool(
+                    request_preferences.get("force_strategy_switch", False)
+                    or _coerce_bool(args.get("force_strategy_switch", False), False)
+                ),
+                "cwd": cwd,
+                "arguments": bounded_arguments,
+                "env": args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+                "avoid_strategy_families": avoid_strategy_families,
+                "verification_samples": _coerce_int(args.get("verification_samples", 3), 3, minimum=2, maximum=4),
+                "verification_interval_ms": _coerce_int(args.get("verification_interval_ms", 180), 180, minimum=80, maximum=320),
+                "observation_token": token,
+                "evidence_id": evidence_ref.get("evidence_id", ""),
+            },
+            desktop_evidence_ref=evidence_ref,
+        )
+        paused["open_target"] = target_info
+        paused["open_strategy"] = {
+            **strategy,
+            "existing_window_match": existing_window_match,
+            "existing_window": existing_window,
+        }
+        return paused
+
+    verification_samples = _coerce_int(args.get("verification_samples", 3), 3, minimum=2, maximum=4)
+    verification_interval_ms = _coerce_int(args.get("verification_interval_ms", 180), 180, minimum=80, maximum=320)
+    process_context: Dict[str, Any] = {}
+    target_window: Dict[str, Any] = dict(existing_window) if existing_window else {}
+    recovery: Dict[str, Any] = {}
+    recovery_attempts: List[Dict[str, Any]] = []
+    window_readiness: Dict[str, Any] = {}
+    visual_stability: Dict[str, Any] = {}
+    scene: Dict[str, Any] = {}
+    open_payload: Dict[str, Any] = {}
+    launched_pid = 0
+
+    if strategy_family == "focus_existing_window":
+        recovery_result = _execute_window_recovery(
+            {
+                "window_id": str(existing_window.get("window_id", "")).strip(),
+                "title": str(existing_window.get("title", "")).strip(),
+                "expected_window_id": str(existing_window.get("window_id", "")).strip(),
+                "expected_window_title": str(existing_window.get("title", "")).strip(),
+                "exact": True,
+                "limit": 16,
+                "ui_limit": 6,
+                "max_attempts": 1,
+                "wait_seconds": 1.4,
+                "poll_interval_seconds": 0.14,
+                "stability_samples": 2,
+                "stability_interval_ms": 120,
+            },
+            action_name="desktop_open_target",
+        )
+        recovery = recovery_result.get("recovery", {}) if isinstance(recovery_result.get("recovery", {}), dict) else {}
+        recovery_attempts = recovery_result.get("recovery_attempts", []) if isinstance(recovery_result.get("recovery_attempts", []), list) else []
+        window_readiness = recovery_result.get("readiness", {}) if isinstance(recovery_result.get("readiness", {}), dict) else {}
+        visual_stability = recovery_result.get("visual_stability", {}) if isinstance(recovery_result.get("visual_stability", {}), dict) else {}
+        process_context = recovery_result.get("process_context", {}) if isinstance(recovery_result.get("process_context", {}), dict) else {}
+        scene = recovery_result.get("scene", {}) if isinstance(recovery_result.get("scene", {}), dict) else {}
+        target_window = recovery_result.get("target_window", {}) if isinstance(recovery_result.get("target_window", {}), dict) else target_window
+        open_payload = {
+            "ok": recovery.get("state") == "ready",
+            "backend": "window_recovery",
+            "reason": _trim_text(recovery.get("reason", "") or "existing_window_focus", limit=80),
+            "message": _trim_text(recovery.get("summary", "") or f"Focused the existing window for '{target_display}'.", limit=220),
+            "error": "" if recovery.get("state") == "ready" else _trim_text(recovery.get("summary", "") or "Could not focus the matching existing window.", limit=220),
+            "data": {
+                "target": target_info.get("normalized_target", "") or target_info.get("target", ""),
+                "window_id": str(target_window.get("window_id", "")).strip(),
+                "process": process_context,
+            },
+        }
+    elif strategy_family == "executable_launch":
+        open_payload = launch_unowned_process(
+            executable=str(target_info.get("normalized_target", "") or target),
+            args=bounded_arguments,
+            cwd=cwd,
+            env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        )
+    elif strategy_family == "association_open":
+        open_payload = open_path_with_association(target=str(target_info.get("normalized_target", "") or target))
+    elif strategy_family == "url_browser":
+        open_payload = open_url_with_shell(target=str(target_info.get("target", "") or target))
+    else:
+        open_payload = open_in_explorer(
+            target=str(target_info.get("normalized_target", "") or target),
+            select_target=bool(target_info.get("is_file", False)),
+        )
+
+    payload = open_payload.get("data", {}) if isinstance(open_payload.get("data", {}), dict) else {}
+    if not process_context:
+        process_context = payload.get("process", {}) if isinstance(payload.get("process", {}), dict) else {}
+    launched_pid = _coerce_int(payload.get("pid", 0), 0, minimum=0, maximum=10_000_000)
+    backend_reason = _trim_text(open_payload.get("reason", ""), limit=80).lower()
+    should_verify_open = bool(open_payload.get("ok", False)) or backend_reason in {
+        "association_opened",
+        "existing_window_focus",
+        "explorer_opened",
+        "process_started",
+        "url_opened",
+    }
+    if should_verify_open:
+        verification = _sample_open_verification(
+            target_info,
+            strategy_family=strategy_family,
+            before_active_window=active_window,
+            before_windows=windows,
+            launched_pid=launched_pid,
+            sample_count=verification_samples,
+            interval_ms=verification_interval_ms,
+        )
+    else:
+        verification_note = (
+            "The target does not exist, so Windows never attempted the open request."
+            if backend_reason == "target_missing"
+            else _trim_text(open_payload.get("message", "") or open_payload.get("error", ""), limit=220)
+            or "The open request did not reach a real Windows launch or association path."
+        )
+        verification = {
+            "status": "not_attempted_missing_target" if backend_reason == "target_missing" else "launcher_failed",
+            "confidence": "high",
+            "note": verification_note,
+            "matched_window": False,
+            "matched_existing_window": False,
+            "matched_active_window": False,
+            "likely_opened_behind": False,
+            "process_detected": False,
+            "active_window_changed": False,
+            "matched_window_title": "",
+            "matched_window_id": "",
+            "matched_process_name": "",
+            "match_score": 0,
+            "strategy_family": _trim_text(strategy_family, limit=60),
+            "samples": [],
+        }
+    if not target_window:
+        target_window = {
+            "window_id": str(verification.get("matched_window_id", "")).strip(),
+            "title": str(verification.get("matched_window_title", "")).strip(),
+            "process_name": str(verification.get("matched_process_name", "")).strip(),
+            "is_active": bool(verification.get("matched_active_window", False)),
+        }
+    if not process_context and verification.get("matched_process_name"):
+        process_context = {
+            "process_name": str(verification.get("matched_process_name", "")).strip(),
+            "running": bool(verification.get("process_detected", False)),
+        }
+
+    observation_after = _register_observation(
+        active_window=_active_window_info(),
+        windows=_enum_windows(limit=DESKTOP_DEFAULT_WINDOW_LIMIT),
+    )
+    summary = _trim_text(open_payload.get("message", ""), limit=220) or _open_target_summary(target_info, strategy_family, verification)
+    error = str(open_payload.get("error", "")).strip()
+    if not open_payload.get("ok", False) and not error:
+        error = str(open_payload.get("message", "")).strip() or summary
+
+    result = _desktop_result(
+        ok=bool(open_payload.get("ok", False)),
+        action="desktop_open_target",
+        summary=summary,
+        desktop_state=observation_after,
+        error=error,
+        approval_status="approved",
+        workflow_resumed=_coerce_bool(args.get("resume_from_checkpoint", False), False),
+        desktop_evidence_ref=evidence_ref,
+        target_window=target_window,
+        recovery=recovery,
+        recovery_attempts=recovery_attempts,
+        window_readiness=window_readiness,
+        visual_stability=visual_stability,
+        process_context=process_context,
+        scene=scene,
+    )
+    result["open_target"] = target_info
+    result["open_strategy"] = {
+        **strategy,
+        "strategy_family": strategy_family,
+        "existing_window_match": existing_window_match,
+        "existing_window": existing_window,
+        "requested_method": requested_method or request_preferences.get("preferred_method", ""),
+    }
+    result["open_verification"] = verification
+    result["open_result"] = {
+        "backend": _trim_text(open_payload.get("backend", ""), limit=40),
+        "reason": _trim_text(open_payload.get("reason", ""), limit=80),
+        "message": _trim_text(open_payload.get("message", ""), limit=220),
+        "data": payload,
+    }
+    return result
 
 
 DESKTOP_LIST_WINDOWS_TOOL = {
@@ -4415,4 +4953,81 @@ DESKTOP_RUN_COMMAND_TOOL = {
         "additionalProperties": False,
     },
     "func": desktop_run_command,
+}
+
+
+DESKTOP_OPEN_TARGET_TOOL = {
+    "name": "desktop_open_target",
+    "description": (
+        "Open one Windows target in a bounded, strategy-aware way. "
+        "Use this for files, folders, URLs, documents, images, and executable programs so the operator can choose "
+        "the right Windows open semantics, switch strategy after failures, and verify whether the target really surfaced."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "target_type": {
+                "type": "string",
+                "enum": [
+                    "document_file",
+                    "executable_program",
+                    "folder_directory",
+                    "image_media_file",
+                    "text_code_file",
+                    "unknown_ambiguous_path",
+                    "url_web_resource",
+                ],
+            },
+            "preferred_method": {
+                "type": "string",
+                "enum": [
+                    "association_open",
+                    "bounded_fallback",
+                    "executable_launch",
+                    "explorer_assisted_ui",
+                    "focus_existing_window",
+                    "url_browser",
+                ],
+            },
+            "requested_method": {
+                "type": "string",
+                "enum": [
+                    "association_open",
+                    "bounded_fallback",
+                    "executable_launch",
+                    "explorer_assisted_ui",
+                    "focus_existing_window",
+                    "url_browser",
+                ],
+            },
+            "force_strategy_switch": {"type": "boolean"},
+            "avoid_strategy_families": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "association_open",
+                        "bounded_fallback",
+                        "executable_launch",
+                        "explorer_assisted_ui",
+                        "focus_existing_window",
+                        "url_browser",
+                    ],
+                },
+                "maxItems": 4,
+            },
+            "arguments": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "cwd": {"type": "string"},
+            "env": {"type": "object", "additionalProperties": {"type": "string"}},
+            "verification_samples": {"type": "integer", "minimum": 2, "maximum": 4},
+            "verification_interval_ms": {"type": "integer", "minimum": 80, "maximum": 320},
+            "observation_token": {"type": "string"},
+            "approval_status": {"type": "string", "enum": ["approved", "not approved"]},
+            "checkpoint_reason": {"type": "string"},
+        },
+        "required": ["target"],
+        "additionalProperties": False,
+    },
+    "func": desktop_open_target,
 }

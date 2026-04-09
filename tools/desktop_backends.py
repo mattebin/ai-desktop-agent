@@ -578,6 +578,225 @@ def start_owned_process(
         )
 
 
+def launch_unowned_process(
+    *,
+    executable: str,
+    args: List[str] | None = None,
+    cwd: str = "",
+    env: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
+    executable_text = _normalize_path_text(executable)
+    command = [executable_text, *[_trim_text(item, limit=180) for item in list(args or [])[:12] if _trim_text(item, limit=180)]]
+    if not executable_text:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="An executable path is required before launching a program.",
+            error="Executable path missing.",
+            data={},
+        )
+
+    executable_path = Path(executable_text)
+    if not executable_path.exists():
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="subprocess",
+            reason="target_missing",
+            message="The requested executable does not exist.",
+            error="Executable path does not exist.",
+            data={"target": executable_text},
+        )
+
+    working_dir = _normalize_path_text(cwd)
+    if working_dir and not Path(working_dir).exists():
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="subprocess",
+            reason="invalid_input",
+            message="The requested working directory does not exist.",
+            error="Working directory does not exist.",
+            data={"target": executable_text},
+        )
+
+    merged_env = dict(os.environ)
+    merged_env.update(_normalize_env_overrides(env or {}))
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=working_dir or None,
+            env=merged_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        process_context = probe_process_context(pid=int(getattr(process, "pid", 0) or 0)).get("data", {})
+        return result_envelope(
+            "desktop_open_result",
+            ok=True,
+            backend="subprocess",
+            reason="process_started",
+            message=f"Started '{Path(executable_text).name}'.",
+            data={
+                "target": executable_text,
+                "pid": int(getattr(process, "pid", 0) or 0),
+                "process": process_context if isinstance(process_context, dict) else {},
+                "cwd": working_dir,
+                "arguments": command[1:],
+            },
+        )
+    except Exception as exc:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="subprocess",
+            reason="error",
+            message="Could not launch the requested executable.",
+            error=_trim_text(exc, limit=240),
+            data={"target": executable_text},
+        )
+
+
+def open_path_with_association(*, target: str) -> Dict[str, Any]:
+    target_text = _normalize_path_text(target)
+    if not target_text:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="shell",
+            reason="invalid_input",
+            message="A target path is required before opening it through Windows.",
+            error="Target path missing.",
+            data={},
+        )
+
+    path = Path(target_text)
+    if not path.exists():
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="shell",
+            reason="target_missing",
+            message="The requested target path does not exist.",
+            error="Target path does not exist.",
+            data={"target": target_text},
+        )
+
+    try:
+        os.startfile(target_text)
+        return result_envelope(
+            "desktop_open_result",
+            ok=True,
+            backend="shell",
+            reason="association_opened",
+            message=f"Requested Windows to open '{path.name}' through its associated app.",
+            data={"target": target_text, "basename": path.name},
+        )
+    except Exception as exc:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="shell",
+            reason="error",
+            message="Could not open the target through its Windows file association.",
+            error=_trim_text(exc, limit=240),
+            data={"target": target_text, "basename": path.name},
+        )
+
+
+def open_url_with_shell(*, target: str) -> Dict[str, Any]:
+    target_text = _trim_text(target, limit=320)
+    if not target_text:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="shell",
+            reason="invalid_input",
+            message="A URL is required before opening it through Windows.",
+            error="URL missing.",
+            data={},
+        )
+
+    try:
+        os.startfile(target_text)
+        return result_envelope(
+            "desktop_open_result",
+            ok=True,
+            backend="shell",
+            reason="url_opened",
+            message="Requested Windows to open the URL through the system browser.",
+            data={"target": target_text},
+        )
+    except Exception as exc:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="shell",
+            reason="error",
+            message="Could not open the URL through the system browser.",
+            error=_trim_text(exc, limit=240),
+            data={"target": target_text},
+        )
+
+
+def open_in_explorer(*, target: str, select_target: bool = False) -> Dict[str, Any]:
+    target_text = _normalize_path_text(target)
+    if not target_text:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="explorer",
+            reason="invalid_input",
+            message="A path is required before opening Explorer.",
+            error="Target path missing.",
+            data={},
+        )
+
+    path = Path(target_text)
+    if not path.exists():
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="explorer",
+            reason="target_missing",
+            message="The requested Explorer target does not exist.",
+            error="Target path does not exist.",
+            data={"target": target_text},
+        )
+
+    argv = ["explorer.exe", f"/select,{target_text}"] if select_target and path.is_file() else ["explorer.exe", target_text]
+    try:
+        process = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return result_envelope(
+            "desktop_open_result",
+            ok=True,
+            backend="explorer",
+            reason="explorer_opened",
+            message=(
+                f"Opened File Explorer and selected '{path.name}'."
+                if select_target and path.is_file()
+                else f"Opened '{path.name or target_text}' in File Explorer."
+            ),
+            data={
+                "target": target_text,
+                "pid": int(getattr(process, "pid", 0) or 0),
+                "select_target": bool(select_target and path.is_file()),
+            },
+        )
+    except Exception as exc:
+        return result_envelope(
+            "desktop_open_result",
+            ok=False,
+            backend="explorer",
+            reason="error",
+            message="Could not open the requested Explorer target.",
+            error=_trim_text(exc, limit=240),
+            data={"target": target_text, "select_target": bool(select_target and path.is_file())},
+        )
+
+
 def stop_owned_process(*, pid: int = 0, owned_label: str = "", wait_seconds: float = 2.0) -> Dict[str, Any]:
     entry = _owned_process_entry(_coerce_int(pid, 0, minimum=0, maximum=10_000_000))
     if not entry and owned_label:

@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from core.capability_profiles import normalize_execution_profile
 from core.lab_shell import lab_status_snapshot
 from core.problem_records import build_problem_record
+from core.windows_opening import choose_windows_open_strategy
 
 
 DEFAULT_OPERATOR_MEMORY_PATH = Path(__file__).resolve().parents[1] / "data" / "operator_memory.json"
@@ -167,6 +168,15 @@ def _infer_target_signature(
 ) -> str:
     domain = action_domain(tool_name)
     if domain == "desktop":
+        if tool_name == "desktop_open_target":
+            open_target = result.get("open_target", {}) if isinstance(result.get("open_target", {}), dict) else {}
+            value = _trim_text(
+                open_target.get("target_signature", "")
+                or open_target.get("normalized_target", "")
+                or args.get("target", ""),
+                limit=220,
+            ).lower()
+            return value or _trim_text(after_context.get("active_window_title", ""), limit=80)
         parts = [
             _trim_text(args.get("title", ""), limit=80),
             _trim_text(args.get("window_id", ""), limit=40),
@@ -296,6 +306,175 @@ def _read_only_desktop_tool(tool_name: str) -> bool:
     }
 
 
+def _classify_desktop_open_target(
+    args: Dict[str, Any],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    summary = _result_summary(result)
+    open_target = result.get("open_target", {}) if isinstance(result.get("open_target", {}), dict) else {}
+    open_strategy = result.get("open_strategy", {}) if isinstance(result.get("open_strategy", {}), dict) else {}
+    open_verification = result.get("open_verification", {}) if isinstance(result.get("open_verification", {}), dict) else {}
+    open_result = result.get("open_result", {}) if isinstance(result.get("open_result", {}), dict) else {}
+
+    target_display = _trim_text(open_target.get("basename", "") or open_target.get("target", "") or args.get("target", ""), limit=160)
+    target_class = _trim_text(open_target.get("target_classification", ""), limit=60)
+    strategy_family = _trim_text(open_strategy.get("strategy_family", ""), limit=60)
+    verification_status = _trim_text(open_verification.get("status", ""), limit=60)
+    verification_note = _trim_text(open_verification.get("note", ""), limit=220)
+    matched_window_title = _trim_text(open_verification.get("matched_window_title", ""), limit=160)
+    matched_process_name = _trim_text(open_verification.get("matched_process_name", ""), limit=80)
+    process_detected = bool(open_verification.get("process_detected", False))
+    observed = matched_window_title or matched_process_name or verification_note
+    expected = f"'{target_display or 'target'}' opens or becomes visible in the intended Windows surface."
+
+    if result.get("paused", False):
+        return {
+            "status": "blocked",
+            "reason": "approval_required",
+            "summary": summary or f"Paused before opening '{target_display or 'the target'}' because the action needs approval.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": "",
+            "confidence": "high",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if not result.get("ok", False):
+        result_reason = _trim_text(open_result.get("reason", "") or result.get("error", "") or "open_target_failed", limit=80).lower()
+        status = "failure"
+        if verification_status in {"likely_opened_background", "brief_signal_only"}:
+            status = "uncertain"
+        return {
+            "status": status,
+            "reason": result_reason or "open_target_failed",
+            "summary": summary or verification_note or f"Could not open '{target_display or 'the target'}'.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": observed or _trim_text(result.get("error", ""), limit=160),
+            "confidence": "medium" if status == "failure" else "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if verification_status == "verified_new_window":
+        return {
+            "status": "success",
+            "reason": "open_verified_new_window",
+            "summary": summary or f"Opened '{target_display or 'the target'}' in a new visible Windows surface.",
+            "progress_made": True,
+            "expected_change": expected,
+            "observed_change": observed or matched_window_title,
+            "confidence": "high" if bool(open_verification.get("matched_active_window", False)) else "medium",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if verification_status == "verified_reused_window":
+        return {
+            "status": "success",
+            "reason": "open_verified_reused_window",
+            "summary": summary or f"Opened '{target_display or 'the target'}' by resurfacing an existing viewer window.",
+            "progress_made": True,
+            "expected_change": expected,
+            "observed_change": observed or matched_window_title,
+            "confidence": "medium",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if strategy_family == "explorer_assisted_ui" and result.get("ok", False):
+        return {
+            "status": "partial_success" if target_class != "folder_directory" else "success",
+            "reason": "explorer_target_visible" if target_class != "folder_directory" else "folder_opened_in_explorer",
+            "summary": summary or (
+                f"Surfaced '{target_display or 'the target'}' in Explorer for a bounded UI fallback."
+                if target_class != "folder_directory"
+                else f"Opened '{target_display or 'the folder'}' in Explorer."
+            ),
+            "progress_made": True,
+            "expected_change": expected,
+            "observed_change": observed or verification_note or "Explorer opened for the target.",
+            "confidence": "medium" if verification_status in {"verified_new_window", "verified_reused_window"} else "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status or "explorer_visible",
+        }
+
+    if verification_status == "likely_opened_background":
+        return {
+            "status": "uncertain",
+            "reason": "open_likely_background",
+            "summary": summary or f"'{target_display or 'The target'}' may have opened behind another window or reused a background viewer.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": observed or matched_window_title,
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if verification_status == "process_started_only":
+        return {
+            "status": "uncertain",
+            "reason": "open_process_started_only",
+            "summary": summary or f"The target process started for '{target_display or 'the target'}', but a visible window was not clearly confirmed.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": observed or matched_process_name,
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if verification_status == "brief_signal_only":
+        return {
+            "status": "uncertain",
+            "reason": "open_brief_signal_only",
+            "summary": summary or f"Only a brief signal appeared for '{target_display or 'the target'}', so the open result is still uncertain.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": observed or verification_note,
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status,
+        }
+
+    if process_detected and target_class == "executable_program":
+        return {
+            "status": "uncertain",
+            "reason": "open_process_detected_only",
+            "summary": summary or f"Detected process activity for '{target_display or 'the executable'}', but the visible app surface was not clearly confirmed.",
+            "progress_made": False,
+            "expected_change": expected,
+            "observed_change": observed or matched_process_name,
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "target_classification": target_class,
+            "verification_status": verification_status or "process_detected_only",
+        }
+
+    return {
+        "status": "uncertain",
+        "reason": "open_unverified",
+        "summary": summary or f"The Windows open request for '{target_display or 'the target'}' returned success, but the intended result could not be confirmed.",
+        "progress_made": False,
+        "expected_change": expected,
+        "observed_change": observed or "No visible open signal was confirmed.",
+        "confidence": "low",
+        "strategy_family": strategy_family,
+        "target_classification": target_class,
+        "verification_status": verification_status or "not_observed",
+    }
+
+
 def _classify_desktop(
     tool_name: str,
     args: Dict[str, Any],
@@ -323,6 +502,9 @@ def _classify_desktop(
     process_changed = bool(after_process and after_process != before_process)
     evidence_changed = bool(evidence_after and evidence_after != evidence_before)
     active_matches_target = bool(target_title and target_title.lower() in after_window.lower())
+
+    if tool_name == "desktop_open_target":
+        return _classify_desktop_open_target(args, result)
 
     if result.get("paused", False):
         return {
@@ -727,6 +909,18 @@ def evaluate_action_outcome(
     context_after = capture_action_context(task_state, tool_name, safe_args)
     domain = action_domain(tool_name)
     action_signature = build_action_signature(tool_name, safe_args)
+    if tool_name == "desktop_open_target":
+        open_target = safe_result.get("open_target", {}) if isinstance(safe_result.get("open_target", {}), dict) else {}
+        open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
+        target_class = _trim_text(open_target.get("target_classification", safe_args.get("target_type", "")), limit=60)
+        strategy_family = _trim_text(open_strategy.get("strategy_family", safe_args.get("preferred_method", "")), limit=60)
+        extra_parts = []
+        if target_class:
+            extra_parts.append(f"target_class={target_class}")
+        if strategy_family:
+            extra_parts.append(f"strategy_family={strategy_family}")
+        if extra_parts:
+            action_signature = "::".join([action_signature, *extra_parts])
     target_signature = _infer_target_signature(tool_name, safe_args, safe_result, context_before, context_after)
     attempts = _previous_attempts(task_state, action_signature) + 1
 
@@ -760,6 +954,9 @@ def evaluate_action_outcome(
         "action_signature": action_signature,
         "target_signature": _trim_text(target_signature, limit=220),
         "attempt_number": attempts,
+        "strategy_family": _trim_text(base.get("strategy_family", ""), limit=60),
+        "target_classification": _trim_text(base.get("target_classification", ""), limit=60),
+        "verification_status": _trim_text(base.get("verification_status", ""), limit=60),
         "retry": retry,
         "before": {
             "active_window_title": _trim_text(context_before.get("active_window_title", ""), limit=120),
@@ -837,6 +1034,9 @@ class OperatorMemoryStore:
                 "summary": _trim_text(evaluation.get("summary", ""), limit=220),
                 "action_signature": _trim_text(evaluation.get("action_signature", ""), limit=220),
                 "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=220),
+                "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=60),
+                "target_classification": _trim_text(evaluation.get("target_classification", ""), limit=60),
+                "verification_status": _trim_text(evaluation.get("verification_status", ""), limit=60),
                 "goal": _trim_text(goal, limit=220),
                 "retry_action": _trim_text((evaluation.get("retry", {}) if isinstance(evaluation.get("retry", {}), dict) else {}).get("action", ""), limit=40),
                 "expected_change": _trim_text(evaluation.get("expected_change", ""), limit=120),
@@ -891,6 +1091,8 @@ class OperatorMemoryStore:
                 "recorded_at": _trim_text(entry.get("recorded_at", ""), limit=40),
                 "target_signature": entry_target,
                 "retry_action": _trim_text(entry.get("retry_action", ""), limit=40),
+                "strategy_family": _trim_text(entry.get("strategy_family", ""), limit=60),
+                "target_classification": _trim_text(entry.get("target_classification", ""), limit=60),
             }
             if compact["status"] == "success" and len(prefer) < _MAX_HINT_ITEMS and compact not in prefer:
                 prefer.append(compact)
@@ -973,6 +1175,7 @@ def _recent_evaluation_items(task_state, *, limit: int = 6) -> List[Dict[str, An
                 "progress_made": bool(evaluation.get("progress_made", False)),
                 "retry": evaluation.get("retry", {}) if isinstance(evaluation.get("retry", {}), dict) else {},
                 "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=180),
+                "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=60),
                 "observed_change": _trim_text(evaluation.get("observed_change", ""), limit=120),
                 "evaluated_at": _trim_text(evaluation.get("evaluated_at", ""), limit=40),
             }
@@ -991,7 +1194,9 @@ def _alternate_strategy_attempted(task_state, evaluation: Dict[str, Any] | None)
     for item in _recent_evaluation_items(task_state, limit=8):
         if _trim_text(item.get("target_signature", ""), limit=220) != target_signature:
             continue
-        if _trim_text(item.get("tool", ""), limit=80) == _trim_text(safe_evaluation.get("tool", ""), limit=80):
+        same_tool = _trim_text(item.get("tool", ""), limit=80) == _trim_text(safe_evaluation.get("tool", ""), limit=80)
+        same_strategy = _trim_text(item.get("strategy_family", ""), limit=60) == _trim_text(safe_evaluation.get("strategy_family", ""), limit=60)
+        if same_tool and same_strategy:
             continue
         if _trim_text(item.get("status", ""), limit=40) in _FAIL_LIKE_OUTCOMES | {"partial_success"}:
             return True
@@ -1107,6 +1312,96 @@ def guard_repeated_failed_action(task_state, tool_name: str, args: Dict[str, Any
             "summary": summary,
             "reasons": [
                 "The recent run history for this exact action signature already shows repeated failure or no progress.",
+            ],
+        },
+    }
+
+
+def guard_repeated_failed_open_family(task_state, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    safe_args = args if isinstance(args, dict) else {}
+    target_signature = _trim_text(safe_args.get("target_signature", ""), limit=220)
+    predicted_strategy = choose_windows_open_strategy(
+        {
+            "target_classification": _trim_text(
+                safe_args.get("target_type", "") or safe_args.get("target_classification", ""),
+                limit=80,
+            ),
+            "exists": not bool(safe_args.get("target_missing", False)),
+        },
+        preferred_method=_trim_text(
+            safe_args.get("preferred_method", "")
+            or safe_args.get("requested_method", "")
+            or safe_args.get("strategy_family", ""),
+            limit=60,
+        ),
+        avoid_strategy_families=[
+            _trim_text(item, limit=60)
+            for item in list(safe_args.get("avoid_strategy_families", []))
+            if _trim_text(item, limit=60)
+        ],
+        existing_window_match=False,
+        force_strategy_switch=bool(safe_args.get("force_strategy_switch", False)),
+    )
+    strategy_family = _trim_text(
+        safe_args.get("strategy_family", "") or predicted_strategy.get("strategy_family", ""),
+        limit=60,
+    )
+    if not target_signature or not strategy_family:
+        return {}
+
+    force_switch = bool(safe_args.get("force_strategy_switch", False))
+    recent_failures = 0
+    for item in _recent_evaluation_items(task_state, limit=10):
+        if _trim_text(item.get("tool", ""), limit=80) != "desktop_open_target":
+            continue
+        if _trim_text(item.get("target_signature", ""), limit=220) != target_signature:
+            continue
+        if _trim_text(item.get("strategy_family", ""), limit=60) != strategy_family:
+            continue
+        if _trim_text(item.get("status", ""), limit=40) in _FAIL_LIKE_OUTCOMES:
+            recent_failures += 1
+
+    if recent_failures < (1 if force_switch else 2):
+        return {}
+
+    summary = (
+        "Stopped the Windows open request because the same strategy family already failed for this target and the next attempt needs a materially different method."
+        if force_switch
+        else "Stopped repeating the same Windows open strategy family after repeated failure or no visible progress for this target."
+    )
+    return {
+        "ok": False,
+        "blocked": True,
+        "reason": "open_strategy_family_exhausted",
+        "summary": summary,
+        "message": summary,
+        "open_target": {
+            "target": _trim_text(safe_args.get("target", ""), limit=240),
+            "target_signature": target_signature,
+            "target_classification": _trim_text(
+                safe_args.get("target_type", "") or safe_args.get("target_classification", ""),
+                limit=80,
+            ),
+        },
+        "open_strategy": {
+            "strategy_family": strategy_family,
+            "requested_method": _trim_text(
+                safe_args.get("preferred_method", "") or safe_args.get("requested_method", ""),
+                limit=80,
+            ),
+            "force_strategy_switch": force_switch,
+        },
+        "open_verification": {
+            "status": "not_attempted_blocked_repeat",
+            "confidence": "high",
+            "note": summary,
+            "strategy_family": strategy_family,
+        },
+        "policy": {
+            "decision": "block",
+            "summary": summary,
+            "reasons": [
+                f"Recent open attempts for the same target already exhausted the '{strategy_family}' strategy family.",
             ],
         },
     }

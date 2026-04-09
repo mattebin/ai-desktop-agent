@@ -62,6 +62,7 @@ DESKTOP_TOOL_STEP_LABELS = {
     "desktop_start_process": "start process",
     "desktop_stop_process": "stop process",
     "desktop_run_command": "run command",
+    "desktop_open_target": "open target",
 }
 MAX_TASK_GOAL_CHARS = 4000
 MAX_TASK_REPLACEMENT_GOAL_CHARS = 2000
@@ -1073,11 +1074,15 @@ class TaskState:
         target_window = result.get("target_window", {}) if isinstance(result.get("target_window", {}), dict) else {}
         recovery = result.get("recovery", {}) if isinstance(result.get("recovery", {}), dict) else {}
         recovery_target = recovery.get("target_window", {}) if isinstance(recovery.get("target_window", {}), dict) else {}
+        open_target = result.get("open_target", {}) if isinstance(result.get("open_target", {}), dict) else {}
         explicit_target = (
             checkpoint_target
             or str(target_window.get("title", "")).strip()
             or str(recovery_target.get("title", "")).strip()
+            or str(open_target.get("basename", "")).strip()
+            or str(open_target.get("target", "")).strip()
             or str(args.get("title", "")).strip()
+            or str(args.get("target", "")).strip()
             or str(args.get("expected_window_title", "")).strip()
             or str(args.get("match", "")).strip()
         )

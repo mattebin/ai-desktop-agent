@@ -108,9 +108,43 @@ def classify_failure_category(
     summary = _trim_text(safe_evaluation.get("summary", safe_result.get("summary", "")), limit=220).lower()
     error_text = extract_error_text(safe_result, safe_evaluation).lower()
     tool = _trim_text(tool_name, limit=80).lower()
+    open_target = safe_result.get("open_target", {}) if isinstance(safe_result.get("open_target", {}), dict) else {}
+    open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
+    open_verification = safe_result.get("open_verification", {}) if isinstance(safe_result.get("open_verification", {}), dict) else {}
+    target_classification = _trim_text(
+        open_target.get("target_classification", safe_evaluation.get("target_classification", "")),
+        limit=80,
+    ).lower()
+    strategy_family = _trim_text(
+        open_strategy.get("strategy_family", safe_evaluation.get("strategy_family", "")),
+        limit=80,
+    ).lower()
+    verification_status = _trim_text(
+        open_verification.get("status", safe_evaluation.get("verification_status", "")),
+        limit=80,
+    ).lower()
 
-    if "winerror 193" in error_text or ("launcher" in reason and "open" in summary):
+    if (
+        "winerror 193" in error_text
+        or ("launcher" in reason and "open" in summary)
+        or (
+            tool == "desktop_open_target"
+            and strategy_family == "executable_launch"
+            and target_classification in {"document_file", "image_media_file", "text_code_file"}
+        )
+    ):
         return "launcher_file_open_semantics"
+    if tool == "desktop_open_target" and (
+        _trim_text(safe_result.get("reason", ""), limit=80).lower() == "open_strategy_family_exhausted"
+        or "open strategy family" in reason
+        or "open strategy family" in summary
+    ):
+        return "strategy_reuse_after_failure"
+    if tool == "desktop_open_target" and any(
+        token in reason or token in error_text or token in summary
+        for token in ("target_missing", "does not exist", "path missing")
+    ):
+        return "wrong_target_or_bad_target_proposal"
     if tool == "lab_run_shell" and (status == "blocked" or "blocked_category" in safe_result):
         return "shell_lab_policy_block"
     if approval_involved or status == "blocked" or "approval" in reason or "approval" in error_text or "policy" in reason:
@@ -121,6 +155,8 @@ def classify_failure_category(
         return "gmail_workflow_state_problem"
     if alternate_strategy_attempted and status in {"failure", "no_progress", "uncertain"}:
         return "strategy_reuse_after_failure"
+    if tool == "desktop_open_target" and verification_status in {"likely_opened_background", "process_started_only", "brief_signal_only"}:
+        return "no_visible_progress_after_action"
     if any(token in reason or token in error_text or token in summary for token in ("focus", "recover", "restore", "foreground", "active window", "window ready")):
         return "focus_recovery_issue"
     if any(token in reason or token in error_text for token in ("target", "selector", "proposal", "window not found", "element not found")):
@@ -137,7 +173,12 @@ def classify_failure_category(
 def build_improvement_hint(problem: Dict[str, Any] | None) -> str:
     safe_problem = problem if isinstance(problem, dict) else {}
     category = _trim_text(safe_problem.get("failure_category", ""), limit=80)
+    strategy_family = _trim_text(safe_problem.get("open_strategy_family", ""), limit=80)
+    target_classification = _trim_text(safe_problem.get("open_target_classification", ""), limit=80)
+    verification_status = _trim_text(safe_problem.get("open_verification_status", ""), limit=80)
     if category == "launcher_file_open_semantics":
+        if target_classification in {"document_file", "image_media_file", "text_code_file"}:
+            return "Open the file through its associated app or Explorer fallback instead of treating it like an executable."
         return "Open the file through its associated app or shell instead of treating it like an executable."
     if category == "wrong_target_or_bad_target_proposal":
         return "Refresh evidence and choose a stronger target proposal before retrying the action."
@@ -154,6 +195,8 @@ def build_improvement_hint(problem: Dict[str, Any] | None) -> str:
     if category == "shell_lab_policy_block":
         return "Keep the task in bounded mode or replace it with a safer lab inspection command."
     if category == "no_visible_progress_after_action":
+        if strategy_family in {"association_open", "executable_launch"} and verification_status in {"likely_opened_background", "brief_signal_only"}:
+            return "Check whether an existing viewer window was reused or opened behind another window before retrying; if not, switch to Explorer-assisted fallback."
         return "Verify a visible state change happened before marking the action successful or trying it again."
     if category == "strategy_reuse_after_failure":
         return "Do not reuse the same failed path again; switch method or stop and ask for guidance."
@@ -165,10 +208,17 @@ def build_failure_lesson(problem: Dict[str, Any] | None) -> Dict[str, Any]:
     category = _trim_text(safe_problem.get("failure_category", ""), limit=80)
     tool = _trim_text(safe_problem.get("tool", ""), limit=80)
     error_code = _trim_text(safe_problem.get("error_code", ""), limit=80)
+    strategy_family = _trim_text(safe_problem.get("open_strategy_family", ""), limit=80)
+    target_classification = _trim_text(safe_problem.get("open_target_classification", ""), limit=80)
     if category == "launcher_file_open_semantics":
-        lesson_text = "Do not launch non-executable files directly; open them via the associated app or shell."
+        if target_classification in {"document_file", "image_media_file", "text_code_file"}:
+            lesson_text = "Do not launch non-executable files directly on Windows; use association-open semantics and prefer Explorer fallback after launcher failure."
+        else:
+            lesson_text = "Do not launch non-executable files directly; open them via the associated app or shell."
     elif category == "focus_recovery_issue":
         lesson_text = "Prefer focus or recovery steps before repeating a desktop action against the same window."
+    elif category == "no_visible_progress_after_action" and strategy_family in {"association_open", "executable_launch"}:
+        lesson_text = "If a Windows open path shows no clear progress, check for reused or background viewer windows before retrying, then switch to Explorer-assisted fallback."
     elif category == "strategy_reuse_after_failure" or bool(safe_problem.get("retry_budget_exhausted", False)):
         lesson_text = "Do not repeat the same failed action signature after the retry budget is exhausted."
     elif category == "no_visible_progress_after_action":
@@ -182,6 +232,8 @@ def build_failure_lesson(problem: Dict[str, Any] | None) -> Dict[str, Any]:
         "lesson": _trim_text(lesson_text, limit=220),
         "category": category,
         "tool": tool,
+        "strategy_family": strategy_family,
+        "target_classification": target_classification,
     }
 
 
@@ -212,6 +264,10 @@ def build_problem_record(
     )
     error_text = extract_error_text(safe_result, safe_evaluation)
     error_code = extract_error_code(safe_result, safe_evaluation)
+    open_target = safe_result.get("open_target", {}) if isinstance(safe_result.get("open_target", {}), dict) else {}
+    open_strategy = safe_result.get("open_strategy", {}) if isinstance(safe_result.get("open_strategy", {}), dict) else {}
+    open_verification = safe_result.get("open_verification", {}) if isinstance(safe_result.get("open_verification", {}), dict) else {}
+    open_result = safe_result.get("open_result", {}) if isinstance(safe_result.get("open_result", {}), dict) else {}
     category = classify_failure_category(
         tool_name,
         safe_evaluation,
@@ -283,6 +339,18 @@ def build_problem_record(
         "exact_error": error_text,
         "policy_decision": _trim_text(policy.get("decision", ""), limit=40),
         "policy_summary": _trim_text(policy.get("summary", ""), limit=180),
+        "open_target_path": _trim_text(open_target.get("normalized_target", "") or open_target.get("target", ""), limit=240),
+        "open_target_classification": _trim_text(open_target.get("target_classification", ""), limit=80),
+        "open_strategy_family": _trim_text(open_strategy.get("strategy_family", ""), limit=80),
+        "open_strategy_reason": _trim_text(open_strategy.get("reason", ""), limit=180),
+        "open_strategy_switch_forced": bool(open_strategy.get("force_strategy_switch", False)),
+        "open_verification_status": _trim_text(open_verification.get("status", ""), limit=80),
+        "open_verification_note": _trim_text(open_verification.get("note", ""), limit=220),
+        "open_likely_opened_behind": bool(open_verification.get("likely_opened_behind", False)),
+        "open_reused_existing_window": bool(open_verification.get("matched_existing_window", False)),
+        "open_process_detected": bool(open_verification.get("process_detected", False)),
+        "open_backend": _trim_text(open_result.get("backend", ""), limit=40),
+        "open_backend_reason": _trim_text(open_result.get("reason", ""), limit=80),
         "stored_lesson": "",
     }
     problem["improvement_hint"] = build_improvement_hint(problem)

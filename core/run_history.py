@@ -289,6 +289,9 @@ def _evaluation_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "attempt_number": _safe_int(evaluation.get("attempt_number", 0)),
         "action_signature": _trim_text(evaluation.get("action_signature", ""), limit=220),
         "target_signature": _trim_text(evaluation.get("target_signature", ""), limit=220),
+        "strategy_family": _trim_text(evaluation.get("strategy_family", ""), limit=80),
+        "target_classification": _trim_text(evaluation.get("target_classification", ""), limit=80),
+        "verification_status": _trim_text(evaluation.get("verification_status", ""), limit=80),
         "retry": {
             "action": _trim_text(retry.get("action", ""), limit=40),
             "attempt_number": _safe_int(retry.get("attempt_number", 0)),
@@ -332,6 +335,9 @@ def _problem_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "stored_lesson": _trim_text(problem.get("stored_lesson", ""), limit=220),
         "action_signature": _trim_text(problem.get("action_signature", ""), limit=220),
         "target_signature": _trim_text(problem.get("target_signature", ""), limit=220),
+        "open_target_classification": _trim_text(problem.get("open_target_classification", ""), limit=80),
+        "open_strategy_family": _trim_text(problem.get("open_strategy_family", ""), limit=80),
+        "open_verification_status": _trim_text(problem.get("open_verification_status", ""), limit=80),
         "timestamp": _trim_text(problem.get("timestamp", ""), limit=40),
         "evidence_refs": [_trim_text(item, limit=80) for item in list(problem.get("evidence_refs", []))[:4] if _trim_text(item, limit=80)],
     }

@@ -7,6 +7,7 @@ from core.operator_intelligence import (
     apply_outcome_evaluation,
     capture_action_context,
     guard_repeated_failed_action,
+    guard_repeated_failed_open_family,
     refresh_operator_intelligence_context,
 )
 from core.safety import stop_requested
@@ -643,6 +644,25 @@ def _execute_desktop_tool_step(
 ):
     before_context = capture_action_context(task_state, tool_name, seed_args)
     args = tool_runtime.prepare_args(tool_name, seed_args, task_state, planning_goal=planner_goal)
+    if tool_name == "desktop_open_target":
+        open_guard = guard_repeated_failed_open_family(task_state, args)
+        if open_guard:
+            _emit_progress(
+                progress_callback,
+                "tool_step_attempted",
+                detail=f"Blocked repeated Windows open strategy family before execution: {tool_name}.",
+                tool_name=tool_name,
+            )
+            _record_tool_result(task_state, tool_name, args, open_guard, before_context=before_context)
+            _emit_progress(
+                progress_callback,
+                "tool_result_recorded",
+                detail=f"Recorded guarded result for bounded tool step: {tool_name}.",
+                tool_name=tool_name,
+                result_status="failed",
+            )
+            _persist_session_state(session_store, task_state)
+            return args, open_guard
     guarded_result = _maybe_guard_desktop_action(tool_runtime, task_state, planner_goal, tool_name, args)
     if guarded_result is not None:
         _emit_progress(
@@ -1986,6 +2006,7 @@ def _maybe_resume_desktop_checkpoint(llm, tool_runtime, task_state, planner_goal
         "desktop_press_key",
         "desktop_press_key_sequence",
         "desktop_type_text",
+        "desktop_open_target",
         "desktop_start_process",
         "desktop_stop_process",
         "desktop_run_command",
