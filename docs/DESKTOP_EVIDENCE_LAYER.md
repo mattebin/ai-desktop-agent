@@ -44,8 +44,9 @@ The scene interpretation layer now uses the same selected/checkpoint/recent evid
 
 - bounded window observation via the desktop window backend
 - bounded screenshot capture via the screenshot backend
-- optional read-only UI evidence via the UI evidence backend
+- optional read-only UI evidence via the UI evidence backend (enriched with per-control enabled/visible/rect/states metadata)
 - bounded title/process/class matching via the desktop matching subsystem
+- optional OCR text extraction from captured screenshots via winocr
 
 ## Evidence bundle shape
 
@@ -111,9 +112,24 @@ Current supported capture preference path:
 
 `mss` remains a valid supported backend. Optional desktop-duplication backends are helpers, not replacements for the evidence architecture.
 
+## OCR text extraction
+
+Screenshot captures can now include OCR-extracted text via the Windows Runtime `winocr` backend. This is supplementary evidence, not a primary automation driver.
+
+Current behavior:
+
+- when winocr is available, captured screenshots are passed through `recognize_pil()` to extract visible text
+- the extracted text is stored as `ocr_text` in the normalized screenshot observation
+- text is bounded to 4000 characters to prevent bloat
+- if winocr is unavailable, the field is empty and no error is raised
+
+## Visual stability via perceptual hashing
+
+Visual stability checks now use perceptual hashing (dHash via `imagehash`) instead of pixel-exact SHA1 comparison. This tolerates ClearType rendering differences, anti-aliasing variations, and minor compression artifacts that previously caused false instability reports.
+
 ## Current non-goals
 
-- no OCR-heavy interpretation
+- no OCR-heavy autonomous interpretation or OCR-first automation
 - no broad UI automation
 - no new desktop action capability
 - no broad desktop autonomy or navigation

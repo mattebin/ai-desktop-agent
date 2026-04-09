@@ -8,13 +8,21 @@ Current highest-priority work:
 2. improve final-answer quality and outcome consistency
 3. improve recommendation quality
 4. improve realistic scenario reliability
-5. strengthen bounded desktop evidence before widening desktop actions
+5. harden shell-lab classifier toward production integration
+
+Recent completions:
+
+- desktop evidence strengthened: OCR text extraction, perceptual hashing, enriched UI probes, hung detection
+- operator intelligence: problem recall, strategy exploration, uncertainty surfacing
+- adaptive recovery budgets per failure reason
+- post-action verification via independent Win32 checks
+- shell-lab classifier hardened with 133 adversarial tests and 4 bypass fixes
 
 ## Next
 
 Likely next passes:
 
-- stronger read-only desktop evidence layer on top of screenshots
+- shell-lab production integration: filesystem-level enforcement, network isolation, process escape detection
 - better UI grounding for desktop action proposals
 - richer realistic eval scenarios for mixed browser/desktop work
 - continued approval-threshold tuning

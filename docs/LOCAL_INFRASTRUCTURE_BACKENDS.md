@@ -64,17 +64,48 @@ Current non-goals:
 
 ### pywinauto
 
-Present only as a future-facing read-only UI evidence backend scaffold.
+Active as a read-only UI evidence backend with enriched per-control metadata.
 
 Current role:
 
 - optional read-only evidence probing boundary
 - normalized evidence result shape
+- per-control metadata: enabled state, visibility, bounding rect, UIA states
+- target window metadata (title, class name, rect, process info)
 
 Current non-goals:
 
 - no broad interaction engine
 - no unrestricted desktop automation
+
+### winocr
+
+Used for optional OCR text extraction from captured screenshots via the Windows Runtime text recognition API.
+
+Current role:
+
+- extract visible text from screenshot images
+- store extracted text as supplementary evidence in screenshot observations
+- bounded to 4000 characters per capture
+
+Current non-goals:
+
+- no OCR-first autonomous automation
+- no OCR-driven navigation or decision loops
+
+### ImageHash
+
+Used for perceptual visual stability checks via dHash (difference hash).
+
+Current role:
+
+- compare sequential screenshot frames for visual stability
+- tolerate ClearType, anti-aliasing, and compression differences
+- replace pixel-exact SHA1 comparisons that produced false instability
+
+Current non-goals:
+
+- no image-similarity search or indexing
 
 ## Desktop evidence layer
 
@@ -85,10 +116,11 @@ Current role:
 - combine active-window metadata, visible-window observations, screenshot metadata, and optional UI probes
 - retain bounded evidence artifacts and bundle metadata under `data/desktop_evidence/`
 - expose compact recent evidence references through the local API and operator state
+- include OCR-extracted text from screenshots as supplementary evidence when winocr is available
 
 Current non-goals:
 
-- no OCR-heavy interpretation
+- no OCR-driven autonomous interpretation
 - no model-facing planning changes
 - no new desktop action expansion
 

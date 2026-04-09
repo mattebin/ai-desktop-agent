@@ -54,15 +54,50 @@ Current non-goals:
 - `recovery_failed`
 - `recovery_skipped`
 
+## Adaptive recovery budget
+
+Recovery attempts are now bounded per-reason instead of using one global retry limit.
+
+Current per-reason budgets:
+
+- `target_minimized`: 1
+- `target_hidden`: 2
+- `foreground_not_confirmed`: 2
+- `target_mismatch`: 2
+- `target_loading`: 4
+- `target_not_ready`: 4
+- `visual_state_unstable`: 4
+
+This prevents wasting retries on conditions that rarely self-resolve (minimized windows) while allowing more patience for conditions that often do (loading screens, visual instability).
+
+## Hung process detection
+
+The recovery layer now detects windows that have stopped processing messages using the Win32 `IsHungAppWindow` API. When a target window's process has hung windows, this information is surfaced in the process context so the operator can distinguish between a slow window and a frozen application.
+
+## Post-action verification
+
+After any desktop mutating tool (click, type, focus) reports success, the loop now performs an independent Win32 `GetForegroundWindow` / `GetWindowTextW` check that bypasses all tool layers. This catches cases where a tool reports success but the foreground window changed unexpectedly, surfacing an `independent_verification_mismatch` classification.
+
+## Uncertainty surfacing
+
+The retry policy now distinguishes between `uncertain` outcomes and hard `failure` / `no_progress` outcomes:
+
+- `uncertain`: asks the user for guidance instead of retrying blindly
+- `failure` / `no_progress`: stops after budget exhaustion
+
+This prevents the operator from confidently retrying something it does not actually understand.
+
 ## Readiness and stability
 
 Readiness is currently bounded and local-only:
 
 - window metadata via PyWinCtl/native state
 - read-only UI probing via pywinauto
-- lightweight visual stability checks via mss sample comparison
+- lightweight visual stability checks via perceptual hashing (dHash) instead of pixel-exact comparison
 - minimized, hidden, or withdrawn-like targets can short-circuit to metadata-backed not-ready or missing states before deeper UIA probing
 - pywinauto control-tree probes are bounded lazily so they do not materialize an entire descendant tree before slicing
+
+Perceptual hashing (via `imagehash.dhash()`) tolerates ClearType, anti-aliasing, and compression differences that would cause pixel-exact SHA1 comparisons to report false instability.
 
 The system should prefer one bounded recovery pass and then a clear report over repeated blind retries.
 

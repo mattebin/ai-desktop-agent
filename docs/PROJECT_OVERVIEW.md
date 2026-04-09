@@ -88,9 +88,14 @@ Currently implemented:
 - list visible windows
 - get active window
 - focus a specific window
-- capture a bounded screenshot
+- capture a bounded screenshot with optional OCR text extraction
 - approval-gated single click
 - approval-gated bounded text entry
+- post-action verification via independent Win32 foreground check
+- hung process detection via `IsHungAppWindow`
+- adaptive recovery budgets per failure reason
+- perceptual hashing (dHash) for visual stability checks
+- enriched UI evidence with per-control metadata
 
 Not implemented:
 
@@ -99,6 +104,34 @@ Not implemented:
 - unrestricted keyboard/mouse control
 - autonomous desktop navigation loops
 - broad dangerous desktop autonomy
+
+### Operator intelligence
+
+The operator now includes intelligence features for learning from experience within a session:
+
+- **Problem recall**: scored lookup of previously encountered problems by tool, domain, goal word overlap, and occurrence count
+- **Strategy exploration inventory**: session-scoped registry tracking tried/failed/succeeded strategies per target signature, with `suggest_next()` to avoid repeating failed approaches
+- **Uncertainty surfacing**: uncertain outcomes ask the user for guidance instead of retrying blindly
+
+### Shell lab (experimental)
+
+An experimental bounded shell execution environment for giving the operator real command-line capability.
+
+Current status:
+
+- 3-tier command classifier (allow / approval_required / block) with regex-based pattern matching
+- 8 catastrophic categories: destructive filesystem, credential theft, security disabling, persistence, process control, resource destruction, encoded execution, nested shells
+- pipeline analysis checking both sides of pipes for dangerous tokens
+- 8.3 short path detection to prevent bypass via DOS names
+- workspace auditing with SHA256-based file snapshots before/after execution
+- bounded to a disposable workspace directory by default
+- 133 adversarial unit tests including 30 dedicated bypass-attempt tests
+
+Current non-goals:
+
+- not integrated into the main operator loop yet
+- no network access from shell commands
+- no filesystem-level enforcement (classifier only, no sandboxing yet)
 
 ## Behavior model
 

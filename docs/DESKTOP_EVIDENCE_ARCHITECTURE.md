@@ -95,14 +95,17 @@ Primary file:
 Responsibilities:
 
 - bounded pywinauto readiness checks
-- read-only UI/control-tree evidence
-- lightweight visual-stability checks
+- read-only UI/control-tree evidence with per-control metadata (enabled, visible, rect, states)
+- lightweight visual-stability checks via perceptual hashing (dHash)
+- optional OCR text extraction from screenshots via winocr
+- hung process detection via Win32 `IsHungAppWindow`
 
 Current guardrails:
 
 - deep pywinauto descendant walks are bounded lazily instead of materializing the full tree first
 - minimized, hidden, and withdrawn-like windows can short-circuit to metadata-backed readiness results instead of attempting deeper UIA probing first
 - `desktop_wait_for_window_ready` now returns early for non-waiting recovery states so recovery/finalization can take over instead of polling a state that already needs recovery
+- OCR is supplementary evidence, not a primary automation driver; missing winocr degrades gracefully
 
 ### 4. Evidence store and selection
 
@@ -377,7 +380,7 @@ They should not bypass the evidence store or invent a parallel desktop memory pa
 ## Current non-goals
 
 - no broad unrestricted desktop control
-- no broad OCR-first automation rewrite
+- no OCR-first autonomous automation (OCR is supplementary evidence only)
 - no broad framework migration
 - no raw screenshot streaming into the model
 - no parallel evidence source of truth

@@ -52,6 +52,14 @@ Desktop/UI shape:
 - runtime/process ownership and shutdown safety hardening
 - final-answer quality and recommendation-quality hardening
 - first bounded desktop-control slice integrated into the main operator stack
+- OCR text extraction from screenshots via winocr
+- perceptual hashing (dHash) for visual stability checks
+- enriched UI evidence with per-control metadata
+- adaptive recovery budget per failure reason
+- hung process detection via Win32 `IsHungAppWindow`
+- post-action verification via independent Win32 foreground check
+- operator intelligence: problem recall, strategy exploration inventory, uncertainty surfacing
+- shell-lab classifier hardened with 133 adversarial tests and workspace auditing
 
 ## Current bounded desktop-control scope
 
@@ -99,7 +107,7 @@ The main bottlenecks are now:
 - final-answer consistency across nuanced outcomes
 - recommendation quality
 - realistic scenario reliability
-- stronger desktop evidence before broader action expansion
+- shell-lab production readiness (needs filesystem enforcement, network isolation, process escape detection)
 
 ## Current priorities
 
@@ -108,7 +116,7 @@ Highest current priorities:
 1. improve operator usefulness and judgment quality
 2. improve recommendation and final-answer consistency
 3. improve realistic scenario performance
-4. strengthen bounded desktop evidence/observation
+4. harden shell-lab toward production integration
 5. preserve safety and controllability while adding capability
 
 ## Constraints to preserve
@@ -127,4 +135,4 @@ These should remain true unless there is a very strong reason otherwise:
 
 ## Recommended next direction
 
-The next strong direction is to improve bounded desktop evidence and UI grounding before broadening desktop actions further.
+The next strong direction is to harden the shell-lab classifier to production readiness (filesystem enforcement, network isolation, process escape detection) and integrate it into the main operator loop, giving the operator real bounded command-line capability.
