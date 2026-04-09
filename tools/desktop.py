@@ -24,6 +24,10 @@ from tools.desktop_backends import (  # noqa: F401
     probe_window_readiness,
     probe_visual_stability,
     probe_process_context,
+    open_path_with_association,
+    launch_unowned_process,
+    open_in_explorer,
+    open_url_with_shell,
 )
 
 from tools.desktop_windows import (  # noqa: F401

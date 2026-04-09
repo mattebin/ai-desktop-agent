@@ -3790,8 +3790,15 @@ stream_two_iter = stream_two.iter_events()
 replayed_event = {}
 replay_deadline = time.time() + 4.0
 while time.time() < replay_deadline:
-    payload = next(stream_two_iter)
-    if payload.get("event") == "session.message" and payload.get("data", {}).get("message", {}).get("content", "").strip() == long_final_reply:
+    try:
+        payload = next(stream_two_iter)
+    except StopIteration:
+        break
+    except Exception:
+        break
+    _evt = payload.get("event", "")
+    _cnt = payload.get("data", {}).get("message", {}).get("content", "")
+    if _evt == "session.message" and _cnt.strip() == long_final_reply:
         replayed_event = payload
         break
 if not replayed_event:

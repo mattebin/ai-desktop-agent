@@ -366,11 +366,37 @@ class LocalOperatorApiEventStream:
 
     def iter_events(self):
         self.open()
+        # Build a reliable line reader on top of the raw socket.
+        # HTTPResponse.readline() inherits IOBase.readline which calls
+        # read(1) in a tight loop — this stalls on long-lived SSE
+        # connections in CPython because HTTPResponse.read() re-enters
+        # the HTTP framing path on every single byte.  Reading directly
+        # from the underlying buffered socket (response.fp) avoids that.
+        _fp = getattr(self._response, "fp", None)
+        _leftover = b""
+
+        def _next_line() -> bytes:
+            """Return the next \\n-terminated line from the SSE stream."""
+            nonlocal _leftover
+            while True:
+                idx = _leftover.find(b"\n")
+                if idx >= 0:
+                    line, _leftover = _leftover[: idx + 1], _leftover[idx + 1 :]
+                    return line
+                try:
+                    chunk = _fp.read1(8192) if _fp is not None else self._response.read(8192)
+                except Exception:
+                    return b""
+                if not chunk:
+                    result = _leftover
+                    _leftover = b""
+                    return result
+
         event_name = "message"
         event_id = ""
         data_lines = []
         while not self._closed and self._response is not None:
-            raw_line = self._response.readline()
+            raw_line = _next_line()
             if not raw_line:
                 break
             line = raw_line.decode("utf-8").rstrip("\r\n")

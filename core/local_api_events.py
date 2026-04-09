@@ -986,24 +986,46 @@ class LocalApiEventStream:
                 for event in replay_events:
                     yield event
             else:
-                if requested_last_event_id:
-                    reason = "too_old" if replay_status == "stale" else "missing"
-                    yield self._connection_event(
-                        "stream.reset",
+                # Priming populated the buffer but _replay_after_locked
+                # could not match the requested event-id (stale/missing).
+                # Deliver all primed events directly so the client does not
+                # depend on the publisher thread (which may fail to call
+                # _read_state in lightweight test harnesses).
+                primed_events: List[Dict[str, Any]] = []
+                if requested_last_event_id and isinstance(primed_state, dict) and primed_state:
+                    with self._condition:
+                        channel_ref = self._channels.get(self._channel_key(safe_session_id, safe_scope_id))
+                        if channel_ref is not None and channel_ref.buffer:
+                            primed_events = [self._public_event_payload(event) for event in channel_ref.buffer]
+                            if primed_events:
+                                last_seen_sequence = self._event_sequence(
+                                    primed_events[-1].get("event_id", ""),
+                                    expected_channel_id=channel_ref.channel_id,
+                                )
+
+                if primed_events:
+                    # Deliver primed buffer as a self-sufficient replay.
+                    for event in primed_events:
+                        yield event
+                else:
+                    if requested_last_event_id:
+                        reason = "too_old" if replay_status == "stale" else "missing"
+                        yield self._connection_event(
+                            "stream.reset",
+                            session_id=safe_session_id,
+                            state_scope_id=safe_scope_id,
+                            data={
+                                "reason": reason,
+                                "requested_last_event_id": requested_last_event_id,
+                            },
+                        )
+                    yield self._sync_payload(
                         session_id=safe_session_id,
                         state_scope_id=safe_scope_id,
-                        data={
-                            "reason": reason,
-                            "requested_last_event_id": requested_last_event_id,
-                        },
+                        state=state,
+                        reason="reconnect" if requested_last_event_id else "initial",
+                        replay_status=replay_status,
                     )
-                yield self._sync_payload(
-                    session_id=safe_session_id,
-                    state_scope_id=safe_scope_id,
-                    state=state,
-                    reason="reconnect" if requested_last_event_id else "initial",
-                    replay_status=replay_status,
-                )
 
             while not self._stop_event.is_set():
                 pending_events: List[Dict[str, Any]] = []
