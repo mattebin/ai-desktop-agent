@@ -15,7 +15,6 @@ def main():
     parser.add_argument("--api", action="store_true", help="Launch the local API server.")
     parser.add_argument("--api-host", default="", help="Override the local API host.")
     parser.add_argument("--api-port", type=int, default=-1, help="Override the local API port. Use 0 for an ephemeral local port.")
-    parser.add_argument("--ui", action="store_true", help="Launch the local control UI.")
     parser.add_argument("--goal", default="", help="Run a goal directly without prompting.")
     args = parser.parse_args()
     profiler.mark("argv_parsed")
@@ -33,14 +32,6 @@ def main():
 
     start_emergency_stop_listener()
     profiler.mark("safety_ready")
-
-    if args.ui:
-        from control_ui import launch_control_ui
-
-        profiler.mark("control_ui_boot")
-        profiler.emit()
-        launch_control_ui(settings=settings)
-        return
 
     agent = Agent()
     profiler.mark("agent_ready")
