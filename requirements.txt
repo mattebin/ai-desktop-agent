@@ -12,3 +12,5 @@ mss==10.1.0
 pywinauto==0.6.9
 psutil==7.2.2
 RapidFuzz==3.14.3
+ImageHash==4.3.2
+Pillow==11.2.1

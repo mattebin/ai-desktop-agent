@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 from core.capability_profiles import normalize_execution_profile
 from core.lab_shell import lab_status_snapshot
-from core.problem_records import build_problem_record
+from core.problem_records import ProblemRecordStore, build_problem_record
 from core.windows_opening import choose_windows_open_strategy
 
 
@@ -778,6 +778,20 @@ def _classify_desktop(
             "validator_family": validator_family,
         }
 
+    post_verification = result.get("post_action_verification", {})
+    if isinstance(post_verification, dict) and post_verification.get("verified") and not post_verification.get("consistent_with_tool", True):
+        return {
+            "status": "uncertain",
+            "reason": "independent_verification_mismatch",
+            "summary": f"The tool reported success, but independent verification shows the foreground window is '{_trim_text(post_verification.get('foreground_title', ''), limit=120)}', which may not match the expected target.",
+            "progress_made": False,
+            "expected_change": target_title or "Visible desktop change.",
+            "observed_change": _trim_text(post_verification.get("foreground_title", ""), limit=120),
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
+        }
+
     verified = _classify_desktop_with_verification(tool_name, args, result)
     if verified:
         return verified
@@ -1140,7 +1154,18 @@ def _build_retry_policy(
             action = "stop"
             stop_run = True
             explanation = "Blocked outcomes should stop rather than retrying."
-    elif status in {"failure", "uncertain", "no_progress"}:
+    elif status == "uncertain":
+        if attempts >= max_attempts:
+            action = "ask_user"
+            stop_run = True
+            explanation = "The outcome is uncertain — I could not verify whether the action actually worked. Stopping to ask for clarification rather than guessing."
+        elif domain == "desktop":
+            action = "recovery_first"
+            explanation = "The outcome is uncertain. Recover or re-observe the desktop state to confirm what happened."
+        else:
+            action = "retry_with_variation"
+            explanation = "The outcome is uncertain. Retry with a verification step or a different approach."
+    elif status in {"failure", "no_progress"}:
         if attempts >= max_attempts:
             action = "stop"
             stop_run = True
@@ -1533,6 +1558,15 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
     last_problem = getattr(task_state, "_last_problem_record", {})
     if not isinstance(last_problem, dict):
         last_problem = {}
+    known_problems: List[Dict[str, Any]] = []
+    problem_store = getattr(task_state, "_problem_record_store", None)
+    if isinstance(problem_store, ProblemRecordStore):
+        known_problems = problem_store.recall_relevant(
+            goal=str(getattr(task_state, "goal", "")).strip(),
+            tool=str(last.get("tool", "")).strip(),
+            domain=str(last.get("domain", "")).strip(),
+            limit=4,
+        )
     context = {
         "last_outcome": last,
         "recent_outcomes": recent,
@@ -1545,6 +1579,7 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
         "execution_memory": execution_memory,
         "environment": environment,
         "last_problem": last_problem,
+        "known_problems": known_problems,
     }
     setattr(task_state, "_operator_intelligence_context", context)
     return context
