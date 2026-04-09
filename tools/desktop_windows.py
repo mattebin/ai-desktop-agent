@@ -24,9 +24,6 @@ from tools.desktop_backends import (
     create_ui_evidence_backend,
     create_window_backend,
     describe_backends,
-    probe_process_context,
-    probe_visual_stability,
-    probe_window_readiness,
 )
 from tools.desktop_constants import (
     DESKTOP_DEFAULT_CAPTURE_MAX_HEIGHT,
@@ -48,13 +45,16 @@ from tools.desktop_constants import (
 )
 
 
-_DESKTOP_OBSERVATIONS: Dict[str, Dict[str, Any]] = {}
-_OBSERVATION_LOCK = threading.RLock()
-_OBSERVATION_COUNTER = 0
 _BACKEND_LOCK = threading.RLock()
 _WINDOW_BACKEND = None
 _SCREENSHOT_BACKEND = None
 _UI_EVIDENCE_BACKEND = None
+
+
+def _desktop():
+    """Lazy accessor — resolves names through the desktop facade module."""
+    import tools.desktop as _mod
+    return _mod
 
 
 def _dpi_awareness_pointer(value: int) -> ctypes.c_void_p:
@@ -339,28 +339,23 @@ def _active_window_info_native() -> Dict[str, Any]:
 
 
 def _get_window_backend():
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _capture_bitmap_native, _focus_window_handle_native
-
+    _mod = _desktop()
     global _WINDOW_BACKEND
     with _BACKEND_LOCK:
         if _WINDOW_BACKEND is None:
             _WINDOW_BACKEND = create_window_backend(
-                list_delegate=_enum_windows_native,
-                active_delegate=_active_window_info_native,
-                focus_delegate=_focus_window_handle_native,
+                list_delegate=_mod._enum_windows_native,
+                active_delegate=_mod._active_window_info_native,
+                focus_delegate=_mod._focus_window_handle_native,
             )
         return _WINDOW_BACKEND
 
 
 def _get_screenshot_backend():
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _capture_bitmap_native
-
     global _SCREENSHOT_BACKEND
     with _BACKEND_LOCK:
         if _SCREENSHOT_BACKEND is None:
-            _SCREENSHOT_BACKEND = create_screenshot_backend(capture_delegate=_capture_bitmap_native)
+            _SCREENSHOT_BACKEND = create_screenshot_backend(capture_delegate=_desktop()._capture_bitmap_native)
         return _SCREENSHOT_BACKEND
 
 
@@ -373,15 +368,13 @@ def _get_ui_evidence_backend():
 
 
 def get_desktop_backend_status() -> Dict[str, Any]:
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _display_metadata
-
+    _mod = _desktop()
     status = describe_backends(
-        window_backend=_get_window_backend(),
-        screenshot_backend=_get_screenshot_backend(),
-        ui_evidence_backend=_get_ui_evidence_backend(),
+        window_backend=_mod._get_window_backend(),
+        screenshot_backend=_mod._get_screenshot_backend(),
+        ui_evidence_backend=_mod._get_ui_evidence_backend(),
     )
-    status["display"] = _display_metadata()
+    status["display"] = _mod._display_metadata()
     status["mapping"] = {
         "dpi_awareness": _ensure_process_dpi_awareness(),
         "coordinate_space": "physical_pixels",
@@ -399,7 +392,7 @@ def get_desktop_backend_status() -> Dict[str, Any]:
 
 
 def probe_ui_evidence(*, target: str = "active_window", limit: int = 8) -> Dict[str, Any]:
-    return _get_ui_evidence_backend().probe(target=target, limit=limit)
+    return _desktop()._get_ui_evidence_backend().probe(target=target, limit=limit)
 
 
 def _window_probe_target(window: Dict[str, Any], fallback: str = "active_window") -> str:
@@ -483,7 +476,7 @@ def _readiness_probe_for_window(window: Dict[str, Any], *, limit: int = 8) -> Di
     metadata_readiness = _metadata_readiness_for_window(window)
     if metadata_readiness:
         return metadata_readiness
-    result = probe_window_readiness(
+    result = _desktop().probe_window_readiness(
         target=_window_probe_target(window),
         window_id=str(window.get("window_id", "")).strip(),
         limit=max(1, min(12, int(limit or 8))),
@@ -499,7 +492,7 @@ def _visual_stability_for_window(window: Dict[str, Any], *, samples: int = 3, in
     height = max(0, int(rect.get("height", 0) or 0))
     if width <= 0 or height <= 0:
         return {}
-    result = probe_visual_stability(
+    result = _desktop().probe_visual_stability(
         x=int(rect.get("x", 0) or 0),
         y=int(rect.get("y", 0) or 0),
         width=min(width, DESKTOP_DEFAULT_CAPTURE_MAX_WIDTH),
@@ -513,7 +506,7 @@ def _visual_stability_for_window(window: Dict[str, Any], *, samples: int = 3, in
 def _process_context_for_window(window: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(window, dict):
         return {}
-    result = probe_process_context(
+    result = _desktop().probe_process_context(
         pid=_coerce_int(window.get("pid", 0), 0, minimum=0, maximum=10_000_000),
         process_name=str(window.get("process_name", "")).strip(),
     )
@@ -528,13 +521,11 @@ def _inspect_window_state_internal(
     include_visual_stability: bool = True,
     readiness_mode: str = "full",
 ) -> Dict[str, Any]:
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _register_observation
-
+    _mod = _desktop()
     limit = max(8, _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30))
-    target_window, candidates, lookup_error, match_info = _find_window(args)
-    visible_windows = _enum_windows(limit=min(limit, DESKTOP_DEFAULT_WINDOW_LIMIT))
-    active_window = _active_window_info()
+    target_window, candidates, lookup_error, match_info = _mod._find_window(args)
+    visible_windows = _mod._enum_windows(limit=min(limit, DESKTOP_DEFAULT_WINDOW_LIMIT))
+    active_window = _mod._active_window_info()
     probe_window = target_window or active_window
     normalized_readiness_mode = str(readiness_mode or "full").strip().lower()
     if normalized_readiness_mode == "metadata_only":
@@ -555,7 +546,7 @@ def _inspect_window_state_internal(
     )
     fallback_process_context = match_info.get("process_context", {}) if isinstance(match_info.get("process_context", {}), dict) else {}
     process_context = fallback_process_context if fallback_process_context and not target_window else _process_context_for_window(target_window or active_window)
-    observation = _register_observation(active_window=active_window, windows=visible_windows)
+    observation = _mod._register_observation(active_window=active_window, windows=visible_windows)
     errors = [lookup_error] if lookup_error else []
     evidence_bundle, evidence_ref = _record_desktop_evidence(
         source_action=source_action,
@@ -674,18 +665,16 @@ def _record_desktop_evidence(
     errors: List[str] | None = None,
     bundle_metadata: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _virtual_screen_rect
-
+    _mod = _desktop()
     ui_result: Dict[str, Any] = {}
     collected_errors = list(errors or [])
     if include_ui_evidence:
         probe_target = str(active_window.get("title", "") or "active_window").strip() or "active_window"
-        ui_result = probe_ui_evidence(target=probe_target, limit=ui_limit)
+        ui_result = _mod.probe_ui_evidence(target=probe_target, limit=ui_limit)
         if not ui_result.get("ok", False) and ui_result.get("error"):
             collected_errors.append(str(ui_result.get("error", "")).strip())
 
-    screen = collect_display_metadata(_virtual_screen_rect())
+    screen = collect_display_metadata(_mod._virtual_screen_rect())
     bundle = build_desktop_evidence_bundle(
         source_action=source_action,
         active_window=active_window,
@@ -725,11 +714,9 @@ def _enum_windows(
     include_hidden: bool = False,
     limit: int = DESKTOP_DEFAULT_WINDOW_LIMIT,
 ) -> List[Dict[str, Any]]:
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _display_metadata, _enrich_window_monitor_metadata
-
-    display = _display_metadata()
-    result = _get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
+    _mod = _desktop()
+    display = _mod._display_metadata()
+    result = _mod._get_window_backend().list_windows(include_minimized=include_minimized, limit=limit)
     data = result.get("data", {}) if isinstance(result, dict) else {}
     windows = data.get("windows", []) if isinstance(data, dict) else []
     filtered: List[Dict[str, Any]] = []
@@ -741,10 +728,10 @@ def _enum_windows(
                 continue
             if not include_hidden and bool(item.get("is_cloaked", False)):
                 continue
-            filtered.append(_enrich_window_monitor_metadata(item, display=display))
+            filtered.append(_mod._enrich_window_monitor_metadata(item, display=display))
 
     if include_hidden:
-        native_windows = _enum_windows_native(
+        native_windows = _mod._enum_windows_native(
             include_minimized=include_minimized,
             include_hidden=True,
             limit=max(limit, len(filtered) + 6),
@@ -760,7 +747,7 @@ def _enum_windows(
                 if dedupe_key in seen_ids:
                     continue
                 seen_ids.add(dedupe_key)
-                merged.append(_enrich_window_monitor_metadata(item, display=display))
+                merged.append(_mod._enrich_window_monitor_metadata(item, display=display))
         merged.sort(
             key=lambda item: (
                 not bool(item.get("is_active", False)),
@@ -773,7 +760,7 @@ def _enum_windows(
 
     if filtered:
         return filtered[:limit]
-    return _enum_windows_native(include_minimized=include_minimized, include_hidden=False, limit=limit)
+    return _mod._enum_windows_native(include_minimized=include_minimized, include_hidden=False, limit=limit)
 
 
 def _find_window_by_exact_title_native(title: str) -> Dict[str, Any]:
@@ -788,16 +775,14 @@ def _find_window_by_exact_title_native(title: str) -> Dict[str, Any]:
 
 
 def _active_window_info() -> Dict[str, Any]:
-    # Import here to avoid circular dependency with desktop.py
-    from tools.desktop import _display_metadata, _enrich_window_monitor_metadata
-
-    display = _display_metadata()
-    result = _get_window_backend().get_active_window()
+    _mod = _desktop()
+    display = _mod._display_metadata()
+    result = _mod._get_window_backend().get_active_window()
     data = result.get("data", {}) if isinstance(result, dict) else {}
     active_window = data.get("active_window", {}) if isinstance(data, dict) else {}
     if not isinstance(active_window, dict):
         return {}
-    return _enrich_window_monitor_metadata(active_window, display=display)
+    return _mod._enrich_window_monitor_metadata(active_window, display=display)
 
 
 def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str, Dict[str, Any]]:
@@ -807,7 +792,8 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
     requested_class_name = str(args.get("class_name", "") or args.get("expected_class_name", "")).strip()
     exact = _coerce_bool(args.get("exact", False), False)
     requested_limit = _coerce_int(args.get("limit", 16), 16, minimum=4, maximum=30)
-    candidates = _enum_windows(
+    _mod = _desktop()
+    candidates = _mod._enum_windows(
         include_minimized=True,
         include_hidden=True,
         limit=max(12, min(64, requested_limit * 3)),
@@ -826,7 +812,7 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
         return {}, candidates, "Provide a window title or window_id.", {"reason": "invalid_input", "candidate_preview": []}
 
     if exact:
-        direct_match = _find_window_by_exact_title_native(requested_title)
+        direct_match = _mod._find_window_by_exact_title_native(requested_title)
         direct_id = str(direct_match.get("window_id", "")).strip()
         if direct_id and not any(str(item.get("window_id", "")).strip() == direct_id for item in candidates):
             candidates = [direct_match, *candidates]
@@ -844,7 +830,7 @@ def _find_window(args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, A
 
     process_context: Dict[str, Any] = {}
     if requested_process_name:
-        process_result = probe_process_context(process_name=requested_process_name)
+        process_result = _mod.probe_process_context(process_name=requested_process_name)
         process_context = process_result.get("data", {}) if isinstance(process_result.get("data", {}), dict) else {}
         selection["process_context"] = process_context
 

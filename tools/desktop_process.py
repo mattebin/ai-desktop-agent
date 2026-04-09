@@ -16,7 +16,6 @@ from tools.desktop_backends import (
     open_in_explorer,
     open_path_with_association,
     open_url_with_shell,
-    probe_process_context,
     run_bounded_command,
     start_owned_process,
     stop_owned_process,
@@ -152,13 +151,14 @@ def _best_open_window_candidate(windows: List[Dict[str, Any]], target_info: Dict
 
 
 def _process_hint_snapshot(target_info: Dict[str, Any], *, launched_pid: int = 0) -> Dict[str, Any]:
+    _mod = _desktop()
     if launched_pid > 0:
-        result = probe_process_context(pid=launched_pid)
+        result = _mod.probe_process_context(pid=launched_pid)
         data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
         if data:
             return data
     for process_name in list(target_info.get("viewer_process_hints", []))[:3]:
-        result = probe_process_context(process_name=str(process_name).strip())
+        result = _mod.probe_process_context(process_name=str(process_name).strip())
         data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
         if data.get("running", False):
             return data

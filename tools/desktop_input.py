@@ -373,7 +373,8 @@ def _capture_bitmap_native(path: Path, *, x: int, y: int, width: int, height: in
 
 
 def _focus_window_handle(hwnd: int) -> Tuple[bool, str]:
-    ok, error = _focus_window_handle_native(hwnd)
+    _mod = _desktop()
+    ok, error = _mod._focus_window_handle_native(hwnd)
     if ok:
         return True, ""
     return False, str(error or "Could not focus the requested window.").strip()

@@ -10,7 +10,6 @@ from core.backend_schemas import (
 )
 from core.desktop_evidence import collect_display_metadata
 from core.desktop_mapping import monitor_for_rect
-from tools.desktop_backends import probe_process_context
 from tools.desktop_constants import (
     DESKTOP_DEFAULT_MAX_OBSERVATION_AGE_SECONDS,
     DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS,
@@ -28,6 +27,12 @@ from tools.desktop_constants import (
     _OBSERVATION_LOCK,
     user32,
 )
+
+
+def _desktop():
+    """Lazy accessor — resolves names through the desktop facade module."""
+    import tools.desktop as _mod
+    return _mod
 
 
 def _virtual_screen_rect() -> Dict[str, int]:
@@ -425,13 +430,14 @@ def _best_desktop_window_candidate(
 
 
 def _probe_expected_process(expected_process_names: List[str], *, launched_pid: int = 0) -> Dict[str, Any]:
+    _mod = _desktop()
     if launched_pid > 0:
-        result = probe_process_context(pid=launched_pid)
+        result = _mod.probe_process_context(pid=launched_pid)
         data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
         if data:
             return data
     for process_name in _normalize_expected_process_names(expected_process_names):
-        result = probe_process_context(process_name=process_name)
+        result = _mod.probe_process_context(process_name=process_name)
         data = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
         if data.get("running", False):
             return data
