@@ -72,6 +72,12 @@ except Exception:
     imagehash = None  # type: ignore[assignment]
     _PILImage = None  # type: ignore[assignment]
 
+try:
+    import asyncio
+    import winocr as _winocr
+except Exception:
+    _winocr = None  # type: ignore[assignment]
+
 
 
 WindowListDelegate = Callable[..., List[Dict[str, Any]]]
@@ -128,6 +134,25 @@ def _normalize_path_text(value: Any) -> str:
         return str(Path(text).resolve())
     except Exception:
         return text
+
+
+def extract_text_from_image(path: str | Path, *, lang: str = "en", limit: int = 4000) -> str:
+    """Run Windows OCR on an image file and return the extracted text."""
+    if _winocr is None or _PILImage is None:
+        return ""
+    try:
+        img = _PILImage.open(str(path))
+
+        async def _ocr():
+            return await _winocr.recognize_pil(img, lang=lang)
+
+        result = asyncio.run(_ocr())
+        text = str(getattr(result, "text", "") or "").strip()
+        if len(text) > limit:
+            return text[:limit]
+        return text
+    except Exception:
+        return ""
 
 
 def _bounded_descendants(window: Any, *, limit: int) -> List[Any]:
@@ -1353,12 +1378,14 @@ class NativeScreenshotBackend:
 
     def capture(self, path: Path, *, x: int, y: int, width: int, height: int, scope: str, active_window_title: str = "") -> Dict[str, Any]:
         ok, error = self._capture_delegate(path, x=x, y=y, width=width, height=height)
+        ocr_text = extract_text_from_image(path) if ok else ""
         observation = normalize_screenshot_observation(
             backend=self.name,
             path=str(path) if ok else "",
             scope=scope,
             bounds={"x": x, "y": y, "width": width, "height": height},
             active_window_title=active_window_title,
+            ocr_text=ocr_text,
             reason="captured" if ok else "error",
         )
         return result_envelope(
@@ -1399,12 +1426,14 @@ class MssScreenshotBackend(NativeScreenshotBackend):
             with mss.mss() as capture:
                 shot = capture.grab({"left": x, "top": y, "width": width, "height": height})
                 mss_tools.to_png(shot.rgb, shot.size, output=str(path))
+            ocr_text = extract_text_from_image(path)
             observation = normalize_screenshot_observation(
                 backend=self.name,
                 path=str(path),
                 scope=scope,
                 bounds={"x": x, "y": y, "width": width, "height": height},
                 active_window_title=active_window_title,
+                ocr_text=ocr_text,
                 reason="captured",
                 metadata={"format": "png"},
             )
@@ -1476,12 +1505,14 @@ class DesktopDuplicationScreenshotBackend(NativeScreenshotBackend):
             rgb_bytes, frame_width, frame_height = _frame_to_rgb_bytes(frame, backend_name=self.name)
             path.parent.mkdir(parents=True, exist_ok=True)
             mss_tools.to_png(rgb_bytes, (frame_width, frame_height), output=str(path))
+            ocr_text = extract_text_from_image(path)
             observation = normalize_screenshot_observation(
                 backend=self.name,
                 path=str(path),
                 scope=scope,
                 bounds={"x": x, "y": y, "width": frame_width, "height": frame_height},
                 active_window_title=active_window_title,
+                ocr_text=ocr_text,
                 reason="captured",
                 metadata={"format": "png", "plugin": self.name},
             )

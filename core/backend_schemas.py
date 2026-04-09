@@ -329,11 +329,12 @@ def normalize_screenshot_observation(
     scope: str,
     bounds: Dict[str, Any],
     active_window_title: str = "",
+    ocr_text: str = "",
     reason: str = "captured",
     metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     rect = bounds if isinstance(bounds, dict) else {}
-    return {
+    result: Dict[str, Any] = {
         "path": _trim_text(path, limit=320),
         "scope": _trim_text(scope, limit=60),
         "bounds": {
@@ -348,6 +349,10 @@ def normalize_screenshot_observation(
         "timestamp": _iso_timestamp(),
         "metadata": _sanitize_metadata(metadata or {}),
     }
+    trimmed_ocr = _trim_text(ocr_text, limit=4000)
+    if trimmed_ocr:
+        result["ocr_text"] = trimmed_ocr
+    return result
 
 
 def normalize_ui_evidence_observation(
