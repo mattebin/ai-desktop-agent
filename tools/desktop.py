@@ -6,8 +6,26 @@ from __future__ import annotations
 
 # ── constants, ctypes structures, Win32 handles, shared state ────────
 from tools.desktop_constants import *  # noqa: F401,F403
+from tools.desktop_constants import (  # noqa: F401  — underscore names excluded from *
+    _DPI_AWARENESS_LOCK,
+    _DPI_AWARENESS_STATE,
+    _BACKEND_LOCK,
+    _WINDOW_BACKEND,
+    _SCREENSHOT_BACKEND,
+    _UI_EVIDENCE_BACKEND,
+    _DESKTOP_OBSERVATIONS,
+    _OBSERVATION_LOCK,
+    _OBSERVATION_COUNTER,
+    _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+)
 
 # ── window enumeration, info, find, focus, backend access ────────────
+from tools.desktop_backends import (  # noqa: F401
+    probe_window_readiness,
+    probe_visual_stability,
+    probe_process_context,
+)
+
 from tools.desktop_windows import (  # noqa: F401
     _dpi_awareness_pointer,
     _ensure_process_dpi_awareness,
