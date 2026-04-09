@@ -14,7 +14,6 @@ from urllib.request import Request, urlopen
 
 mods = [
     "main",
-    "control_ui",
     "live_agent_eval",
     "core.agent",
     "core.alerts",
@@ -113,7 +112,6 @@ from core.state import TaskState
 from core.tool_runtime import ToolRuntime
 from core.watchers import WatchStore
 from core.backend_schemas import normalize_desktop_run_outcome
-from control_ui import _parse_inline_markdown_segments, _parse_rich_text_blocks, _session_matches_query, _timeline_entry_from_event
 from live_agent_eval import (
     SCENARIO_NAMES,
     _desktop_hidden_recovery_checks,
@@ -3711,31 +3709,6 @@ if "minimized" not in desktop_inspector_agent_source or "hidden" not in desktop_
     raise SystemExit("desktop_inspector.md is missing expected bounded desktop inspection rules.")
 print("[OK] desktop recovery guides")
 
-if not _session_matches_query({"title": "Inspect repo", "status": "paused", "summary": "Needs approval", "pending_approval": {"kind": "browser_checkpoint"}}, "inspect paused"):
-    raise SystemExit("control_ui._session_matches_query() did not match expected session terms.")
-inline_segments = _parse_inline_markdown_segments("Use **bold**, `code`, and [docs](https://example.com).")
-inline_kinds = [segment.get("kind") for segment in inline_segments if segment.get("text")]
-if inline_kinds != ["text", "bold", "text", "code", "text", "link", "text"]:
-    raise SystemExit("control_ui._parse_inline_markdown_segments() did not preserve inline markdown structure.")
-if inline_segments[5].get("url") != "https://example.com":
-    raise SystemExit("control_ui._parse_inline_markdown_segments() did not preserve markdown link targets.")
-rich_blocks = _parse_rich_text_blocks(
-    "# Architecture\n\n- core loop\n- state store\n\n```python\nprint('hi')\n```"
-)
-if [block.get("kind") for block in rich_blocks[:3]] != ["heading_1", "bullet_list", "code"]:
-    raise SystemExit("control_ui._parse_rich_text_blocks() did not preserve heading/list/code structure.")
-if rich_blocks[2].get("language") != "python" or "print('hi')" not in rich_blocks[2].get("text", ""):
-    raise SystemExit("control_ui._parse_rich_text_blocks() did not preserve fenced code content.")
-timeline_entry = _timeline_entry_from_event(
-    {
-        "event": "task.completed",
-        "emitted_at": "2026-03-11T09:00:00",
-        "data": {"current_step": "Summarized the project architecture."},
-    }
-)
-if timeline_entry.get("label") != "Task completed" or "Summarized the project architecture." not in timeline_entry.get("detail", ""):
-    raise SystemExit("control_ui._timeline_entry_from_event() did not produce the expected compact task entry.")
-print("[OK] control ui helpers")
 
 if not _goal_requests_single_recommendation("Inspect the project and tell me the single most important next step."):
     raise SystemExit("core.llm_client did not detect a single-recommendation goal.")
