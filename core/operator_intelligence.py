@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 from core.capability_profiles import normalize_execution_profile
 from core.lab_shell import lab_status_snapshot
 from core.problem_records import ProblemRecordStore, build_problem_record
-from core.windows_opening import choose_windows_open_strategy
+from core.windows_opening import StrategyExplorationInventory, choose_windows_open_strategy
 
 
 DEFAULT_OPERATOR_MEMORY_PATH = Path(__file__).resolve().parents[1] / "data" / "operator_memory.json"
@@ -1602,6 +1602,11 @@ def refresh_operator_intelligence_context(task_state) -> Dict[str, Any]:
         "last_problem": last_problem,
         "known_problems": known_problems,
     }
+    inventory = getattr(task_state, "_strategy_inventory", None)
+    if isinstance(inventory, StrategyExplorationInventory):
+        last_target = str(last.get("target_signature", "")).strip()
+        if last_target:
+            context["strategy_exploration"] = inventory.summary(last_target)
     setattr(task_state, "_operator_intelligence_context", context)
     return context
 
@@ -1618,6 +1623,15 @@ def apply_outcome_evaluation(
         return {}
     evaluation = evaluate_action_outcome(task_state, tool_name, args, result, before_context=before_context)
     result["evaluation"] = evaluation
+    strategy_family = str(evaluation.get("strategy_family", "") or "").strip()
+    target_sig = str(evaluation.get("target_signature", "") or "").strip()
+    eval_status = str(evaluation.get("status", "") or "").strip()
+    if strategy_family and target_sig and eval_status:
+        inventory = getattr(task_state, "_strategy_inventory", None)
+        if not isinstance(inventory, StrategyExplorationInventory):
+            inventory = StrategyExplorationInventory()
+            setattr(task_state, "_strategy_inventory", inventory)
+        inventory.record_attempt(target_sig, strategy_family, eval_status)
     store = getattr(task_state, "_operator_memory_store", None)
     alternate_strategy_attempted = _alternate_strategy_attempted(task_state, evaluation)
     problem = build_problem_record(

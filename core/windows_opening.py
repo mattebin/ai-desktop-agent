@@ -435,3 +435,55 @@ def choose_windows_open_strategy(
         "preferred_method": normalized_preference,
         "force_strategy_switch": bool(force_strategy_switch),
     }
+
+
+class StrategyExplorationInventory:
+    """Session-scoped registry tracking which strategies have been tried per target."""
+
+    def __init__(self) -> None:
+        self._attempts: Dict[str, Dict[str, str]] = {}  # target → {family → outcome}
+
+    def record_attempt(self, target_signature: str, strategy_family: str, outcome: str) -> None:
+        key = _trim_text(target_signature, limit=220)
+        family = _trim_text(strategy_family, limit=60)
+        if not key or not family:
+            return
+        bucket = self._attempts.setdefault(key, {})
+        bucket[family] = _trim_text(outcome, limit=40)
+
+    def tried_families(self, target_signature: str) -> set[str]:
+        key = _trim_text(target_signature, limit=220)
+        return set(self._attempts.get(key, {}).keys())
+
+    def failed_families(self, target_signature: str) -> set[str]:
+        key = _trim_text(target_signature, limit=220)
+        bucket = self._attempts.get(key, {})
+        return {f for f, o in bucket.items() if o in {"failure", "no_progress", "blocked", "uncertain"}}
+
+    def succeeded_families(self, target_signature: str) -> set[str]:
+        key = _trim_text(target_signature, limit=220)
+        bucket = self._attempts.get(key, {})
+        return {f for f, o in bucket.items() if o == "success"}
+
+    def suggest_next(self, target_signature: str, candidate_order: Iterable[str]) -> str:
+        """Return the first candidate family not yet failed for this target."""
+        failed = self.failed_families(target_signature)
+        succeeded = self.succeeded_families(target_signature)
+        for family in candidate_order:
+            if family in failed:
+                continue
+            if family in succeeded:
+                return family
+            return family
+        return ""
+
+    def summary(self, target_signature: str) -> Dict[str, Any]:
+        key = _trim_text(target_signature, limit=220)
+        bucket = self._attempts.get(key, {})
+        return {
+            "target": key,
+            "tried": sorted(bucket.keys()),
+            "failed": sorted(f for f, o in bucket.items() if o in {"failure", "no_progress", "blocked", "uncertain"}),
+            "succeeded": sorted(f for f, o in bucket.items() if o == "success"),
+            "remaining": sorted(VALID_STRATEGY_FAMILIES - set(bucket.keys())),
+        }
