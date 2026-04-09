@@ -117,6 +117,36 @@ _DESKTOP_ACTION_PACING_SECONDS = 0.05
 _DESKTOP_ACTION_PACING_WINDOW_SECONDS = 0.35
 FINALIZE_MESSAGE_TIMEOUT_SECONDS = 30
 
+try:
+    import ctypes
+    import ctypes.wintypes
+    _GetForegroundWindow = ctypes.windll.user32.GetForegroundWindow  # type: ignore[attr-defined]
+    _GetForegroundWindow.restype = ctypes.wintypes.HWND
+    _GetWindowTextW = ctypes.windll.user32.GetWindowTextW  # type: ignore[attr-defined]
+    _GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int]
+except Exception:
+    _GetForegroundWindow = None
+    _GetWindowTextW = None
+
+
+def _desktop_post_action_verification(before_title: str = "") -> dict:
+    """Independent foreground-window check via Win32, bypassing all tool layers."""
+    if _GetForegroundWindow is None or _GetWindowTextW is None:
+        return {"verified": False}
+    try:
+        hwnd = _GetForegroundWindow()
+        buf = ctypes.create_unicode_buffer(260)
+        _GetWindowTextW(hwnd, buf, 260)
+        fg_title = buf.value or ""
+        title_changed = bool(before_title and fg_title and fg_title != before_title)
+        return {
+            "verified": True,
+            "foreground_title": fg_title[:180],
+            "title_changed": title_changed,
+        }
+    except Exception:
+        return {"verified": False}
+
 
 def _persist_session_state(session_store, task_state):
     if session_store is None:
@@ -338,6 +368,17 @@ def _finalize_control_request(llm, task_state, request, *, session_store=None, p
 
 
 def _record_tool_result(task_state, tool_name, args, result, *, before_context=None):
+    if tool_name in _DESKTOP_MUTATING_TOOLS and result.get("ok", False) and not result.get("paused", False):
+        before_title = ""
+        if isinstance(before_context, dict):
+            before_title = str(before_context.get("active_window_title", "") or "")
+        verification = _desktop_post_action_verification(before_title)
+        if verification.get("verified"):
+            fg_title = verification.get("foreground_title", "")
+            reported_window = str((result.get("active_window", {}) if isinstance(result.get("active_window", {}), dict) else {}).get("title", "") or "")
+            consistent = not reported_window or not fg_title or fg_title.lower() in reported_window.lower() or reported_window.lower() in fg_title.lower()
+            verification["consistent_with_tool"] = consistent
+            result["post_action_verification"] = verification
     step_status = "paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed")
     if (
         tool_name in _DESKTOP_MUTATING_TOOLS

@@ -778,6 +778,20 @@ def _classify_desktop(
             "validator_family": validator_family,
         }
 
+    post_verification = result.get("post_action_verification", {})
+    if isinstance(post_verification, dict) and post_verification.get("verified") and not post_verification.get("consistent_with_tool", True):
+        return {
+            "status": "uncertain",
+            "reason": "independent_verification_mismatch",
+            "summary": f"The tool reported success, but independent verification shows the foreground window is '{_trim_text(post_verification.get('foreground_title', ''), limit=120)}', which may not match the expected target.",
+            "progress_made": False,
+            "expected_change": target_title or "Visible desktop change.",
+            "observed_change": _trim_text(post_verification.get("foreground_title", ""), limit=120),
+            "confidence": "low",
+            "strategy_family": strategy_family,
+            "validator_family": validator_family,
+        }
+
     verified = _classify_desktop_with_verification(tool_name, args, result)
     if verified:
         return verified

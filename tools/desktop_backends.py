@@ -57,17 +57,21 @@ except Exception:
     psutil = None  # type: ignore[assignment]
 
 try:
+    import ctypes
+    import ctypes.wintypes
+    _IsHungAppWindow = ctypes.windll.user32.IsHungAppWindow  # type: ignore[attr-defined]
+    _IsHungAppWindow.argtypes = [ctypes.wintypes.HWND]
+    _IsHungAppWindow.restype = ctypes.wintypes.BOOL
+except Exception:
+    _IsHungAppWindow = None
+
+try:
     import imagehash
     from PIL import Image as _PILImage
 except Exception:
     imagehash = None  # type: ignore[assignment]
     _PILImage = None  # type: ignore[assignment]
 
-try:
-    import ctypes
-    _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-except Exception:
-    _user32 = None
 
 
 WindowListDelegate = Callable[..., List[Dict[str, Any]]]
@@ -330,6 +334,31 @@ def probe_process_context(*, pid: int = 0, process_name: str = "") -> Dict[str, 
         message=context.get("summary", ""),
         data=context,
     )
+
+
+def _count_hung_windows(target_pid: int) -> int:
+    """Count windows owned by *target_pid* that Windows considers hung."""
+    if _IsHungAppWindow is None or pywinctl is None or target_pid <= 0:
+        return 0
+    hung = 0
+    try:
+        for win in pywinctl.getAllWindows():
+            try:
+                hwnd = getattr(win, "_hWnd", 0) or 0
+                if not hwnd:
+                    continue
+                # Filter by PID — pywinctl exposes no .pid, use ctypes
+                win_pid = ctypes.wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                if win_pid.value != target_pid:
+                    continue
+                if _IsHungAppWindow(hwnd):
+                    hung += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return hung
 
 
 def _normalize_env_overrides(value: Any, *, limit: int = 8) -> Dict[str, str]:
@@ -1570,28 +1599,91 @@ class PyWinAutoEvidenceBackend(StubUiEvidenceBackend):
             descendants: List[Dict[str, Any]] = []
             try:
                 for child in _bounded_descendants(target_window, limit=max(1, int(limit or 8))):
-                    descendants.append(
-                        {
-                            "name": _trim_text(getattr(child.element_info, "name", ""), limit=160),
-                            "control_type": _trim_text(getattr(child.element_info, "control_type", ""), limit=80),
-                            "automation_id": _trim_text(getattr(child.element_info, "automation_id", ""), limit=120),
-                            "text": _trim_text(getattr(child, "window_text", lambda: "")() or "", limit=220),
-                        }
-                    )
+                    entry: Dict[str, Any] = {
+                        "name": _trim_text(getattr(child.element_info, "name", ""), limit=160),
+                        "control_type": _trim_text(getattr(child.element_info, "control_type", ""), limit=80),
+                        "automation_id": _trim_text(getattr(child.element_info, "automation_id", ""), limit=120),
+                        "text": _trim_text(getattr(child, "window_text", lambda: "")() or "", limit=220),
+                    }
+                    try:
+                        entry["enabled"] = bool(child.is_enabled())
+                    except Exception:
+                        pass
+                    try:
+                        entry["visible"] = bool(child.is_visible())
+                    except Exception:
+                        pass
+                    try:
+                        rect = child.element_info.rectangle
+                        if rect is not None:
+                            entry["rect"] = {
+                                "x": int(getattr(rect, "left", 0) or 0),
+                                "y": int(getattr(rect, "top", 0) or 0),
+                                "width": int((getattr(rect, "right", 0) or 0) - (getattr(rect, "left", 0) or 0)),
+                                "height": int((getattr(rect, "bottom", 0) or 0) - (getattr(rect, "top", 0) or 0)),
+                            }
+                    except Exception:
+                        pass
+                    states: List[str] = []
+                    try:
+                        if hasattr(child, "get_toggle_state"):
+                            toggle = child.get_toggle_state()
+                            if toggle == 1:
+                                states.append("checked")
+                            elif toggle == 2:
+                                states.append("indeterminate")
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(child, "is_expanded") and child.is_expanded():
+                            states.append("expanded")
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(child, "is_selected") and child.is_selected():
+                            states.append("selected")
+                    except Exception:
+                        pass
+                    try:
+                        if child.has_keyboard_focus():
+                            states.append("focused")
+                    except Exception:
+                        pass
+                    if states:
+                        entry["states"] = states
+                    descendants.append(entry)
             except Exception:
                 descendants = []
 
             target_name = ""
+            target_meta: Dict[str, Any] = {"limit": max(1, int(limit or 8))}
             try:
                 target_name = _trim_text(target_window.window_text(), limit=180)
             except Exception:
                 target_name = _trim_text(target, limit=180)
+            try:
+                target_meta["target_visible"] = bool(target_window.is_visible())
+                target_meta["target_enabled"] = bool(target_window.is_enabled())
+                target_meta["target_focused"] = bool(target_window.has_keyboard_focus())
+            except Exception:
+                pass
+            try:
+                trect = target_window.element_info.rectangle
+                if trect is not None:
+                    target_meta["target_rect"] = {
+                        "x": int(getattr(trect, "left", 0) or 0),
+                        "y": int(getattr(trect, "top", 0) or 0),
+                        "width": int((getattr(trect, "right", 0) or 0) - (getattr(trect, "left", 0) or 0)),
+                        "height": int((getattr(trect, "bottom", 0) or 0) - (getattr(trect, "top", 0) or 0)),
+                    }
+            except Exception:
+                pass
             observation = normalize_ui_evidence_observation(
                 backend=self.name,
                 target=target_name or target,
                 controls=descendants,
                 reason="inspected",
-                metadata={"limit": max(1, int(limit or 8))},
+                metadata=target_meta,
             )
             return result_envelope(
                 "ui_evidence_observation",

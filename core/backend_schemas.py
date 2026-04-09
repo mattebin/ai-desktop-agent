@@ -362,14 +362,28 @@ def normalize_ui_evidence_observation(
     for item in list(controls or [])[:12]:
         if not isinstance(item, dict):
             continue
-        normalized_controls.append(
-            {
-                "name": _trim_text(item.get("name", ""), limit=160),
-                "control_type": _trim_text(item.get("control_type", ""), limit=80),
-                "automation_id": _trim_text(item.get("automation_id", ""), limit=120),
-                "text": _trim_text(item.get("text", ""), limit=220),
+        entry: Dict[str, Any] = {
+            "name": _trim_text(item.get("name", ""), limit=160),
+            "control_type": _trim_text(item.get("control_type", ""), limit=80),
+            "automation_id": _trim_text(item.get("automation_id", ""), limit=120),
+            "text": _trim_text(item.get("text", ""), limit=220),
+        }
+        if "enabled" in item:
+            entry["enabled"] = _coerce_bool(item.get("enabled", True), True)
+        if "visible" in item:
+            entry["visible"] = _coerce_bool(item.get("visible", True), True)
+        raw_rect = item.get("rect")
+        if isinstance(raw_rect, dict):
+            entry["rect"] = {
+                "x": _coerce_int(raw_rect.get("x", 0), 0, minimum=-100_000, maximum=100_000),
+                "y": _coerce_int(raw_rect.get("y", 0), 0, minimum=-100_000, maximum=100_000),
+                "width": _coerce_int(raw_rect.get("width", 0), 0, minimum=0, maximum=100_000),
+                "height": _coerce_int(raw_rect.get("height", 0), 0, minimum=0, maximum=100_000),
             }
-        )
+        raw_states = item.get("states")
+        if isinstance(raw_states, list):
+            entry["states"] = [_trim_text(s, limit=40) for s in raw_states[:8] if _trim_text(s, limit=40)]
+        normalized_controls.append(entry)
     return {
         "target": _trim_text(target, limit=220),
         "controls": normalized_controls,

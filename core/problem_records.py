@@ -638,3 +638,42 @@ class ProblemRecordStore:
             "top_tools": top_tools,
             "updated_at": _trim_text(payload.get("updated_at", ""), limit=40),
         }
+
+    def recall_relevant(self, *, goal: str = "", tool: str = "", domain: str = "", limit: int = 4) -> List[Dict[str, Any]]:
+        """Return problem records most relevant to the current goal/tool/domain."""
+        safe_limit = max(1, min(int(limit or 4), 20))
+        payload = self._load()
+        goal_words = set(str(goal or "").lower().split())
+        tool_lower = str(tool or "").strip().lower()
+        domain_lower = str(domain or "").strip().lower()
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for entry in payload.get("records", []):
+            if not isinstance(entry, dict):
+                continue
+            latest = entry.get("latest", {}) if isinstance(entry.get("latest", {}), dict) else {}
+            score = 0.0
+            entry_tool = _trim_text(latest.get("tool", ""), limit=80).lower()
+            entry_domain = _trim_text(latest.get("domain", ""), limit=80).lower()
+            entry_goal = _trim_text(latest.get("goal", ""), limit=220).lower()
+            if tool_lower and entry_tool == tool_lower:
+                score += 3.0
+            if domain_lower and entry_domain == domain_lower:
+                score += 2.0
+            if goal_words:
+                entry_goal_words = set(entry_goal.split())
+                overlap = len(goal_words & entry_goal_words)
+                score += min(4.0, overlap * 0.8)
+            occurrence_count = _safe_int(entry.get("occurrence_count", 1), default=1)
+            score += min(3.0, occurrence_count * 0.5)
+            if score > 0:
+                scored.append((score, {
+                    "problem_key": _trim_text(entry.get("problem_key", ""), limit=80),
+                    "occurrence_count": occurrence_count,
+                    "tool": entry_tool,
+                    "domain": entry_domain,
+                    "summary": _trim_text(latest.get("summary", ""), limit=220),
+                    "failure_category": _trim_text(latest.get("failure_category", ""), limit=80),
+                    "relevance_score": round(score, 1),
+                }))
+        scored.sort(key=lambda item: -item[0])
+        return [item[1] for item in scored[:safe_limit]]
