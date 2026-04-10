@@ -229,6 +229,7 @@ class TaskState:
         self.goal = provided_goal
         self.state_scope_id = str(state_scope_id).strip()[:120] or "default"
         self.execution_profile = DEFAULT_EXECUTION_PROFILE
+        self.full_access_mode: bool = False
         self.steps: List[Dict[str, Any]] = []
         self.status = "running"
 
@@ -369,6 +370,7 @@ class TaskState:
         if restored_scope_id:
             self.state_scope_id = restored_scope_id
         self.execution_profile = normalize_execution_profile(session_state.get("execution_profile", DEFAULT_EXECUTION_PROFILE))
+        self.full_access_mode = bool(session_state.get("full_access_mode", False))
         restored_goal = str(session_state.get("goal", "")).strip()[:MAX_TASK_GOAL_CHARS]
         if restored_goal:
             self.goal = restored_goal
@@ -462,6 +464,7 @@ class TaskState:
         return {
             "state_scope_id": self.state_scope_id[:120] or "default",
             "execution_profile": normalize_execution_profile(self.execution_profile),
+            "full_access_mode": bool(self.full_access_mode),
             "goal": str(self.goal).strip()[:MAX_TASK_GOAL_CHARS],
             "status": str(self.status).strip()[:40],
             "known_files": self._normalize_values(self.known_files, limit=30),
@@ -2514,6 +2517,9 @@ class TaskState:
     def set_execution_profile(self, profile: str):
         self.execution_profile = normalize_execution_profile(profile)
 
+    def set_full_access_mode(self, enabled: bool):
+        self.full_access_mode = bool(enabled)
+
     def set_task_control(
         self,
         *,
@@ -3007,6 +3013,7 @@ class TaskState:
         snapshot = {
             "state_scope_id": self.state_scope_id,
             "execution_profile": normalize_execution_profile(self.execution_profile),
+            "full_access_mode": bool(self.full_access_mode),
             "goal": self.goal,
             "status": self.status,
             "rolling_summary": self.last_summary,

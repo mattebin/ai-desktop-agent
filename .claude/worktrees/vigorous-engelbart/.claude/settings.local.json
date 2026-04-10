@@ -27,7 +27,9 @@
       "Bash(python -m pytest workflow_bridge_eval.py -v)",
       "Bash(python workflow_bridge_eval.py)",
       "Bash(npx tsc:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(python -m pytest tests/ -v --timeout=60)",
+      "Bash(npx tauri:*)"
     ]
   }
 }

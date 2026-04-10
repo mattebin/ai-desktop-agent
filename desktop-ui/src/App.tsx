@@ -114,6 +114,9 @@ import {
   armLabMode,
   disarmLabMode,
   runLabCommand,
+  enableFullAccess,
+  disableFullAccess,
+  getFullAccessStatus,
   type PendingApproval,
   type ProblemRecord,
   type ProblemSummary,
@@ -1706,6 +1709,9 @@ export default function App() {
   const [labLoading, setLabLoading] = useState(false);
   const [labSelectedRunId, setLabSelectedRunId] = useState("");
   const [labSelectedRun, setLabSelectedRun] = useState<RunDetail | null>(null);
+  const [fullAccessArmed, setFullAccessArmed] = useState(false);
+  const [fullAccessBusy, setFullAccessBusy] = useState("");
+  const [fullAccessConfirmation, setFullAccessConfirmation] = useState("");
   const [workflowWorkspaceMode, setWorkflowWorkspaceMode] = useState<WorkflowWorkspaceMode>("skills");
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("evidence");
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -2180,6 +2186,9 @@ export default function App() {
       const payload = await armLabMode(apiBaseUrl, labArmConfirmation.trim());
       setLabStatus(payload.lab || null);
       setLabArmConfirmation("");
+      if ((payload as Record<string, unknown>).full_access_reset) {
+        setFullAccessArmed(false);
+      }
       addLocalActivity("Lab armed", plainTextPreview(String(payload.message || "Armed the experimental lab mode."), 180), "warning");
       await refreshLabPanel();
     } finally {
@@ -2199,6 +2208,31 @@ export default function App() {
       await refreshLabPanel({ loadLatestRun: false });
     } finally {
       setLabBusy("");
+    }
+  }
+
+  async function handleEnableFullAccess() {
+    if (!apiBaseUrl) return;
+    setFullAccessBusy("enable");
+    try {
+      const payload = await enableFullAccess(apiBaseUrl, fullAccessConfirmation.trim());
+      setFullAccessArmed(payload.full_access?.armed ?? false);
+      setFullAccessConfirmation("");
+      addLocalActivity("Full access enabled", plainTextPreview(String(payload.message || "Full access mode enabled."), 180), "warning");
+    } finally {
+      setFullAccessBusy("");
+    }
+  }
+
+  async function handleDisableFullAccess() {
+    if (!apiBaseUrl) return;
+    setFullAccessBusy("disable");
+    try {
+      const payload = await disableFullAccess(apiBaseUrl);
+      setFullAccessArmed(payload.full_access?.armed ?? false);
+      addLocalActivity("Full access disabled", plainTextPreview(String(payload.message || "Full access mode disabled."), 180), "info");
+    } finally {
+      setFullAccessBusy("");
     }
   }
 
@@ -2676,6 +2710,11 @@ export default function App() {
           setStatus(operatorStatus);
           setAlerts(operatorAlerts.items || []);
         }
+        try {
+          const faStatus = await getFullAccessStatus(apiBaseUrl);
+          if (!alive) return;
+          setFullAccessArmed(faStatus.full_access?.armed ?? false);
+        } catch { /* full-access endpoint optional */ }
         await refreshCommandCatalog(apiBaseUrl);
         if (!alive) {
           return;
@@ -4609,6 +4648,45 @@ export default function App() {
           </div>
         </div>
 
+        <section className="sidebar-section sidebar-capability-section sidebar-pinned-bottom sidebar-full-access-section">
+          <div className="sidebar-section-header">
+            <SectionTitle icon="tools">Full access</SectionTitle>
+            <span className={clsx("status-pill", fullAccessArmed ? "tone-warning" : "tone-neutral")}>{fullAccessArmed ? "active" : "off"}</span>
+          </div>
+          {fullAccessArmed ? (
+            <div className="full-access-active">
+              <p className="secondary-copy sidebar-section-copy">
+                Approval gates for desktop and browser actions are bypassed. The operator will execute without pausing for confirmation.
+              </p>
+              <button className="ghost-button" disabled={fullAccessBusy === "disable"} onClick={() => void handleDisableFullAccess()} type="button">
+                {fullAccessBusy === "disable" ? "Disabling..." : "Disable full access"}
+              </button>
+            </div>
+          ) : (
+            <div className="full-access-form">
+              <p className="secondary-copy sidebar-section-copy">
+                Bypass desktop and browser approval gates. Actions run without confirmation pauses.
+              </p>
+              <div className="surface-form surface-form-compact">
+                <input
+                  className="full-access-input"
+                  value={fullAccessConfirmation}
+                  onChange={(event) => setFullAccessConfirmation(event.target.value)}
+                  placeholder="ENABLE FULL ACCESS"
+                />
+                <button
+                  className="send-button"
+                  disabled={fullAccessBusy === "enable" || fullAccessConfirmation.trim().toUpperCase() !== "ENABLE FULL ACCESS"}
+                  onClick={() => void handleEnableFullAccess()}
+                  type="button"
+                >
+                  {fullAccessBusy === "enable" ? "Enabling..." : "Enable"}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
         <section className="sidebar-section sidebar-capability-section sidebar-section-experimental sidebar-pinned-bottom">
           <div className="sidebar-section-header">
             <SectionTitle icon="lab">Experimental</SectionTitle>
@@ -5200,6 +5278,7 @@ export default function App() {
                           ? String((environmentAwareness.available_shells as string[]).join(", "))
                           : "",
                         environmentAwareness.gmail_authenticated ? "Gmail connected" : environmentAwareness.gmail_enabled ? "Gmail available" : "",
+                        fullAccessArmed ? "Full access" : "",
                         environmentAwareness.lab_armed ? "Lab armed" : "",
                       ]
                         .filter(Boolean)

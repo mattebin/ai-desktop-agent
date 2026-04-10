@@ -1829,6 +1829,7 @@ def build_environment_awareness(
     email_status: Dict[str, Any] | None = None,
     execution_profile: str = "",
     lab_armed: bool = False,
+    full_access_armed: bool = False,
 ) -> Dict[str, Any]:
     effective_settings = settings if isinstance(settings, dict) else {}
     safe_email = email_status if isinstance(email_status, dict) else {}
@@ -1842,6 +1843,7 @@ def build_environment_awareness(
         "runtime_mode": "lab" if capability_profile == "sandboxed_full_access_lab" else "bounded",
         "available_shells": shells,
         "lab_armed": bool(lab_armed),
+        "full_access_armed": bool(full_access_armed),
         "lab_constraints": lab_status_snapshot(settings=effective_settings, armed=lab_armed).get("constraints", []),
         "gmail_enabled": bool(safe_email.get("enabled", False)),
         "gmail_authenticated": bool(safe_email.get("authenticated", False)),

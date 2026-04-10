@@ -312,6 +312,32 @@ a:hover {
   border-top: 1px solid var(--border-soft);
   margin-top: auto;
 }
+.sidebar-full-access-section {
+  margin-top: auto;
+}
+.sidebar-full-access-section + .sidebar-pinned-bottom {
+  margin-top: 0;
+}
+.full-access-form .surface-form-compact {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+.full-access-form .full-access-input {
+  flex: 1;
+  font-size: 0.78rem;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-inset);
+  color: var(--fg);
+}
+.full-access-active {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 .sidebar-section {
   display: flex;

@@ -1339,3 +1339,33 @@ export async function runLabCommand(
     body: JSON.stringify(payload),
   });
 }
+
+// ── Full-access mode ─────────────────────────────────────────
+
+export interface FullAccessStatus {
+  armed: boolean;
+  lab_armed: boolean;
+}
+
+export interface FullAccessMutationResult {
+  ok: boolean;
+  message: string;
+  full_access: FullAccessStatus;
+}
+
+export async function getFullAccessStatus(baseUrl: string): Promise<{ full_access: FullAccessStatus }> {
+  return request<{ full_access: FullAccessStatus }>(baseUrl, "/full-access/status");
+}
+
+export async function enableFullAccess(baseUrl: string, confirmation: string): Promise<FullAccessMutationResult> {
+  return request<FullAccessMutationResult>(baseUrl, "/full-access/enable", {
+    method: "POST",
+    body: JSON.stringify({ confirmation }),
+  });
+}
+
+export async function disableFullAccess(baseUrl: string): Promise<FullAccessMutationResult> {
+  return request<FullAccessMutationResult>(baseUrl, "/full-access/disable", {
+    method: "POST",
+  });
+}

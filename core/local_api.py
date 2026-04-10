@@ -139,6 +139,7 @@ def _status_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "current_step": _trim_text(snapshot.get("current_step", ""), limit=140),
         "goal": _trim_text(snapshot.get("goal", ""), limit=240),
         "execution_profile": _trim_text(snapshot.get("execution_profile", ""), limit=80),
+        "full_access_mode": bool(snapshot.get("full_access_mode", False)),
         "result_status": _trim_text(snapshot.get("result_status", ""), limit=80),
         "result_message": _trim_text(snapshot.get("result_message", ""), limit=280),
         "mode": _trim_text(behavior.get("mode", ""), limit=80),
@@ -1240,6 +1241,25 @@ class LocalOperatorApiServer:
                         )
                     else:
                         self._respond_error(400, result.get("message", "Unable to start lab goal."))
+                    return
+
+                if path == "/full-access/status":
+                    self._respond_ok({"full_access": server_ref.controller.get_full_access_status()})
+                    return
+
+                if path == "/full-access/enable":
+                    result = server_ref.controller.enable_full_access(
+                        confirmation=str(body.get("confirmation", "")).strip(),
+                    )
+                    if result.get("ok"):
+                        self._respond_ok(result)
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to enable full access mode."))
+                    return
+
+                if path == "/full-access/disable":
+                    result = server_ref.controller.disable_full_access()
+                    self._respond_ok(result)
                     return
 
                 if path == "/email/connect":

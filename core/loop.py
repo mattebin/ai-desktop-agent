@@ -1210,6 +1210,8 @@ def _proposal_supports_desktop_action(proposal: dict, tool_name: str) -> bool:
 
 
 def _desktop_target_explicitly_approved(tool_runtime, task_state, planner_goal: str, args: dict) -> bool:
+    if getattr(task_state, "full_access_mode", False):
+        return True
     if tool_runtime.goal_has_explicit_desktop_approval(planner_goal):
         return True
     if str(getattr(task_state, "desktop_checkpoint_approval_status", "")).strip().lower() == "approved":
@@ -1264,6 +1266,8 @@ def _desktop_action_repeat_guard(task_state, tool_name: str, args: dict, proposa
 
 
 def _maybe_guard_desktop_action(tool_runtime, task_state, planner_goal: str, tool_name: str, args: dict) -> dict | None:
+    if getattr(task_state, "full_access_mode", False):
+        return None
     if tool_name not in _DESKTOP_MUTATING_TOOLS:
         return None
 
@@ -1687,6 +1691,8 @@ def _infer_browser_checkpoint_target(task_state, planner_goal: str) -> str:
 
 
 def _maybe_pause_for_browser_checkpoint(llm, tool_runtime, task_state, planner_goal: str, session_store=None):
+    if getattr(task_state, "full_access_mode", False):
+        return None
     if getattr(task_state, "browser_checkpoint_pending", False):
         return None
     if tool_runtime.goal_has_explicit_browser_approval(planner_goal):
@@ -1775,6 +1781,8 @@ def _maybe_pause_for_browser_checkpoint(llm, tool_runtime, task_state, planner_g
 
 
 def _maybe_pause_for_desktop_action(llm, tool_runtime, task_state, planner_goal: str, session_store=None, *, allow_recovery: bool = True, progress_callback=None):
+    if getattr(task_state, "full_access_mode", False):
+        return None
     if getattr(task_state, "desktop_checkpoint_pending", False):
         return None
     if tool_runtime.goal_has_explicit_desktop_approval(planner_goal):

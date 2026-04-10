@@ -495,6 +495,7 @@ class ExecutionManager:
                 clear_pending_for_new_goal=False,
             )
         self._lab_armed = False
+        self._full_access_armed = False
         self._lab_last_status: Dict[str, Any] = {}
         self._last_result: Dict[str, Any] = {}
         self._last_result_message: str = ""
@@ -2498,6 +2499,7 @@ class ExecutionManager:
         self._attach_runtime_stores(state)
         execution_profile = normalize_execution_profile(task.get("execution_profile", SAFE_BOUNDED_PROFILE))
         state.set_execution_profile(execution_profile)
+        state.set_full_access_mode(self._full_access_armed)
         state.task_id = task.get("task_id", "")
         state.session_id = session_id
         state.status = "running"
@@ -2506,6 +2508,7 @@ class ExecutionManager:
             email_status=self._safe_email_status(),
             execution_profile=execution_profile,
             lab_armed=self._lab_armed,
+            full_access_armed=self._full_access_armed,
         )
         setattr(state, "_environment_awareness", environment_awareness)
         self._remember_environment_awareness(environment_awareness)
@@ -2690,13 +2693,22 @@ class ExecutionManager:
                 "message": "Lab mode requires the exact confirmation phrase ENABLE LAB.",
                 "lab": self.get_lab_status(session_id=session_id),
             }
+        full_access_was_on = False
         with self._lock:
+            full_access_was_on = self._full_access_armed
+            if full_access_was_on:
+                self._full_access_armed = False
             self._lab_armed = True
             payload = self.get_lab_status(session_id=session_id)
+        message = "Armed the experimental sandboxed full access lab mode."
+        if full_access_was_on:
+            message += " Full access mode was disabled — re-enable it separately if needed."
         return {
             "ok": True,
-            "message": "Armed the experimental sandboxed full access lab mode.",
+            "message": message,
             "lab": payload,
+            "full_access_reset": full_access_was_on,
+            "full_access": self.get_full_access_status(),
         }
 
     def disarm_lab_mode(self, *, session_id: str = "") -> Dict[str, Any]:
@@ -2707,6 +2719,39 @@ class ExecutionManager:
             "ok": True,
             "message": "Disarmed the experimental lab mode.",
             "lab": payload,
+        }
+
+    # ── Full-access mode ──────────────────────────────────────────
+
+    def enable_full_access(self, *, confirmation: str = "") -> Dict[str, Any]:
+        confirmation_text = " ".join(str(confirmation or "").strip().upper().split())
+        if confirmation_text != "ENABLE FULL ACCESS":
+            return {
+                "ok": False,
+                "message": "Full access mode requires the exact confirmation phrase ENABLE FULL ACCESS.",
+                "full_access": self.get_full_access_status(),
+            }
+        with self._lock:
+            self._full_access_armed = True
+        return {
+            "ok": True,
+            "message": "Full access mode enabled. Desktop and browser approval gates are bypassed for new runs.",
+            "full_access": self.get_full_access_status(),
+        }
+
+    def disable_full_access(self) -> Dict[str, Any]:
+        with self._lock:
+            self._full_access_armed = False
+        return {
+            "ok": True,
+            "message": "Full access mode disabled. Approval gates are re-enabled.",
+            "full_access": self.get_full_access_status(),
+        }
+
+    def get_full_access_status(self) -> Dict[str, Any]:
+        return {
+            "armed": bool(self._full_access_armed),
+            "lab_armed": bool(self._lab_armed),
         }
 
     def get_lab_status(self, *, session_id: str = "") -> Dict[str, Any]:
