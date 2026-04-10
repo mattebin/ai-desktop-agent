@@ -3053,9 +3053,18 @@ class TaskState:
         return snapshot
 
     def get_observation(self) -> str:
+        import os
+        from pathlib import Path
+
         lines: List[str] = []
         lines.append(f"Goal: {self.goal}")
         lines.append(f"Status: {self.status}")
+
+        # Environment — so the LLM knows where it is
+        home = str(Path.home())
+        lines.append(f"OS: Windows")
+        lines.append(f"User: {os.getenv('USERNAME', 'unknown')}")
+        lines.append(f"Home: {home}")
 
         # Recent steps — what happened so far
         recent_steps = self.steps[-5:]

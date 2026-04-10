@@ -150,25 +150,71 @@ def _guess_target_type(path: str) -> str:
 # ── individual matchers ──────────────────────────────────────────
 # Each returns {"tool": ..., "args": {...}} or None.
 
+_WELL_KNOWN_FOLDERS: Dict[str, str] = {
+    "desktop": "Desktop",
+    "downloads": "Downloads",
+    "documents": "Documents",
+    "my documents": "Documents",
+    "pictures": "Pictures",
+    "my pictures": "Pictures",
+    "videos": "Videos",
+    "my videos": "Videos",
+    "music": "Music",
+    "my music": "Music",
+    "appdata": "AppData",
+    "home": "",
+    "my folder": "",
+    "home folder": "",
+    "home directory": "",
+    "user folder": "",
+}
+
+
+def _resolve_well_known_folder(name: str) -> str | None:
+    """Resolve a bare folder name like 'Downloads' to a full path."""
+    from pathlib import Path
+    lower = name.lower().strip()
+    if lower in _WELL_KNOWN_FOLDERS:
+        sub = _WELL_KNOWN_FOLDERS[lower]
+        home = str(Path.home())
+        return f"{home}\\{sub}" if sub else home
+    return None
+
+
 def _match_open_path(goal: str) -> Dict[str, Any] | None:
-    """open <filepath>  /  open: <filepath>  /  open file <filepath>"""
+    """open <filepath>  /  open: <filepath>  /  open file <filepath>  /  open Downloads"""
     lower = goal.lower().strip()
     triggers = ("open ", "open: ", "open file ", "launch ", "start ", "run ")
     if not any(lower.startswith(t) for t in triggers):
         return None
+
+    # First try explicit filesystem path
     path = _extract_path(goal)
-    if not path:
+    if path and not _URL_RE.search(path):
+        return {
+            "tool": "desktop_open_target",
+            "args": {
+                "target": path,
+                "target_type": _guess_target_type(path),
+            },
+        }
+
+    # Try resolving bare folder name (e.g. "open Downloads")
+    for t in triggers:
+        if lower.startswith(t):
+            name_part = goal[len(t):].strip()
+            break
+    else:
         return None
-    # Make sure it's a path, not a URL
-    if _URL_RE.search(path):
-        return None
-    return {
-        "tool": "desktop_open_target",
-        "args": {
-            "target": path,
-            "target_type": _guess_target_type(path),
-        },
-    }
+    name_part = _strip_quotes(name_part)
+    resolved = _resolve_well_known_folder(name_part)
+    if resolved:
+        return {
+            "tool": "desktop_open_target",
+            "args": {"target": resolved},
+        }
+
+    return None
 
 
 def _match_open_url(goal: str) -> Dict[str, Any] | None:

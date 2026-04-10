@@ -674,6 +674,10 @@ class HostedLLMClient:
                     "Pick the right tool for the job: desktop_open_target for files/URLs/folders, "
                     "desktop_press_key for keyboard input, desktop_type_text for text entry, "
                     "desktop_run_command for shell commands, desktop_capture_screenshot for visual state. "
+                    "When the user gives a name without a full path (e.g. 'open Downloads', 'open my project'), "
+                    "resolve it using the Home directory from the observation, common Windows paths "
+                    "(Desktop, Documents, Downloads, Pictures, Videos, Music are under Home), "
+                    "or use desktop_run_command with 'dir' or 'where' to find it. "
                     "If the goal is already done or you have enough info, stop and return your answer. "
                     "Do not over-inspect — act directly when the action is obvious."
                 ),
