@@ -4620,47 +4620,48 @@ export default function App() {
               </div>
             </section>
 
-            <section className="sidebar-section sidebar-capability-section sidebar-section-experimental">
-              <div className="sidebar-section-header">
-                <SectionTitle icon="lab">Experimental</SectionTitle>
-                <button className="ghost-button sidebar-inline-button" onClick={() => setExperimentalOpen((current) => !current)} type="button">
-                  {experimentalOpen || activeSurface === "lab" ? "Hide" : "Open"}
-                </button>
-              </div>
-              {experimentalOpen || activeSurface === "lab" ? (
-                <div className="workspace-nav experimental-nav">
-                  <button
-                    className={clsx("workspace-nav-button", activeSurface === "lab" && "is-active")}
-                    onClick={() => {
-                      setExperimentalOpen(true);
-                      setActiveSurface("lab");
-                    }}
-                    type="button"
-                  >
-                    <span className="workspace-nav-button-main">
-                      <UiIcon name="lab" />
-                      <span>Lab shell</span>
-                    </span>
-                    <span className="workspace-nav-button-count">
-                      {labStatus?.armed ? "armed" : "off"}
-                    </span>
-                  </button>
-                  <div className="sidebar-capability-list">
-                    <span className="sidebar-capability-chip sidebar-capability-chip-warning">
-                      <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.85} />
-                      <span>Explicit opt-in required</span>
-                    </span>
-                  </div>
-                  <p className="secondary-copy sidebar-section-copy">
-                    Disposable workspace, fail-closed policy, and approval-gated shell execution.
-                  </p>
-                </div>
-              ) : (
-                <p className="secondary-copy sidebar-section-copy">Keep the lab lane tucked away until you explicitly need experimental shell access.</p>
-              )}
-            </section>
           </div>
         </div>
+
+        <section className="sidebar-section sidebar-capability-section sidebar-section-experimental sidebar-pinned-bottom">
+          <div className="sidebar-section-header">
+            <SectionTitle icon="lab">Experimental</SectionTitle>
+            <button className="ghost-button sidebar-inline-button" onClick={() => setExperimentalOpen((current) => !current)} type="button">
+              {experimentalOpen || activeSurface === "lab" ? "Hide" : "Open"}
+            </button>
+          </div>
+          {experimentalOpen || activeSurface === "lab" ? (
+            <div className="workspace-nav experimental-nav">
+              <button
+                className={clsx("workspace-nav-button", activeSurface === "lab" && "is-active")}
+                onClick={() => {
+                  setExperimentalOpen(true);
+                  setActiveSurface("lab");
+                }}
+                type="button"
+              >
+                <span className="workspace-nav-button-main">
+                  <UiIcon name="lab" />
+                  <span>Lab shell</span>
+                </span>
+                <span className="workspace-nav-button-count">
+                  {labStatus?.armed ? "armed" : "off"}
+                </span>
+              </button>
+              <div className="sidebar-capability-list">
+                <span className="sidebar-capability-chip sidebar-capability-chip-warning">
+                  <AlertTriangle aria-hidden className="ui-icon" strokeWidth={1.85} />
+                  <span>Explicit opt-in required</span>
+                </span>
+              </div>
+              <p className="secondary-copy sidebar-section-copy">
+                Disposable workspace, fail-closed policy, and approval-gated shell execution.
+              </p>
+            </div>
+          ) : (
+            <p className="secondary-copy sidebar-section-copy">Keep the lab lane tucked away until you explicitly need experimental shell access.</p>
+          )}
+        </section>
       </aside>
 
       <main className="chat-layout">
