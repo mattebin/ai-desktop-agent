@@ -1079,8 +1079,7 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def _desktop_capture_screenshot_v1(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Archived v1 — enterprise evidence-based screenshot capture."""
+def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
     _mod = _desktop()
     scope = str(args.get("scope", DESKTOP_DEFAULT_CAPTURE_SCOPE)).strip().lower() or DESKTOP_DEFAULT_CAPTURE_SCOPE
     capture = capture_desktop_evidence_frame(
@@ -1950,8 +1949,7 @@ def _send_key_sequence_chain(sequence_items: List[Dict[str, Any]]) -> bool:
     return True
 
 
-def _desktop_type_text_v1(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Archived v1 — enterprise approval/evidence/verification text typing."""
+def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
     _mod = _desktop()
     field_label = str(args.get("field_label", "")).strip()
     if not field_label:
@@ -2152,8 +2150,7 @@ def _desktop_type_text_v1(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def _desktop_press_key_v1(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Archived v1 — enterprise approval/evidence/verification key press."""
+def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
     _mod = _desktop()
     key_name = _normalize_key_name(args.get("key", ""))
     modifiers = _normalize_modifier_list(args.get("modifiers", []))
@@ -2327,63 +2324,3 @@ def _desktop_press_key_v1(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_strategy=strategy_view,
         desktop_verification=verification,
     )
-
-
-# ── lean tool replacements ────────────────────────────────────────────────
-# Thin wrappers around core OS functions. No evidence, no approval gates,
-# no observation tokens, no verification sampling, no strategy selection.
-
-
-def desktop_capture_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Capture a screenshot of the primary monitor."""
-    try:
-        import mss
-        from mss import tools as mss_tools
-    except ImportError:
-        return {"ok": False, "error": "mss not installed.", "message": "Screenshot library (mss) is not available."}
-    try:
-        data_dir = Path("data/screenshots")
-        data_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"screenshot_{int(time.time())}.png"
-        path = data_dir / filename
-        with mss.mss() as capture:
-            shot = capture.grab(capture.monitors[1])
-            mss_tools.to_png(shot.rgb, shot.size, output=str(path))
-        return {"ok": True, "message": f"Screenshot saved to {path}.", "path": str(path)}
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "message": f"Screenshot failed: {exc}"}
-
-
-def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Type text into the currently focused field."""
-    value = str(args.get("value", ""))
-    if not value.strip():
-        return {"ok": False, "error": "No text to type.", "message": "Provide non-empty text to type."}
-    max_chars = int(args.get("max_text_length", DESKTOP_DEFAULT_TYPE_MAX_CHARS) or DESKTOP_DEFAULT_TYPE_MAX_CHARS)
-    if len(value) > max_chars:
-        return {"ok": False, "error": f"Text too long (max {max_chars}).", "message": f"Text exceeds {max_chars} character limit."}
-    try:
-        ok = _send_text(value)
-        preview = value[:40] + ("..." if len(value) > 40 else "")
-        return {"ok": ok, "message": f'Typed "{preview}".' if ok else "Could not type text."}
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "message": f"Type failed: {exc}"}
-
-
-def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Press a key or key combination."""
-    key_name = _normalize_key_name(args.get("key", ""))
-    modifiers = _normalize_modifier_list(args.get("modifiers", []))
-    repeat = max(1, min(int(args.get("repeat", 1) or 1), DESKTOP_MAX_KEY_REPEAT))
-    validation_error = _validate_desktop_key_request(key_name, modifiers)
-    if validation_error:
-        return {"ok": False, "error": validation_error, "message": validation_error}
-    try:
-        ok = _send_key_sequence(key_name, modifiers, repeat)
-        combo = "+".join(
-            [DESKTOP_SAFE_MODIFIER_DISPLAY.get(m, m.title()) for m in modifiers]
-            + [DESKTOP_SAFE_KEY_DISPLAY.get(key_name, key_name.title())]
-        )
-        return {"ok": ok, "message": f"Pressed {combo}." if ok else f"Could not press {combo}."}
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "message": f"Key press failed: {exc}"}

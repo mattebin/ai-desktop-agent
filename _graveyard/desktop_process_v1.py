@@ -302,8 +302,7 @@ def _active_window_process_target(active_window: Dict[str, Any]) -> Dict[str, An
     }
 
 
-def _desktop_press_key_sequence_v1(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Archived v1 — enterprise approval/evidence/verification key sequence."""
+def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
     sequence_items = _desktop()._normalize_desktop_key_sequence(args.get("sequence", []))
     key_preview = _desktop()._desktop_key_sequence_chain_preview(sequence_items)
     validation_error = _desktop()._validate_desktop_key_sequence(sequence_items)
@@ -451,37 +450,6 @@ def _desktop_press_key_sequence_v1(args: Dict[str, Any]) -> Dict[str, Any]:
         desktop_strategy=strategy_view,
         desktop_verification=verification,
     )
-
-
-def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Press a sequence of key combinations in order."""
-    from tools.desktop_input import (
-        _normalize_key_name,
-        _normalize_modifier_list,
-        _send_key_sequence,
-    )
-    import time as _time
-    sequence = args.get("sequence", [])
-    if not isinstance(sequence, list) or not sequence:
-        return {"ok": False, "error": "No key sequence provided.", "message": "Provide a non-empty sequence list."}
-    previews = []
-    for item in sequence:
-        if not isinstance(item, dict):
-            continue
-        key = _normalize_key_name(item.get("key", ""))
-        mods = _normalize_modifier_list(item.get("modifiers", []))
-        repeat = max(1, min(int(item.get("repeat", 1) or 1), 8))
-        if not key:
-            continue
-        ok = _send_key_sequence(key, mods, repeat)
-        combo = "+".join(
-            [m.title() for m in mods] + [key.title()]
-        )
-        previews.append(combo)
-        if not ok:
-            return {"ok": False, "error": f"Failed at {combo}.", "message": f"Key sequence failed at {combo}."}
-        _time.sleep(0.05)
-    return {"ok": True, "message": f"Pressed sequence: {' → '.join(previews)}."}
 
 
 def desktop_list_processes(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -850,8 +818,7 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def _desktop_open_target_v1(args: Dict[str, Any]) -> Dict[str, Any]:
-    """ARCHIVED: Original 270-line enterprise implementation. See _graveyard/desktop_process_v1.py."""
+def desktop_open_target(args: Dict[str, Any]) -> Dict[str, Any]:
     active_window, windows, observation = _current_desktop_context(limit=20)
     token = str(args.get("observation_token", "")).strip()
     evidence_ref = _desktop()._latest_evidence_ref_for_observation(token) if token else {}
@@ -1123,32 +1090,3 @@ def _desktop_open_target_v1(args: Dict[str, Any]) -> Dict[str, Any]:
         "data": payload,
     }
     return result
-
-
-# ── lean replacement ────────────────────────────────────────────
-
-def desktop_open_target(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Open a file, folder, URL, or executable using Windows association.
-
-    Lean implementation — calls os.startfile() directly.
-    No approval gates, evidence gathering, or verification sampling.
-    """
-    from tools.desktop_backends import open_path_with_association, open_url_with_shell
-
-    target = str(args.get("target", "")).strip()
-    if not target:
-        return {"ok": False, "error": "No target provided.", "message": "Provide a target path or URL to open."}
-
-    # Route URLs to browser, everything else to Windows association
-    target_lower = target.lower()
-    if target_lower.startswith(("http://", "https://", "www.")):
-        result = open_url_with_shell(target=target)
-    else:
-        result = open_path_with_association(target=target)
-
-    return {
-        "ok": bool(result.get("ok", False)),
-        "message": str(result.get("message", "")).strip() or ("Opened." if result.get("ok") else "Failed."),
-        "error": str(result.get("error", "")).strip(),
-        "target": target,
-    }
