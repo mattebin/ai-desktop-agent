@@ -12,6 +12,8 @@ import {
   Bot,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   CircleDot,
   Clock3,
   Command,
@@ -1712,6 +1714,7 @@ export default function App() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(true);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState<"" | "approve" | "reject">("");
@@ -3092,6 +3095,17 @@ export default function App() {
     shouldStickToBottomRef.current = true;
     setIsNearTranscriptBottom(true);
     setPendingNewMessageCount(0);
+
+    // Optimistic: show user message immediately
+    const optimisticMsg: SessionMessage = {
+      message_id: `optimistic-${Date.now()}`,
+      created_at: new Date().toISOString(),
+      role: "user",
+      kind: "message",
+      content,
+    };
+    setMessages((current) => [...current, optimisticMsg]);
+
     try {
       let nextSessionId = selectedSessionId;
       let result;
@@ -4489,10 +4503,15 @@ export default function App() {
           </label>
 
           <section className="sidebar-section">
-            <div className="sidebar-section-header">
-              <SectionTitle icon="chat">Recent</SectionTitle>
-              <span className="muted-label">{recentSessions.length}</span>
-            </div>
+            <button
+              className="sidebar-collapse-trigger"
+              onClick={() => setRecentOpen((current) => !current)}
+              type="button"
+            >
+              {recentOpen ? <ChevronDown aria-hidden className="ui-icon" strokeWidth={1.85} /> : <ChevronRight aria-hidden className="ui-icon" strokeWidth={1.85} />}
+              <span>Recent{recentSessions.length ? ` (${recentSessions.length})` : ""}</span>
+            </button>
+            {recentOpen ? (
             <div className="session-list session-list-recent">
               {recentSessions.map((session) => (
                 <button
@@ -4517,20 +4536,19 @@ export default function App() {
               ))}
               {!recentSessions.length ? <div className="empty-sidebar">No recent conversations match this filter.</div> : null}
             </div>
+            ) : null}
           </section>
 
           <div className="sidebar-bottom">
             <section className="sidebar-section">
-              <div className="sidebar-section-header">
-                <SectionTitle icon="history">History</SectionTitle>
-                <button
-                  className="ghost-button sidebar-inline-button"
-                  onClick={() => setHistoryOpen((current) => !current)}
-                  type="button"
-                >
-                  {showHistorySection ? "Hide" : `View all${historicalSessions.length ? ` (${historicalSessions.length})` : ""}`}
-                </button>
-              </div>
+              <button
+                className="sidebar-collapse-trigger"
+                onClick={() => setHistoryOpen((current) => !current)}
+                type="button"
+              >
+                {showHistorySection ? <ChevronDown aria-hidden className="ui-icon" strokeWidth={1.85} /> : <ChevronRight aria-hidden className="ui-icon" strokeWidth={1.85} />}
+                <span>History{historicalSessions.length ? ` (${historicalSessions.length})` : ""}</span>
+              </button>
               {showHistorySection ? (
                 <div className="session-list session-list-history">
                   {historicalSessions.length ? (
@@ -4555,9 +4573,7 @@ export default function App() {
                     <div className="empty-sidebar">No older conversations to show right now.</div>
                   )}
                 </div>
-              ) : (
-                <p className="secondary-copy sidebar-section-copy">Keep the sidebar focused on the latest work, and expand history only when you need it.</p>
-              )}
+              ) : null}
             </section>
 
             <section className="sidebar-section sidebar-capability-section">
@@ -4785,6 +4801,11 @@ export default function App() {
                   <MemoMessageBubble key={item.key} message={item.message} />
                 ),
               )}
+              {sending ? (
+                <div className="typing-indicator">
+                  <span /><span /><span />
+                </div>
+              ) : null}
             </div>
           )}
           {activeSurface === "chat" && !emptyState && !loadingConversation && !isNearTranscriptBottom ? (
