@@ -851,7 +851,6 @@ type IconName =
   | "activity"
   | "evidence"
   | "details"
-  | "details-close"
   | "history"
   | "tools"
   | "gmail"
@@ -877,7 +876,6 @@ const ICONS = {
   activity: Activity,
   evidence: ImageIcon,
   details: PanelRightOpen,
-  "details-close": PanelRightClose,
   history: History,
   tools: Command,
   gmail: Mail,
@@ -1710,7 +1708,6 @@ export default function App() {
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
   const [runDetailBusy, setRunDetailBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [railOpen, setRailOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
@@ -2981,7 +2978,7 @@ export default function App() {
       : parsedSlashCommand
         ? `Tab to autocomplete. Enter to run. ${slashCommandHint}`
       : effectivePendingApproval?.kind
-        ? "Approval is waiting. You can still add context here."
+        ? "Approval is waiting on the right rail. You can still add context here."
         : "Enter to send. Shift+Enter for a newline.";
   const composerPlaceholder =
     bootState !== "ready"
@@ -4443,7 +4440,7 @@ export default function App() {
   }
 
   return (
-    <div className={clsx("app-shell", railOpen && "rail-open")}>
+    <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="sidebar-header">
@@ -4706,15 +4703,6 @@ export default function App() {
               <UiIcon name="refresh" />
             </button>
             <button
-              aria-label={railOpen ? "Hide panel" : "Show panel"}
-              className={clsx("ghost-button icon-button topbar-action", railOpen && "tone-info")}
-              onClick={() => setRailOpen((current) => !current)}
-              title={railOpen ? "Hide panel" : "Show panel"}
-              type="button"
-            >
-              <UiIcon name={railOpen ? "details-close" : "details"} />
-            </button>
-            <button
               aria-label={detailsOpen ? "Hide context" : "Show context"}
               className="ghost-button icon-button topbar-action"
               onClick={() => setDetailsOpen((current) => !current)}
@@ -4886,78 +4874,81 @@ export default function App() {
         ) : null}
       </main>
 
-      {/* ── Floating approval card — spawns when needed ────────────────── */}
-      {pendingApproval?.kind ? (
-        <section className="approval-float">
+      <aside className="right-rail">
+        <section className="rail-card rail-card-approval">
           <div className="rail-card-header">
-            <h3><SectionTitle icon="approval">Approval needed</SectionTitle></h3>
-            <span className="approval-dot">Pending</span>
+            <h3><SectionTitle icon="approval">Approval</SectionTitle></h3>
+            {pendingApproval?.kind ? <span className="approval-dot">Needed</span> : <span className="muted-label">Clear</span>}
           </div>
-          <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
-          <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
-          <div className="approval-explainer">
-            <div className="inspector-stat">
-              <span className="stat-label">Why approval is required</span>
-              <p>
-                {plainTextPreview(
-                  approvalTool?.policy?.summary ||
-                    pendingApproval.reason ||
-                    "This action crosses a tool boundary that requires an explicit operator confirmation.",
-                  180,
-                )}
-              </p>
-            </div>
-            <div className="approval-context-grid">
-              <div className="inspector-stat">
-                <span className="stat-label">Risk</span>
-                <p>{plainTextPreview(approvalTool?.policy?.risk_level || "review", 48)}</p>
-              </div>
-              <div className="inspector-stat">
-                <span className="stat-label">If approved</span>
-                <p>{plainTextPreview(`The operator will resume the paused ${pendingApproval.tool || pendingApproval.kind || "action"} and continue the run.`, 120)}</p>
-              </div>
-            </div>
-          </div>
-          {pendingApproval?.target || pendingApproval?.step ? (
-            <div className="approval-context-grid">
-              {pendingApproval.target ? (
+          {pendingApproval?.kind ? (
+            <>
+              <p className="approval-kind">{plainTextPreview(pendingApproval.kind, 80)}</p>
+              <p className="approval-detail">{plainTextPreview(approvalSummary(pendingApproval), 180)}</p>
+              <div className="approval-explainer">
                 <div className="inspector-stat">
-                  <span className="stat-label">Target</span>
-                  <p>{plainTextPreview(String(pendingApproval.target), 96)}</p>
+                  <span className="stat-label">Why approval is required</span>
+                  <p>
+                    {plainTextPreview(
+                      approvalTool?.policy?.summary ||
+                        pendingApproval.reason ||
+                        "This action crosses a tool boundary that requires an explicit operator confirmation.",
+                      180,
+                    )}
+                  </p>
+                </div>
+                <div className="approval-context-grid">
+                  <div className="inspector-stat">
+                    <span className="stat-label">Risk</span>
+                    <p>{plainTextPreview(approvalTool?.policy?.risk_level || "review", 48)}</p>
+                  </div>
+                  <div className="inspector-stat">
+                    <span className="stat-label">If approved</span>
+                    <p>{plainTextPreview(`The operator will resume the paused ${pendingApproval.tool || pendingApproval.kind || "action"} and continue the run.`, 120)}</p>
+                  </div>
+                </div>
+              </div>
+              {pendingApproval?.target || pendingApproval?.step ? (
+                <div className="approval-context-grid">
+                  {pendingApproval.target ? (
+                    <div className="inspector-stat">
+                      <span className="stat-label">Target</span>
+                      <p>{plainTextPreview(String(pendingApproval.target), 96)}</p>
+                    </div>
+                  ) : null}
+                  {pendingApproval.step ? (
+                    <div className="inspector-stat">
+                      <span className="stat-label">Step</span>
+                      <p>{plainTextPreview(String(pendingApproval.step), 96)}</p>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
-              {pendingApproval.step ? (
-                <div className="inspector-stat">
-                  <span className="stat-label">Step</span>
-                  <p>{plainTextPreview(String(pendingApproval.step), 96)}</p>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          <EvidencePreviewCard
-            title="Linked evidence"
-            preview={pendingApprovalEvidence}
-            onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Approval evidence")}
-            artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === pendingApprovalEvidence?.evidence_id}
-            emptyText={
-              pendingApproval?.evidence_summary
-                ? plainTextPreview(pendingApproval.evidence_summary, 180)
-                : "No desktop evidence is linked to this checkpoint yet."
-            }
-          />
-          <p className="approval-footnote">The operator is paused until you approve or reject this step.</p>
-          <div className="approval-actions">
-            <button className="approve-button" disabled={Boolean(approving)} onClick={() => void handleApproval("approve")}>
-              {approving === "approve" ? "Approving..." : "Approve"}
-            </button>
-            <button className="ghost-button" disabled={Boolean(approving)} onClick={() => void handleApproval("reject")}>
-              {approving === "reject" ? "Rejecting..." : "Reject"}
-            </button>
-          </div>
+              <EvidencePreviewCard
+                title="Linked evidence"
+                preview={pendingApprovalEvidence}
+                onViewArtifact={(preview) => void handleViewEvidenceArtifact(preview, "Approval evidence")}
+                artifactLoading={artifactViewer.loading && artifactViewer.requestedEvidenceId === pendingApprovalEvidence?.evidence_id}
+                emptyText={
+                  pendingApproval?.evidence_summary
+                    ? plainTextPreview(pendingApproval.evidence_summary, 180)
+                    : "No desktop evidence is linked to this checkpoint yet."
+                }
+              />
+              <p className="approval-footnote">The operator is paused until you approve or reject this step.</p>
+              <div className="approval-actions">
+                <button className="approve-button" disabled={Boolean(approving)} onClick={() => void handleApproval("approve")}>
+                  {approving === "approve" ? "Approving..." : "Approve"}
+                </button>
+                <button className="ghost-button" disabled={Boolean(approving)} onClick={() => void handleApproval("reject")}>
+                  {approving === "reject" ? "Rejecting..." : "Reject"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="secondary-copy">No approval is blocking the current conversation.</p>
+          )}
         </section>
-      ) : null}
 
-      <aside className={clsx("right-rail", railOpen && "is-open")}>
         <section className="rail-card">
           <div className="rail-card-header">
             <h3><SectionTitle icon="task">Active task</SectionTitle></h3>
