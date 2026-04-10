@@ -230,6 +230,7 @@ class TaskState:
         self.state_scope_id = str(state_scope_id).strip()[:120] or "default"
         self.execution_profile = DEFAULT_EXECUTION_PROFILE
         self.full_access_mode: bool = False
+        self.raw_user_message: str = ""
         self.steps: List[Dict[str, Any]] = []
         self.status = "running"
 
@@ -371,6 +372,7 @@ class TaskState:
             self.state_scope_id = restored_scope_id
         self.execution_profile = normalize_execution_profile(session_state.get("execution_profile", DEFAULT_EXECUTION_PROFILE))
         self.full_access_mode = bool(session_state.get("full_access_mode", False))
+        self.raw_user_message = str(session_state.get("raw_user_message", "")).strip()[:MAX_TASK_GOAL_CHARS]
         restored_goal = str(session_state.get("goal", "")).strip()[:MAX_TASK_GOAL_CHARS]
         if restored_goal:
             self.goal = restored_goal
@@ -465,6 +467,7 @@ class TaskState:
             "state_scope_id": self.state_scope_id[:120] or "default",
             "execution_profile": normalize_execution_profile(self.execution_profile),
             "full_access_mode": bool(self.full_access_mode),
+            "raw_user_message": str(self.raw_user_message).strip()[:MAX_TASK_GOAL_CHARS],
             "goal": str(self.goal).strip()[:MAX_TASK_GOAL_CHARS],
             "status": str(self.status).strip()[:40],
             "known_files": self._normalize_values(self.known_files, limit=30),

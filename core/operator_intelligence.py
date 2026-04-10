@@ -1844,6 +1844,7 @@ def build_environment_awareness(
         "available_shells": shells,
         "lab_armed": bool(lab_armed),
         "full_access_armed": bool(full_access_armed),
+        "trust_direct_commands": bool(effective_settings.get("trust_direct_commands", True)),
         "lab_constraints": lab_status_snapshot(settings=effective_settings, armed=lab_armed).get("constraints", []),
         "gmail_enabled": bool(safe_email.get("enabled", False)),
         "gmail_authenticated": bool(safe_email.get("authenticated", False)),

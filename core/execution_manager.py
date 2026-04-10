@@ -1408,6 +1408,7 @@ class ExecutionManager:
         watch_id: str = "",
         session_id: str = "",
         state_scope_id: str = "",
+        raw_user_message: str = "",
     ) -> Dict[str, Any]:
         normalized_session_id = self._normalize_session_id(session_id)
         normalized_scope_id = self._normalize_state_scope_id(state_scope_id, session_id=normalized_session_id)
@@ -1417,6 +1418,7 @@ class ExecutionManager:
             "state_scope_id": normalized_scope_id,
             "execution_profile": normalize_execution_profile(execution_profile),
             "goal": _trim_text(goal, limit=MAX_TASK_GOAL_CHARS),
+            "raw_user_message": _trim_text(raw_user_message, limit=MAX_TASK_GOAL_CHARS),
             "status": "queued",
             "created_at": _iso_timestamp(),
             "started_at": "",
@@ -1515,6 +1517,7 @@ class ExecutionManager:
         watch_id: str = "",
         session_id: str = "",
         state_scope_id: str = "",
+        raw_user_message: str = "",
     ) -> Dict[str, Any] | None:
         if not self._can_accept_queue_item_locked():
             return None
@@ -1526,6 +1529,7 @@ class ExecutionManager:
             watch_id=watch_id,
             session_id=session_id,
             state_scope_id=state_scope_id,
+            raw_user_message=raw_user_message,
         )
         self._tasks.append(task)
         self._tasks = self.queue_store._trim_tasks(self._tasks, self._active_task_id)
@@ -2499,7 +2503,13 @@ class ExecutionManager:
         self._attach_runtime_stores(state)
         execution_profile = normalize_execution_profile(task.get("execution_profile", SAFE_BOUNDED_PROFILE))
         state.set_execution_profile(execution_profile)
-        state.set_full_access_mode(self._full_access_armed)
+        # Phase 3: trust_direct_commands — auto-enable full access for direct chat
+        trust_direct = bool(self.agent.settings.get("trust_direct_commands", True))
+        effective_full_access = self._full_access_armed or (
+            trust_direct and run_source == "goal_run"
+        )
+        state.set_full_access_mode(effective_full_access)
+        state.raw_user_message = str(task.get("raw_user_message", "")).strip()[:MAX_TASK_GOAL_CHARS]
         state.task_id = task.get("task_id", "")
         state.session_id = session_id
         state.status = "running"
@@ -2616,6 +2626,7 @@ class ExecutionManager:
         execution_profile: str = SAFE_BOUNDED_PROFILE,
         session_id: str = "",
         state_scope_id: str = "",
+        raw_user_message: str = "",
     ) -> Dict[str, Any]:
         goal_text = str(goal).strip()
         if not goal_text:
@@ -2628,6 +2639,7 @@ class ExecutionManager:
                 execution_profile=execution_profile,
                 session_id=session_id,
                 state_scope_id=state_scope_id,
+                raw_user_message=raw_user_message,
             )
             if task is None:
                 return {"ok": False, "message": "The task queue is full. Resolve or clear older tasks before queueing more."}
@@ -2660,7 +2672,7 @@ class ExecutionManager:
             response["message"] = "Queued goal."
         return response
 
-    def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
+    def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "", raw_user_message: str = "") -> Dict[str, Any]:
         return self.enqueue_goal(
             goal,
             source="goal_run",
@@ -2668,8 +2680,11 @@ class ExecutionManager:
             execution_profile=SAFE_BOUNDED_PROFILE,
             session_id=session_id,
             state_scope_id=state_scope_id,
+            raw_user_message=raw_user_message,
         )
 
+    # ── DEPRECATED: lab shell is superseded by trust_direct_commands + full_access_mode ──
+    # Kept functional for backward compatibility but no longer the recommended path.
     def start_lab_goal(self, goal: str, *, session_id: str = "") -> Dict[str, Any]:
         normalized_session_id = self._normalize_session_id(session_id)
         scope_id = self._lab_scope_id_locked(normalized_session_id)
@@ -2762,6 +2777,8 @@ class ExecutionManager:
         recent_runs = self.agent.history_store.get_recent_runs(limit=8, state_scope_id=scope_id)
         return {
             **base,
+            "deprecated": True,
+            "deprecation_notice": "Lab shell is deprecated. Use trust_direct_commands (default on) for direct command access.",
             "session_id": normalized_session_id,
             "state_scope_id": scope_id,
             "status": snapshot.get("status", "idle"),

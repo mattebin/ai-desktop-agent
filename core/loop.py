@@ -264,6 +264,25 @@ def _fallback_finalize_message(task_state) -> str:
     return rendered or lead
 
 
+def _lean_finalize_message(task_state) -> str:
+    """Lightweight finalize for simple completions — no LLM round-trip needed."""
+    if task_state.steps:
+        last_step = task_state.steps[-1]
+        result = last_step.get("result", {})
+        if isinstance(result, dict):
+            msg = str(result.get("message", "") or result.get("summary", "")).strip()
+            if msg:
+                return msg
+        elif isinstance(result, str) and result.strip():
+            return result.strip()
+    return _fallback_finalize_message(task_state)
+
+
+def _is_simple_completion(task_state) -> bool:
+    """True when the task completed in few enough steps that an LLM finalize is wasteful."""
+    return len(task_state.steps) <= 2 and str(getattr(task_state, "status", "")).strip().lower() == "completed"
+
+
 def _should_short_circuit_desktop_finalization(task_state) -> bool:
     status = str(getattr(task_state, "status", "")).strip().lower()
     if status not in {"paused", "blocked", "incomplete"}:
@@ -2208,8 +2227,10 @@ def run_task_loop(
     _emit_progress(progress_callback, "loop_entered", detail="Entered the bounded operator loop.")
 
     # ── fast path: skip LLM for simple direct actions ────────────
+    raw_message = str(getattr(task_state, "raw_user_message", "")).strip()
+    fast_path_input = raw_message or planner_goal
     if not task_state.steps:
-        fast_plan = try_direct_action(planner_goal)
+        fast_plan = try_direct_action(fast_path_input)
         if fast_plan is not None:
             _emit_progress(progress_callback, "fast_path_matched", detail=f"Fast path: {fast_plan['tool']}")
             fast_tool = str(fast_plan["tool"]).strip()
@@ -2247,8 +2268,13 @@ def run_task_loop(
                     }
                 # Fast path tool failed — fall through to normal LLM loop for recovery
 
+    _loop_iteration = 0
+    _last_step_failed = False
     for _ in range(max_iterations):
-        refresh_operator_intelligence_context(task_state)
+        # Phase 5: skip intelligence refresh on first iteration; only every 3rd step or after failures
+        if _loop_iteration > 0 and (_last_step_failed or _loop_iteration % 3 == 0):
+            refresh_operator_intelligence_context(task_state)
+        _loop_iteration += 1
         if callable(control_callback):
             control_result = _finalize_control_request(
                 llm,
@@ -2353,10 +2379,13 @@ def run_task_loop(
                 )
             task_state.status = "completed"
             _persist_session_state(session_store, task_state)
+            finalize_fn = _lean_finalize_message if _is_simple_completion(task_state) else (
+                lambda ts: _finalize_message(llm, ts, progress_callback=progress_callback)
+            )
             return {
                 "ok": True,
                 "status": "completed",
-                "message": _finalize_message(llm, task_state, progress_callback=progress_callback),
+                "message": finalize_fn(task_state),
                 "steps": task_state.steps,
             }
 
@@ -2422,6 +2451,9 @@ def run_task_loop(
                 tool_name=tool_name,
                 result_status="paused" if result.get("paused", False) else ("completed" if result.get("ok", False) else "failed"),
             )
+        # Phase 5: track whether last step failed for conditional refresh
+        _last_step_failed = not result.get("ok", False)
+
         operator_retry_stop = _maybe_finalize_operator_retry_stop(
             llm,
             task_state,

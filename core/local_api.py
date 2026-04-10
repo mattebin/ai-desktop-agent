@@ -896,6 +896,7 @@ class LocalOperatorApiServer:
                     self._respond_ok(_watch_payload(server_ref.controller.get_watch_state()))
                     return
 
+                # DEPRECATED: lab endpoints kept for backward compat; use trust_direct_commands instead
                 if path == "/lab/status":
                     session_id, _state_scope_id = self._session_filters(parsed=parsed)
                     self._respond_ok(server_ref.controller.get_lab_status(session_id=session_id))
@@ -1189,6 +1190,7 @@ class LocalOperatorApiServer:
                     self._respond_ok({"execution": execution})
                     return
 
+                # DEPRECATED: lab arm/disarm/commands/goals kept for backward compat
                 if path == "/lab/arm":
                     session_id, _state_scope_id = self._session_filters(body=body)
                     result = server_ref.controller.arm_lab_mode(

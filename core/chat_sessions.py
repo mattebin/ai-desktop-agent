@@ -1129,7 +1129,7 @@ class ChatSessionManager:
                 }
 
             composed_goal = self._compose_goal_locked(session, rendered, route)
-            dispatch = self.controller.start_goal(composed_goal, session_id=session_id)
+            dispatch = self.controller.start_goal(composed_goal, session_id=session_id, raw_user_message=rendered)
 
             if not dispatch.get("ok"):
                 self._append_message_locked(

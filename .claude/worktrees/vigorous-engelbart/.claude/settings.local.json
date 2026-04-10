@@ -31,7 +31,10 @@
       "Bash(python -m pytest tests/ -v --timeout=60)",
       "Bash(npx tauri:*)",
       "Bash(python3)",
-      "Bash(pwsh -Command ':*)"
+      "Bash(pwsh -Command ':*)",
+      "Bash(python -m pytest tests/test_fast_path.py -v)",
+      "Bash(python -c \"from core.state import TaskState; s = TaskState\\('test'\\); print\\('raw_user_message:', repr\\(s.raw_user_message\\)\\); print\\('full_access_mode:', s.full_access_mode\\)\")",
+      "Bash(python -c \"from core.fast_path import try_direct_action, build_fast_result_message; print\\('open notepad:', try_direct_action\\('open notepad'\\)\\); print\\('open google:', try_direct_action\\('open google.com'\\)\\); print\\('screenshot:', try_direct_action\\('take a screenshot'\\)\\)\")"
     ]
   }
 }
