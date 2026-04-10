@@ -3,6 +3,7 @@
 import re
 import time
 
+from core.fast_path import try_direct_action, build_fast_result_message
 from core.operator_intelligence import (
     apply_outcome_evaluation,
     capture_action_context,
@@ -2205,6 +2206,46 @@ def run_task_loop(
     max_iterations = int(settings.get("max_iterations", 12))
     planner_goal = str(planning_goal or task_state.goal).strip() or task_state.goal
     _emit_progress(progress_callback, "loop_entered", detail="Entered the bounded operator loop.")
+
+    # ── fast path: skip LLM for simple direct actions ────────────
+    if not task_state.steps:
+        fast_plan = try_direct_action(planner_goal)
+        if fast_plan is not None:
+            _emit_progress(progress_callback, "fast_path_matched", detail=f"Fast path: {fast_plan['tool']}")
+            fast_tool = str(fast_plan["tool"]).strip()
+            fast_args = dict(fast_plan.get("args", {}))
+
+            if tool_runtime.has_tool(fast_tool):
+                if fast_tool.startswith("desktop_"):
+                    fast_args, fast_result = _execute_desktop_tool_step(
+                        tool_runtime, task_state, fast_tool, fast_args, planner_goal,
+                        session_store=session_store, progress_callback=progress_callback,
+                    )
+                else:
+                    fast_args = tool_runtime.prepare_args(fast_tool, fast_args, task_state, planning_goal=planner_goal)
+                    fast_result = tool_runtime.execute(fast_tool, fast_args)
+                    _record_tool_result(task_state, fast_tool, fast_args, fast_result)
+
+                _persist_session_state(session_store, task_state)
+
+                if fast_result.get("paused", False) or task_state.status == "paused":
+                    return {
+                        "ok": False,
+                        "status": "paused",
+                        "message": "",
+                        "steps": task_state.steps,
+                    }
+
+                if fast_result.get("ok", False):
+                    task_state.status = "completed"
+                    _persist_session_state(session_store, task_state)
+                    return {
+                        "ok": True,
+                        "status": "completed",
+                        "message": build_fast_result_message(fast_tool, fast_args, fast_result),
+                        "steps": task_state.steps,
+                    }
+                # Fast path tool failed — fall through to normal LLM loop for recovery
 
     for _ in range(max_iterations):
         refresh_operator_intelligence_context(task_state)

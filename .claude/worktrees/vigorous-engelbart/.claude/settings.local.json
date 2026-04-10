@@ -29,7 +29,9 @@
       "Bash(npx tsc:*)",
       "Bash(npm run:*)",
       "Bash(python -m pytest tests/ -v --timeout=60)",
-      "Bash(npx tauri:*)"
+      "Bash(npx tauri:*)",
+      "Bash(python3)",
+      "Bash(pwsh -Command ':*)"
     ]
   }
 }
