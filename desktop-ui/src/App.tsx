@@ -3059,28 +3059,14 @@ export default function App() {
             : "Run";
 
   async function handleNewChat() {
-    if (!apiBaseUrl) {
-      return;
-    }
-    setSending(true);
-    try {
-      const result = await createSession(apiBaseUrl);
-      const nextSession = result.session;
-      if (!nextSession?.session_id) {
-        await refreshSidebar();
-        return;
-      }
-      setSessions((current) => upsertSession(current, nextSession));
-      setSessionDetail(nextSession);
-      setMessages((current) => replaceMessagesPreservingIdentity(current, nextSession.messages || []));
-      startTransition(() => setSelectedSessionId(nextSession.session_id));
-      clearDraft(nextSession.session_id);
-      setActivity([]);
-      shouldStickToBottomRef.current = true;
-      window.requestAnimationFrame(() => textareaRef.current?.focus());
-    } finally {
-      setSending(false);
-    }
+    setActiveSurface("chat");
+    startTransition(() => setSelectedSessionId(""));
+    setSessionDetail(null);
+    setMessages([]);
+    clearDraft("");
+    setActivity([]);
+    shouldStickToBottomRef.current = true;
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   async function sendMessageContent(rawContent: string) {

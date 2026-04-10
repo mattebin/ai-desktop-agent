@@ -23,7 +23,11 @@
       "Bash(curl -s http://127.0.0.1:8765/email/threads)",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\), 'threads:', len\\(d.get\\('data',{}\\).get\\('threads',[]\\)\\)\\)\")",
       "Bash(curl -s http://127.0.0.1:8765/automations)",
-      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\)\\)\")"
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\)\\)\")",
+      "Bash(python -m pytest workflow_bridge_eval.py -v)",
+      "Bash(python workflow_bridge_eval.py)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)"
     ]
   }
 }
