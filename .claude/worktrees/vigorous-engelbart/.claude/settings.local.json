@@ -11,7 +11,19 @@
       "Bash(ls -la /c/Users/Matte/ai-desktop-agent/core/*.py)",
       "Bash(ls -la /c/Users/Matte/ai-desktop-agent/tools/*.py)",
       "Bash(wc -l /c/Users/Matte/ai-desktop-agent/core/*.py /c/Users/Matte/ai-desktop-agent/tools/shell.py /c/Users/Matte/ai-desktop-agent/tools/browser.py)",
-      "WebSearch"
+      "WebSearch",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s http://127.0.0.1:8765/health)",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s http://127.0.0.1:8765/sessions)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\), 'sessions:', len\\(d.get\\('data',{}\\).get\\('sessions',[]\\)\\)\\)\")",
+      "Bash(curl -s http://127.0.0.1:8765/controls)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\)\\); dd=d.get\\('data',{}\\); print\\('keys:', list\\(dd.keys\\(\\)\\)[:10]\\)\")",
+      "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)[:500]\\)\")",
+      "Bash(curl -s http://127.0.0.1:8765/email/threads)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\), 'threads:', len\\(d.get\\('data',{}\\).get\\('threads',[]\\)\\)\\)\")",
+      "Bash(curl -s http://127.0.0.1:8765/automations)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('ok'\\)\\)\")"
     ]
   }
 }
