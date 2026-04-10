@@ -50,6 +50,87 @@ def _authoritative_session_reply(session_payload: Dict[str, Any] | None) -> str:
     return ""
 
 
+def _iter_sse_events(stream: "LocalOperatorApiEventStream"):
+    stream.open()
+    # Build a reliable line reader on top of the raw socket.
+    # HTTPResponse.readline() inherits IOBase.readline which calls
+    # read(1) in a tight loop — this stalls on long-lived SSE
+    # connections in CPython because HTTPResponse.read() re-enters
+    # the HTTP framing path on every single byte. Reading directly
+    # from the underlying buffered socket (response.fp) avoids that.
+    _fp = getattr(stream._response, "fp", None)
+    _leftover = b""
+
+    def _next_line() -> bytes:
+        """Return the next \\n-terminated line from the SSE stream."""
+        nonlocal _leftover
+        while True:
+            idx = _leftover.find(b"\n")
+            if idx >= 0:
+                line, _leftover = _leftover[: idx + 1], _leftover[idx + 1 :]
+                return line
+            try:
+                chunk = _fp.read1(8192) if _fp is not None else stream._response.read(8192)
+            except Exception:
+                return b""
+            if not chunk:
+                result = _leftover
+                _leftover = b""
+                return result
+            _leftover += chunk
+
+    event_name = "message"
+    event_id = ""
+    data_lines = []
+    while not stream._closed and stream._response is not None:
+        raw_line = _next_line()
+        if not raw_line:
+            break
+        line = raw_line.decode("utf-8").rstrip("\r\n")
+        if not line:
+            if data_lines:
+                raw_payload = "\n".join(data_lines)
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    payload = {"event": event_name, "data_text": _trim_text(raw_payload, limit=1200)}
+                if isinstance(payload, dict):
+                    payload.setdefault("event", event_name)
+                    if event_id and not payload.get("event_id"):
+                        payload["event_id"] = event_id
+                    if payload.get("event_id"):
+                        stream.last_event_id = _trim_text(payload.get("event_id", ""), limit=80)
+                    yield payload
+            event_name = "message"
+            event_id = ""
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip() or "message"
+            continue
+        if line.startswith("id:"):
+            event_id = line[3:].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines and not stream._closed:
+        raw_payload = "\n".join(data_lines)
+        try:
+            payload = json.loads(raw_payload)
+        except Exception:
+            payload = {"event": event_name, "data_text": _trim_text(raw_payload, limit=1200)}
+        if isinstance(payload, dict):
+            payload.setdefault("event", event_name)
+            if event_id and not payload.get("event_id"):
+                payload["event_id"] = event_id
+            if payload.get("event_id"):
+                stream.last_event_id = _trim_text(payload.get("event_id", ""), limit=80)
+            yield payload
+    stream.close()
+
+
 def _status_wait_debug(snapshot: Dict[str, Any] | None, session_payload: Dict[str, Any] | None = None) -> str:
     current = snapshot if isinstance(snapshot, dict) else {}
     active_task = current.get("active_task", {}) if isinstance(current.get("active_task", {}), dict) else {}
@@ -365,80 +446,4 @@ class LocalOperatorApiEventStream:
             self._response = None
 
     def iter_events(self):
-        self.open()
-        # Build a reliable line reader on top of the raw socket.
-        # HTTPResponse.readline() inherits IOBase.readline which calls
-        # read(1) in a tight loop — this stalls on long-lived SSE
-        # connections in CPython because HTTPResponse.read() re-enters
-        # the HTTP framing path on every single byte.  Reading directly
-        # from the underlying buffered socket (response.fp) avoids that.
-        _fp = getattr(self._response, "fp", None)
-        _leftover = b""
-
-        def _next_line() -> bytes:
-            """Return the next \\n-terminated line from the SSE stream."""
-            nonlocal _leftover
-            while True:
-                idx = _leftover.find(b"\n")
-                if idx >= 0:
-                    line, _leftover = _leftover[: idx + 1], _leftover[idx + 1 :]
-                    return line
-                try:
-                    chunk = _fp.read1(8192) if _fp is not None else self._response.read(8192)
-                except Exception:
-                    return b""
-                if not chunk:
-                    result = _leftover
-                    _leftover = b""
-                    return result
-
-        event_name = "message"
-        event_id = ""
-        data_lines = []
-        while not self._closed and self._response is not None:
-            raw_line = _next_line()
-            if not raw_line:
-                break
-            line = raw_line.decode("utf-8").rstrip("\r\n")
-            if not line:
-                if data_lines:
-                    raw_payload = "\n".join(data_lines)
-                    try:
-                        payload = json.loads(raw_payload)
-                    except Exception:
-                        payload = {"event": event_name, "data_text": _trim_text(raw_payload, limit=1200)}
-                    if isinstance(payload, dict):
-                        payload.setdefault("event", event_name)
-                        if event_id and not payload.get("event_id"):
-                            payload["event_id"] = event_id
-                        if payload.get("event_id"):
-                            self.last_event_id = _trim_text(payload.get("event_id", ""), limit=80)
-                        yield payload
-                event_name = "message"
-                event_id = ""
-                data_lines = []
-                continue
-            if line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                event_name = line[6:].strip() or "message"
-                continue
-            if line.startswith("id:"):
-                event_id = line[3:].strip()
-                continue
-            if line.startswith("data:"):
-                data_lines.append(line[5:].lstrip())
-        if data_lines and not self._closed:
-            raw_payload = "\n".join(data_lines)
-            try:
-                payload = json.loads(raw_payload)
-            except Exception:
-                payload = {"event": event_name, "data_text": _trim_text(raw_payload, limit=1200)}
-            if isinstance(payload, dict):
-                payload.setdefault("event", event_name)
-                if event_id and not payload.get("event_id"):
-                    payload["event_id"] = event_id
-                if payload.get("event_id"):
-                    self.last_event_id = _trim_text(payload.get("event_id", ""), limit=80)
-                yield payload
-        self.close()
+        yield from _iter_sse_events(self)

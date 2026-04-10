@@ -720,21 +720,21 @@ class LocalApiEventStream:
         channel.last_access_at = time.monotonic()
         return effective_state
 
-    def _prime_reconnect_messages_locked(self, channel: _ReplayChannel) -> Dict[str, Any] | None:
-        if not channel.session_id:
+    def _build_primed_reconnect_state(self, *, session_id: str, latest_state: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+        safe_session_id = _trim_text(session_id, limit=80)
+        if not safe_session_id:
             return None
-        payload = self.chat_manager.peek_stream_view(channel.session_id, limit=self.message_limit)
+        payload = self.chat_manager.peek_stream_view(safe_session_id, limit=self.message_limit)
         if not payload.get("ok"):
             return None
 
-        latest_state = channel.latest_state if isinstance(channel.latest_state, dict) else {}
+        state_snapshot = latest_state if isinstance(latest_state, dict) else {}
         primed_state = {
             "session": _compact_session(payload.get("session", {})),
             "messages": [_compact_message(message) for message in payload.get("messages", [])[-self.message_limit :]],
-            "snapshot": latest_state.get("snapshot", {}) if isinstance(latest_state.get("snapshot", {}), dict) else {},
-            "alerts": list(latest_state.get("alerts", []))[: self.alert_limit] if isinstance(latest_state.get("alerts", []), list) else [],
+            "snapshot": state_snapshot.get("snapshot", {}) if isinstance(state_snapshot.get("snapshot", {}), dict) else {},
+            "alerts": list(state_snapshot.get("alerts", []))[: self.alert_limit] if isinstance(state_snapshot.get("alerts", []), list) else [],
         }
-        self._apply_state_to_channel_locked(channel, primed_state)
         return primed_state
 
     def _publish_locked(self, channel: _ReplayChannel, event_name: str, *, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -940,14 +940,12 @@ class LocalApiEventStream:
         replay_status = "fresh" if not requested_last_event_id else "pending"
         replay_events: List[Dict[str, Any]] = []
         state: Dict[str, Any] = {}
+        primed_state: Dict[str, Any] | None = None
+        latest_state_for_prime: Dict[str, Any] | None = None
         with self._condition:
             channel = self._ensure_channel_locked(safe_session_id, safe_scope_id)
-            primed_state: Dict[str, Any] | None = None
-            if requested_last_event_id and channel.latest_state:
-                try:
-                    primed_state = self._prime_reconnect_messages_locked(channel)
-                except Exception:
-                    primed_state = None
+            if requested_last_event_id and isinstance(channel.latest_state, dict):
+                latest_state_for_prime = dict(channel.latest_state)
             channel.subscribers += 1
             channel.last_access_at = time.monotonic()
             last_seen_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
@@ -965,10 +963,21 @@ class LocalApiEventStream:
                 },
             )
 
+            if requested_last_event_id:
+                try:
+                    primed_state = self._build_primed_reconnect_state(
+                        session_id=safe_session_id,
+                        latest_state=latest_state_for_prime,
+                    )
+                except Exception:
+                    primed_state = None
+
             with self._condition:
                 channel = self._channels.get(self._channel_key(safe_session_id, safe_scope_id))
                 if channel is None:
                     channel = self._ensure_channel_locked(safe_session_id, safe_scope_id)
+                if isinstance(primed_state, dict) and primed_state:
+                    self._apply_state_to_channel_locked(channel, primed_state)
                 state = self._bootstrap_channel_locked(channel, state=primed_state if isinstance(primed_state, dict) and primed_state else None)
                 replay_status, replay_events = self._replay_after_locked(channel, requested_last_event_id)
                 current_sequence = int(channel.buffer[-1].get("_sequence", 0)) if channel.buffer else 0
