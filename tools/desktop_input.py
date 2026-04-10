@@ -1038,8 +1038,15 @@ def desktop_focus_window(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=before_windows,
             expected_title=str(target_window.get("title", "") or args.get("title", "") or args.get("expected_window_title", "")).strip(),
             expected_window_id=str(target_window.get("window_id", "") or args.get("window_id", "") or args.get("expected_window_id", "")).strip(),
-            expected_process_names=[str(target_window.get("process_name", "")).strip()],
-            target_description=str(target_window.get("title", "") or args.get("title", "") or "requested window").strip(),
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    [target_window.get("process_name", "")]
+                    + list(args.get("expected_process_names", []))
+                )
+                if str(item).strip()
+            ],
+            target_description=str(args.get("target_description", "") or target_window.get("title", "") or args.get("title", "") or "requested window").strip(),
             sample_count=_mod._coerce_int(args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_mod._coerce_int(args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -1547,8 +1554,18 @@ def desktop_click_mouse(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=windows,
             expected_title=str(target_window.get("title", "") or action_args.get("expected_window_title", "")).strip(),
             expected_window_id=str(target_window.get("window_id", "") or action_args.get("expected_window_id", "")).strip(),
-            expected_process_names=[str(target_window.get("process_name", "")).strip()],
-            target_description=f"{click_label} in {target_window.get('title', active_window.get('title', 'the active window'))}",
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    [target_window.get("process_name", "")]
+                    + list(action_args.get("expected_process_names", []))
+                )
+                if str(item).strip()
+            ],
+            target_description=str(
+                action_args.get("target_description", "")
+                or f"{click_label} in {target_window.get('title', active_window.get('title', 'the active window'))}"
+            ).strip(),
             sample_count=_mod._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_mod._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -1715,8 +1732,18 @@ def desktop_scroll(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=windows,
             expected_title=str(target_window.get("title", "") or action_args.get("expected_window_title", "")).strip(),
             expected_window_id=str(target_window.get("window_id", "") or action_args.get("expected_window_id", "")).strip(),
-            expected_process_names=[str(target_window.get("process_name", "")).strip()],
-            target_description=f"scroll {direction} in {target_window.get('title', active_window.get('title', 'the active window'))}",
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    [target_window.get("process_name", "")]
+                    + list(action_args.get("expected_process_names", []))
+                )
+                if str(item).strip()
+            ],
+            target_description=str(
+                action_args.get("target_description", "")
+                or f"scroll {direction} in {target_window.get('title', active_window.get('title', 'the active window'))}"
+            ).strip(),
             sample_count=_mod._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_mod._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -2070,8 +2097,15 @@ def desktop_type_text(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=windows,
             expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
             expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
-            expected_process_names=[str(active_window.get("process_name", "")).strip()],
-            target_description=field_label,
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    list(action_args.get("expected_process_names", []))
+                    or [str(active_window.get("process_name", "")).strip()]
+                )
+                if str(item).strip()
+            ],
+            target_description=str(action_args.get("target_description", "") or field_label).strip(),
             sample_count=_mod._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_mod._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -2238,8 +2272,15 @@ def desktop_press_key(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=windows,
             expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
             expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
-            expected_process_names=[str(active_window.get("process_name", "")).strip()],
-            target_description=key_preview or "bounded key press",
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    list(action_args.get("expected_process_names", []))
+                    or [str(active_window.get("process_name", "")).strip()]
+                )
+                if str(item).strip()
+            ],
+            target_description=str(action_args.get("target_description", "") or key_preview or "bounded key press").strip(),
             sample_count=_mod._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_mod._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )

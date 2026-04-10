@@ -8,6 +8,7 @@ from core.browser_tasks import (
     infer_browser_task_name,
     infer_browser_task_step,
 )
+from core.capability_profiles import is_lab_profile, normalize_execution_profile
 from core.tool_policy import build_tool_policy_snapshot, classify_tool_risk
 from core.windows_opening import classify_open_target, infer_open_request_preferences, open_target_signature
 
@@ -146,9 +147,12 @@ class ToolRuntime:
                 raise ValueError(f"Duplicate tool name registered: {tool.name}")
             self.tool_map[tool.name] = tool
 
-    def planner_tools(self) -> list[Dict[str, Any]]:
+    def planner_tools(self, task_state=None) -> list[Dict[str, Any]]:
         planner_tools: list[Dict[str, Any]] = []
+        lab_enabled = self._lab_mode_enabled(task_state)
         for tool in self.tools:
+            if tool.name == "lab_run_shell" and not lab_enabled:
+                continue
             tool_dict = tool.to_planner_dict()
             policy = classify_tool_risk(tool.name)
             planner_note = str(policy.get("planner_note", "")).strip()
@@ -181,6 +185,120 @@ class ToolRuntime:
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return self.tool_map[tool_name].func(args)
+
+    def _control_snapshot(self, task_state) -> Dict[str, Any]:
+        cached = getattr(task_state, "_last_control_snapshot", None)
+        if isinstance(cached, dict) and cached:
+            return cached
+        getter = getattr(task_state, "get_control_snapshot", None)
+        if not callable(getter):
+            return {}
+        try:
+            snapshot = getter()
+        except Exception:
+            return {}
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _environment_awareness(self, task_state) -> Dict[str, Any]:
+        awareness = getattr(task_state, "_environment_awareness", None)
+        return awareness if isinstance(awareness, dict) else {}
+
+    def _lab_mode_enabled(self, task_state) -> bool:
+        if task_state is None:
+            return False
+        awareness = self._environment_awareness(task_state)
+        profile = normalize_execution_profile(
+            getattr(task_state, "execution_profile", "") or awareness.get("execution_profile", "")
+        )
+        return bool(is_lab_profile(profile) and awareness.get("lab_armed", False))
+
+    def _proposal_matches_tool(self, proposal: Dict[str, Any], tool_name: str) -> bool:
+        actions = [
+            str(item).strip()
+            for item in list(proposal.get("suggested_next_actions", []))
+            if str(item).strip()
+        ]
+        if tool_name in actions:
+            return True
+        target_kind = str(proposal.get("target_kind", "")).strip().lower()
+        if tool_name in {"desktop_focus_window", "desktop_recover_window", "desktop_wait_for_window_ready"}:
+            return target_kind in {"focus_candidate", "recovery_candidate", "ui_area", "region"}
+        if tool_name in {"desktop_click_mouse", "desktop_click_point", "desktop_scroll"}:
+            return target_kind in {"point", "region", "ui_area"}
+        if tool_name in {"desktop_type_text", "desktop_press_key", "desktop_press_key_sequence"}:
+            return target_kind in {"ui_area", "region", "focus_candidate"}
+        return False
+
+    def _latest_desktop_target_hint(self, task_state, tool_name: str) -> Dict[str, Any]:
+        snapshot = self._control_snapshot(task_state)
+        desktop = snapshot.get("desktop", {}) if isinstance(snapshot.get("desktop", {}), dict) else {}
+        for key in ("selected_target_proposals", "checkpoint_target_proposals"):
+            context = desktop.get(key, {}) if isinstance(desktop.get(key, {}), dict) else {}
+            proposals = context.get("proposals", []) if isinstance(context.get("proposals", []), list) else []
+            if not proposals:
+                continue
+            fallback: Dict[str, Any] = {}
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                if not fallback:
+                    fallback = proposal
+                if self._proposal_matches_tool(proposal, tool_name):
+                    return proposal
+            if fallback:
+                return fallback
+        return {}
+
+    def _latest_email_activity(self, task_state) -> Dict[str, Any]:
+        snapshot = self._control_snapshot(task_state)
+        email = snapshot.get("email", {}) if isinstance(snapshot.get("email", {}), dict) else {}
+        return email
+
+    def _prepare_email_read_thread_args(self, task_state, args: Dict[str, Any]):
+        email = self._latest_email_activity(task_state)
+        if not str(args.get("thread_id", "")).strip():
+            thread_id = str(email.get("thread_id", "")).strip()
+            if thread_id:
+                args["thread_id"] = thread_id
+        args.setdefault("max_messages", 8)
+
+    def _prepare_email_prepare_reply_draft_args(self, task_state, args: Dict[str, Any]):
+        email = self._latest_email_activity(task_state)
+        if not str(args.get("thread_id", "")).strip():
+            thread_id = str(email.get("thread_id", "")).strip()
+            if thread_id:
+                args["thread_id"] = thread_id
+
+    def _prepare_email_prepare_forward_draft_args(self, task_state, args: Dict[str, Any]):
+        email = self._latest_email_activity(task_state)
+        if not str(args.get("thread_id", "")).strip():
+            thread_id = str(email.get("thread_id", "")).strip()
+            if thread_id:
+                args["thread_id"] = thread_id
+
+    def _prepare_email_send_draft_args(self, task_state, args: Dict[str, Any]):
+        email = self._latest_email_activity(task_state)
+        if not str(args.get("draft_id", "")).strip():
+            draft_id = str(email.get("draft_id", "")).strip()
+            if draft_id:
+                args["draft_id"] = draft_id
+
+    def _prepare_lab_run_shell_args(self, task_state, args: Dict[str, Any]):
+        awareness = self._environment_awareness(task_state)
+        execution_profile = normalize_execution_profile(
+            str(args.get("execution_profile", "")).strip()
+            or getattr(task_state, "execution_profile", "")
+            or awareness.get("execution_profile", "")
+        )
+        args.setdefault("execution_profile", execution_profile)
+        args.setdefault("lab_armed", bool(awareness.get("lab_armed", False)))
+        args.setdefault("shell_kind", "powershell")
+        snapshot = self._control_snapshot(task_state)
+        lab = snapshot.get("lab", {}) if isinstance(snapshot.get("lab", {}), dict) else {}
+        if not str(args.get("workspace_id", "")).strip():
+            workspace_id = str(lab.get("workspace_id", "")).strip()
+            if workspace_id:
+                args["workspace_id"] = workspace_id
 
     def latest_completed_result(self, task_state, tool_name: str) -> Dict[str, Any] | None:
         for step in reversed(task_state.steps):
@@ -461,6 +579,10 @@ class ToolRuntime:
         )
         checkpoint_target = str(getattr(task_state, "desktop_checkpoint_target", "")).strip()
         remembered_target_title = checkpoint_target or str(getattr(task_state, "desktop_last_target_window", "")).strip()
+        target_hint = self._latest_desktop_target_hint(task_state, tool_name)
+        hinted_title = str(target_hint.get("window_title", "")).strip()
+        hinted_process = str(target_hint.get("window_process", "")).strip()
+        hinted_summary = str(target_hint.get("summary", "")).strip()
 
         if getattr(task_state, "desktop_observation_token", ""):
             args.setdefault("observation_token", task_state.desktop_observation_token)
@@ -468,12 +590,30 @@ class ToolRuntime:
             args.setdefault("title", remembered_target_title)
             args.setdefault("expected_window_title", remembered_target_title)
             args.setdefault("exact", True)
+        elif targeted_window_tool and not has_explicit_window_target and hinted_title:
+            args.setdefault("title", hinted_title)
+            args.setdefault("expected_window_title", hinted_title)
+            args.setdefault("exact", True)
+        elif hinted_title and not str(args.get("expected_window_title", "")).strip():
+            args.setdefault("expected_window_title", hinted_title)
         elif getattr(task_state, "desktop_active_window_title", "") and not (targeted_window_tool and has_explicit_window_target):
             args.setdefault("expected_window_title", task_state.desktop_active_window_title)
         if getattr(task_state, "desktop_active_window_id", "") and not (
             targeted_window_tool and (has_explicit_window_target or remembered_target_title)
         ):
             args.setdefault("expected_window_id", task_state.desktop_active_window_id)
+        if hinted_process:
+            expected_process_names = [
+                str(item).strip()
+                for item in list(args.get("expected_process_names", []))
+                if str(item).strip()
+            ]
+            if hinted_process and hinted_process not in expected_process_names:
+                expected_process_names.append(hinted_process)
+            if expected_process_names:
+                args["expected_process_names"] = expected_process_names[:3]
+        if hinted_summary and not str(args.get("target_description", "")).strip():
+            args["target_description"] = hinted_summary
 
         if tool_name == "desktop_list_windows":
             args.setdefault("limit", 12)

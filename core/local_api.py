@@ -1220,6 +1220,28 @@ class LocalOperatorApiServer:
                         self._respond_error(400, result.get("message", "Unable to run lab command."))
                     return
 
+                if path == "/lab/goals/start":
+                    session_id, _state_scope_id = self._session_filters(body=body)
+                    result = server_ref.controller.start_lab_goal(
+                        self._goal_from_body(body),
+                        session_id=session_id,
+                    )
+                    if result.get("ok"):
+                        self._respond_ok(
+                            {
+                                "result": result,
+                                "status": _status_payload(
+                                    server_ref.controller.get_snapshot(
+                                        session_id=session_id,
+                                        state_scope_id=result.get("state_scope_id", ""),
+                                    )
+                                ),
+                            }
+                        )
+                    else:
+                        self._respond_error(400, result.get("message", "Unable to start lab goal."))
+                    return
+
                 if path == "/email/connect":
                     result = server_ref.controller.connect_gmail()
                     if result.get("ok", False):

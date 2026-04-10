@@ -11,11 +11,7 @@ from core.windows_opening import (
 )
 from tools.desktop_backends import (
     inspect_process_details,
-    launch_unowned_process,
     list_process_contexts,
-    open_in_explorer,
-    open_path_with_association,
-    open_url_with_shell,
     run_bounded_command,
     start_owned_process,
     stop_owned_process,
@@ -415,8 +411,15 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
             before_windows=windows,
             expected_title=str(action_args.get("expected_window_title", "") or active_window.get("title", "")).strip(),
             expected_window_id=str(action_args.get("expected_window_id", "") or active_window.get("window_id", "")).strip(),
-            expected_process_names=[str(active_window.get("process_name", "")).strip()],
-            target_description=key_preview or "bounded key sequence",
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    list(action_args.get("expected_process_names", []))
+                    or [str(active_window.get("process_name", "")).strip()]
+                )
+                if str(item).strip()
+            ],
+            target_description=str(action_args.get("target_description", "") or key_preview or "bounded key sequence").strip(),
             sample_count=_desktop()._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_desktop()._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -601,9 +604,16 @@ def desktop_start_process(args: Dict[str, Any]) -> Dict[str, Any]:
             strategy_family=str(strategy_view.get("strategy_family", "") or "direct_launch"),
             before_active_window=active_window,
             before_windows=windows,
-            expected_title=Path(executable).stem,
-            expected_process_names=[str(process_context.get("process_name", "")).strip() or Path(executable).name.lower()],
-            target_description=checkpoint_target,
+            expected_title=str(action_args.get("expected_window_title", "") or Path(executable).stem).strip(),
+            expected_process_names=[
+                str(item).strip()
+                for item in (
+                    list(action_args.get("expected_process_names", []))
+                    or [str(process_context.get("process_name", "")).strip() or Path(executable).name.lower()]
+                )
+                if str(item).strip()
+            ],
+            target_description=str(action_args.get("target_description", "") or checkpoint_target).strip(),
             launched_pid=int(process_context.get("pid", 0) or 0),
             sample_count=_desktop()._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_desktop()._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
@@ -779,7 +789,14 @@ def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
             strategy_family=str(strategy_view.get("strategy_family", "") or "command_open"),
             before_active_window=active_window,
             before_windows=windows,
-            target_description=checkpoint_target,
+            expected_title=str(action_args.get("expected_window_title", "")).strip(),
+            expected_window_id=str(action_args.get("expected_window_id", "")).strip(),
+            expected_process_names=[
+                str(item).strip()
+                for item in list(action_args.get("expected_process_names", []))
+                if str(item).strip()
+            ],
+            target_description=str(action_args.get("target_description", "") or checkpoint_target).strip(),
             sample_count=_desktop()._coerce_int(action_args.get("verification_samples", DESKTOP_DEFAULT_VERIFICATION_SAMPLES), DESKTOP_DEFAULT_VERIFICATION_SAMPLES, minimum=2, maximum=4),
             interval_ms=_desktop()._coerce_int(action_args.get("verification_interval_ms", DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS), DESKTOP_DEFAULT_VERIFICATION_INTERVAL_MS, minimum=80, maximum=320),
         )
@@ -956,18 +973,18 @@ def desktop_open_target(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
     elif strategy_family == "executable_launch":
-        open_payload = launch_unowned_process(
+        open_payload = _desktop().launch_unowned_process(
             executable=str(target_info.get("normalized_target", "") or target),
             args=bounded_arguments,
             cwd=cwd,
             env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
         )
     elif strategy_family == "association_open":
-        open_payload = open_path_with_association(target=str(target_info.get("normalized_target", "") or target))
+        open_payload = _desktop().open_path_with_association(target=str(target_info.get("normalized_target", "") or target))
     elif strategy_family == "url_browser":
-        open_payload = open_url_with_shell(target=str(target_info.get("target", "") or target))
+        open_payload = _desktop().open_url_with_shell(target=str(target_info.get("target", "") or target))
     else:
-        open_payload = open_in_explorer(
+        open_payload = _desktop().open_in_explorer(
             target=str(target_info.get("normalized_target", "") or target),
             select_target=bool(target_info.get("is_file", False)),
         )

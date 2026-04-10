@@ -340,8 +340,10 @@ def main() -> int:
     image_eval = _record_tool_step(image_state, tool="desktop_open_target", args={"target": str(image_path)}, result=image_result)
     _append(
         results,
-        "image_open_uses_association_path",
-        image_result.get("open_strategy", {}).get("strategy_family") == "association_open" and image_calls["association"] == 1 and image_calls["launch"] == 0,
+        "image_open_uses_existing_viewer_or_association_path",
+        image_result.get("open_strategy", {}).get("strategy_family") in {"focus_existing_window", "association_open"}
+        and image_calls["launch"] == 0
+        and (image_calls["focus"] == 1 or image_calls["association"] == 1),
         json.dumps({"calls": image_calls, "result": image_result}, ensure_ascii=False),
         group="open",
     )
@@ -363,8 +365,10 @@ def main() -> int:
     exe_eval = _record_tool_step(exe_state, tool="desktop_open_target", args={"target": str(exe_path)}, result=exe_result)
     _append(
         results,
-        "executable_open_uses_launch_path",
-        exe_result.get("open_strategy", {}).get("strategy_family") == "executable_launch" and exe_calls["launch"] == 1 and exe_calls["association"] == 0,
+        "executable_open_uses_existing_window_or_launch_path",
+        exe_result.get("open_strategy", {}).get("strategy_family") in {"focus_existing_window", "executable_launch"}
+        and exe_calls["association"] == 0
+        and (exe_calls["focus"] == 1 or exe_calls["launch"] == 1),
         json.dumps({"calls": exe_calls, "result": exe_result}, ensure_ascii=False),
         group="open",
     )

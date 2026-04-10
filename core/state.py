@@ -1831,6 +1831,57 @@ class TaskState:
             "reasons": [],
         }
 
+    def _collect_email_activity(self) -> Dict[str, Any]:
+        for step in reversed(self.steps):
+            tool_name = str(step.get("tool", "")).strip()
+            if not tool_name.startswith("email_"):
+                continue
+            result = step.get("result", {}) if isinstance(step.get("result", {}), dict) else {}
+            draft = result.get("draft", {}) if isinstance(result.get("draft", {}), dict) else {}
+            thread = result.get("thread", {}) if isinstance(result.get("thread", {}), dict) else {}
+            sent = result.get("sent", {}) if isinstance(result.get("sent", {}), dict) else {}
+            return {
+                "latest_tool": tool_name,
+                "summary": str(result.get("summary", "") or result.get("message", "")).strip(),
+                "thread_id": str(
+                    thread.get("thread_id", "")
+                    or result.get("thread_id", "")
+                    or draft.get("thread_id", "")
+                    or sent.get("thread_id", "")
+                ).strip(),
+                "subject": str(
+                    thread.get("subject", "")
+                    or draft.get("subject", "")
+                    or result.get("subject", "")
+                ).strip(),
+                "from": str(thread.get("last_from", "") or result.get("from", "")).strip(),
+                "draft_id": str(result.get("draft_id", "") or draft.get("draft_id", "")).strip(),
+                "draft_type": str(draft.get("draft_type", "")).strip(),
+                "draft_status": str(draft.get("status", "")).strip(),
+                "approval_required": bool(result.get("approval_required", False)),
+                "approval_status": str(result.get("approval_status", "")).strip(),
+                "needs_context": bool(result.get("needs_context", False) or draft.get("needs_context", False)),
+                "questions": [str(item).strip() for item in list(result.get("questions", []) or draft.get("questions", []))[:4] if str(item).strip()],
+                "recipients": [str(item).strip() for item in list(draft.get("to", []))[:4] if str(item).strip()],
+                "sent_message_id": str(sent.get("message_id", "")).strip(),
+            }
+        return {
+            "latest_tool": "",
+            "summary": "",
+            "thread_id": "",
+            "subject": "",
+            "from": "",
+            "draft_id": "",
+            "draft_type": "",
+            "draft_status": "",
+            "approval_required": False,
+            "approval_status": "",
+            "needs_context": False,
+            "questions": [],
+            "recipients": [],
+            "sent_message_id": "",
+        }
+
     def _collect_proposed_edits(self, limit: int = 3) -> Dict[str, Any]:
         for step in reversed(self.steps):
             if step.get("tool") != "draft_proposed_edits" or step.get("status") != "completed":
@@ -2784,6 +2835,7 @@ class TaskState:
     def get_control_snapshot(self) -> Dict[str, Any]:
         browser_activity = self._collect_browser_activity(limit=4)
         desktop_activity = self._collect_desktop_activity(limit=4)
+        email_activity = self._collect_email_activity()
         lab_activity = self._collect_lab_shell_activity()
         review_bundle = self._collect_review_bundle(limit=3)
         email_draft = self._latest_pending_email_draft()
@@ -2817,6 +2869,7 @@ class TaskState:
             or browser_activity.get("workflow_step", "")
             or desktop_activity.get("checkpoint_tool", "")
             or desktop_activity.get("last_action", "")
+            or email_activity.get("summary", "")
             or lab_activity.get("command", "")
         )
         if not current_step and self.steps:
@@ -2951,7 +3004,7 @@ class TaskState:
             "rolling_summary": self.last_summary,
         }
 
-        return {
+        snapshot = {
             "state_scope_id": self.state_scope_id,
             "execution_profile": normalize_execution_profile(self.execution_profile),
             "goal": self.goal,
@@ -2969,6 +3022,7 @@ class TaskState:
             "recovery_notes": recovery_notes,
             "browser": browser_activity,
             "desktop": desktop_activity,
+            "email": email_activity,
             "lab": lab_activity,
             "review_bundle": review_bundle,
             "pending_approval": pending_approval,
@@ -2985,6 +3039,8 @@ class TaskState:
                 "replacement_goal": self.task_replacement_goal,
             },
         }
+        setattr(self, "_last_control_snapshot", snapshot)
+        return snapshot
 
     def get_observation(self) -> str:
         recent_steps = self.steps[-5:]
@@ -3060,6 +3116,31 @@ class TaskState:
 
         if self.last_summary:
             lines.append(f"Rolling summary: {self.last_summary}")
+
+        email_activity = control_snapshot.get("email", {}) if isinstance(control_snapshot.get("email", {}), dict) else {}
+        if email_activity.get("thread_id") or email_activity.get("draft_id") or email_activity.get("summary"):
+            lines.append("Email context:")
+            if email_activity.get("thread_id"):
+                lines.append(f"- Latest thread: {email_activity.get('thread_id', '')}")
+            if email_activity.get("subject"):
+                lines.append(f"- Subject: {email_activity.get('subject', '')}")
+            if email_activity.get("from"):
+                lines.append(f"- Latest sender: {email_activity.get('from', '')}")
+            if email_activity.get("draft_id"):
+                lines.append(f"- Latest draft: {email_activity.get('draft_id', '')}")
+            if email_activity.get("draft_type"):
+                lines.append(f"- Draft type: {email_activity.get('draft_type', '')}")
+            if email_activity.get("draft_status"):
+                lines.append(f"- Draft status: {email_activity.get('draft_status', '')}")
+            if email_activity.get("summary"):
+                lines.append(f"- Latest email summary: {email_activity.get('summary', '')}")
+            if email_activity.get("needs_context"):
+                lines.append("- Draft still needs more context before it can be sent.")
+            for question in list(email_activity.get("questions", []))[:2]:
+                lines.append(f"- Open email question: {question}")
+            recipients = [str(item).strip() for item in list(email_activity.get("recipients", []))[:3] if str(item).strip()]
+            if recipients:
+                lines.append(f"- Draft recipients: {', '.join(recipients)}")
 
         lab_activity = control_snapshot.get("lab", {}) if isinstance(control_snapshot.get("lab", {}), dict) else {}
         if lab_activity.get("command") or lab_activity.get("summary"):

@@ -14,6 +14,9 @@ class OperatorController:
     def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         return self.manager.start_goal(goal, session_id=session_id, state_scope_id=state_scope_id)
 
+    def start_lab_goal(self, goal: str, *, session_id: str = "") -> Dict[str, Any]:
+        return self.manager.start_lab_goal(goal, session_id=session_id)
+
     def enqueue_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
         return self.manager.enqueue_goal(goal, source="queued_goal", start_if_idle=False, session_id=session_id, state_scope_id=state_scope_id)
 

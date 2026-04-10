@@ -2286,7 +2286,7 @@ def run_task_loop(
         plan = llm.plan_next_action(
             planner_goal,
             observation,
-            tool_runtime.planner_tools(),
+            tool_runtime.planner_tools(task_state),
             desktop_vision=desktop_vision,
         )
 

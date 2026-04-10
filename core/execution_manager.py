@@ -195,6 +195,7 @@ def _normalize_task_item(value: Any) -> Dict[str, Any]:
         "task_id": task_id,
         "session_id": session_id,
         "state_scope_id": state_scope_id,
+        "execution_profile": normalize_execution_profile(value.get("execution_profile", SAFE_BOUNDED_PROFILE)),
         "goal": _trim_text(value.get("goal", ""), limit=MAX_TASK_GOAL_CHARS),
         "status": _normalize_status(value.get("status", "queued")),
         "created_at": _trim_text(value.get("created_at", ""), limit=40) or _iso_timestamp(),
@@ -527,6 +528,45 @@ class ExecutionManager:
         self.desktop_capture_service.start()
         if auto_start:
             self.start_next(auto_trigger=True)
+
+    def _safe_email_status(self) -> Dict[str, Any]:
+        get_email_status = getattr(self.agent, "get_email_status", None)
+        if not callable(get_email_status):
+            return {}
+        try:
+            payload = get_email_status() or {}
+        except Exception as exc:
+            return {
+                "provider": "gmail",
+                "enabled": False,
+                "configured": False,
+                "authenticated": False,
+                "reason": str(exc or "").strip() or "Email status is unavailable.",
+            }
+        return payload if isinstance(payload, dict) else {}
+
+    def _memory_store(self):
+        return getattr(self.agent, "operator_memory_store", None)
+
+    def _problem_store(self):
+        return getattr(self.agent, "problem_store", None)
+
+    def _attach_runtime_stores(self, state: TaskState):
+        memory_store = self._memory_store()
+        if memory_store is not None:
+            setattr(state, "_operator_memory_store", memory_store)
+        problem_store = self._problem_store()
+        if problem_store is not None:
+            setattr(state, "_problem_store", problem_store)
+
+    def _remember_environment_awareness(self, environment_awareness: Dict[str, Any]):
+        memory_store = self._memory_store()
+        if memory_store is None or not hasattr(memory_store, "remember_environment"):
+            return
+        try:
+            memory_store.remember_environment(environment_awareness)
+        except Exception:
+            pass
 
     def shutdown(self):
         self._scheduler_stop.set()
@@ -1362,6 +1402,7 @@ class ExecutionManager:
         goal: str,
         *,
         source: str,
+        execution_profile: str = SAFE_BOUNDED_PROFILE,
         scheduled_task_id: str = "",
         watch_id: str = "",
         session_id: str = "",
@@ -1373,6 +1414,7 @@ class ExecutionManager:
             "task_id": f"task-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}",
             "session_id": normalized_session_id,
             "state_scope_id": normalized_scope_id,
+            "execution_profile": normalize_execution_profile(execution_profile),
             "goal": _trim_text(goal, limit=MAX_TASK_GOAL_CHARS),
             "status": "queued",
             "created_at": _iso_timestamp(),
@@ -1467,6 +1509,7 @@ class ExecutionManager:
         goal: str,
         *,
         source: str,
+        execution_profile: str = SAFE_BOUNDED_PROFILE,
         scheduled_task_id: str = "",
         watch_id: str = "",
         session_id: str = "",
@@ -1477,6 +1520,7 @@ class ExecutionManager:
         task = self._create_task_locked(
             goal,
             source=source,
+            execution_profile=execution_profile,
             scheduled_task_id=scheduled_task_id,
             watch_id=watch_id,
             session_id=session_id,
@@ -2451,9 +2495,21 @@ class ExecutionManager:
         session_id = self._task_session_id_locked(task)
         state = self.agent.load_task_state(task.get("goal", ""), state_scope_id=state_scope_id)
         state.state_scope_id = state_scope_id
+        self._attach_runtime_stores(state)
+        execution_profile = normalize_execution_profile(task.get("execution_profile", SAFE_BOUNDED_PROFILE))
+        state.set_execution_profile(execution_profile)
         state.task_id = task.get("task_id", "")
         state.session_id = session_id
         state.status = "running"
+        environment_awareness = build_environment_awareness(
+            settings={**self.agent.settings, "_settings_version": getattr(self.agent, "_settings_version", "")},
+            email_status=self._safe_email_status(),
+            execution_profile=execution_profile,
+            lab_armed=self._lab_armed,
+        )
+        setattr(state, "_environment_awareness", environment_awareness)
+        self._remember_environment_awareness(environment_awareness)
+        refresh_operator_intelligence_context(state)
         if hasattr(state, "clear_desktop_run_outcome"):
             state.clear_desktop_run_outcome()
         self.agent.save_task_state(state, state_scope_id=state_scope_id)
@@ -2554,6 +2610,7 @@ class ExecutionManager:
         *,
         source: str = "goal_run",
         start_if_idle: bool = False,
+        execution_profile: str = SAFE_BOUNDED_PROFILE,
         session_id: str = "",
         state_scope_id: str = "",
     ) -> Dict[str, Any]:
@@ -2565,6 +2622,7 @@ class ExecutionManager:
             task = self._enqueue_task_locked(
                 goal_text,
                 source=source,
+                execution_profile=execution_profile,
                 session_id=session_id,
                 state_scope_id=state_scope_id,
             )
@@ -2600,7 +2658,29 @@ class ExecutionManager:
         return response
 
     def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
-        return self.enqueue_goal(goal, source="goal_run", start_if_idle=True, session_id=session_id, state_scope_id=state_scope_id)
+        return self.enqueue_goal(
+            goal,
+            source="goal_run",
+            start_if_idle=True,
+            execution_profile=SAFE_BOUNDED_PROFILE,
+            session_id=session_id,
+            state_scope_id=state_scope_id,
+        )
+
+    def start_lab_goal(self, goal: str, *, session_id: str = "") -> Dict[str, Any]:
+        normalized_session_id = self._normalize_session_id(session_id)
+        scope_id = self._lab_scope_id_locked(normalized_session_id)
+        with self._lock:
+            if not self._lab_armed:
+                return {"ok": False, "message": "Arm lab mode with ENABLE LAB before starting an experimental lab goal."}
+        return self.enqueue_goal(
+            goal,
+            source="lab_goal",
+            start_if_idle=True,
+            execution_profile=SANDBOXED_FULL_ACCESS_LAB_PROFILE,
+            session_id=normalized_session_id,
+            state_scope_id=scope_id,
+        )
 
     def arm_lab_mode(self, *, confirmation: str = "", session_id: str = "") -> Dict[str, Any]:
         confirmation_text = " ".join(str(confirmation or "").strip().upper().split())
@@ -2677,6 +2757,7 @@ class ExecutionManager:
             task = self._create_task_locked(
                 f"Experimental lab command: {command_text}",
                 source="lab_shell",
+                execution_profile=SANDBOXED_FULL_ACCESS_LAB_PROFILE,
                 session_id=normalized_session_id,
                 state_scope_id=scope_id,
             )
@@ -2691,11 +2772,10 @@ class ExecutionManager:
             state.task_id = live_task.get("task_id", "")
             state.session_id = normalized_session_id
             state.status = "running"
-            setattr(state, "_operator_memory_store", self.agent.operator_memory_store)
-            setattr(state, "_problem_store", self.agent.problem_store)
+            self._attach_runtime_stores(state)
             environment_awareness = build_environment_awareness(
                 settings={**self.agent.settings, "_settings_version": getattr(self.agent, "_settings_version", "")},
-                email_status=self.agent.get_email_status(),
+                email_status=self._safe_email_status(),
                 execution_profile=SANDBOXED_FULL_ACCESS_LAB_PROFILE,
                 lab_armed=self._lab_armed,
             )
@@ -2704,7 +2784,7 @@ class ExecutionManager:
                 "_environment_awareness",
                 environment_awareness,
             )
-            self.agent.operator_memory_store.remember_environment(environment_awareness)
+            self._remember_environment_awareness(environment_awareness)
             refresh_operator_intelligence_context(state)
             self.agent.save_task_state(state, state_scope_id=scope_id)
             self._set_current_state_locked(state)
@@ -3748,6 +3828,7 @@ class ExecutionManager:
             "task_id": _trim_text(task.get("task_id", ""), limit=60),
             "session_id": self._task_session_id_locked(task),
             "state_scope_id": self._task_state_scope_id_locked(task),
+            "execution_profile": normalize_execution_profile(task.get("execution_profile", SAFE_BOUNDED_PROFILE)),
             "goal": _trim_text(task.get("goal", ""), limit=220),
             "status": _normalize_status(task.get("status", "queued")),
             "created_at": _trim_text(task.get("created_at", ""), limit=40),
