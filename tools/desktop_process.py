@@ -484,6 +484,53 @@ def desktop_press_key_sequence(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "message": f"Pressed sequence: {' → '.join(previews)}."}
 
 
+def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a shell command (powershell or cmd) with safety classification."""
+    from core.lab_shell import classify_lab_command, LAB_BLOCKED
+    from tools.desktop_backends import run_bounded_command
+
+    command = str(args.get("command", "")).strip()
+    shell_kind = str(args.get("shell_kind", "powershell")).strip().lower() or "powershell"
+    timeout_seconds = max(1, min(int(args.get("timeout_seconds", 8) or 8), 30))
+    cwd = str(args.get("cwd", "")).strip()
+
+    if not command:
+        return {"ok": False, "error": "No command provided.", "message": "Provide a command to run."}
+
+    # Safety filter — blocks credential theft, persistence, destructive ops, etc.
+    classification = classify_lab_command(command, shell_kind=shell_kind)
+    if classification.get("decision") == LAB_BLOCKED:
+        reasons = "; ".join(classification.get("reasons", []))
+        return {
+            "ok": False,
+            "blocked": True,
+            "error": f"Command blocked by safety filter: {reasons}",
+            "message": f"Blocked: {classification.get('summary', 'Safety policy violation.')}",
+            "blocked_categories": classification.get("blocked_categories", []),
+        }
+
+    # Execute
+    result = run_bounded_command(
+        command=command,
+        cwd=cwd,
+        env=args.get("env", {}) if isinstance(args.get("env", {}), dict) else {},
+        timeout_seconds=float(timeout_seconds),
+        shell_kind=shell_kind,
+    )
+    payload = result.get("data", {}) if isinstance(result.get("data", {}), dict) else {}
+    return {
+        "ok": bool(result.get("ok", False)),
+        "message": str(result.get("message", "")).strip() or "Command executed.",
+        "error": str(result.get("error", "")).strip(),
+        "exit_code": payload.get("exit_code", -1),
+        "stdout": payload.get("stdout_excerpt", ""),
+        "stderr": payload.get("stderr_excerpt", ""),
+        "timed_out": payload.get("timed_out", False),
+        "shell_kind": shell_kind,
+        "duration_ms": payload.get("duration_ms", 0),
+    }
+
+
 def desktop_list_processes(args: Dict[str, Any]) -> Dict[str, Any]:
     active_window, windows, observation = _current_desktop_context()
     query = str(args.get("query", "")).strip()
@@ -750,7 +797,8 @@ def desktop_stop_process(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def desktop_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
+def _desktop_run_command_v1(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Archived v1 — enterprise approval/evidence/verification command execution."""
     action_args = dict(args)
     strategy_view = _desktop()._desktop_strategy_view(
         action_args,
