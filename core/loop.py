@@ -26,6 +26,126 @@ _DESKTOP_MUTATING_TOOLS = {
 }
 
 
+# ── lean fast-path executor ─────────────────────────────────────
+# Calls core desktop functions directly, bypassing all evidence /
+# observation / verification / approval machinery.  Only used when
+# the fast path has already pattern-matched the intent.
+
+def _execute_lean_desktop_action(tool_name: str, args: dict) -> dict | None:
+    """Execute a desktop action using core functions only.
+
+    Returns a simple result dict on success, or *None* if this tool
+    isn't supported lean (fall through to normal execution).
+    """
+    try:
+        if tool_name == "desktop_open_target":
+            from tools.desktop_backends import open_path_with_association
+            target = str(args.get("target", "")).strip()
+            if not target:
+                return {"ok": False, "error": "No target provided.", "message": "No target provided."}
+            result = open_path_with_association(target=target)
+            return {
+                "ok": bool(result.get("ok", False)),
+                "message": str(result.get("message", "")).strip() or ("Opened." if result.get("ok") else "Failed to open."),
+                "error": str(result.get("error", "")).strip(),
+                "action": "desktop_open_target",
+            }
+
+        if tool_name == "desktop_press_key":
+            from tools.desktop_input import _send_key_sequence
+            key = str(args.get("key", "")).strip()
+            modifiers = list(args.get("modifiers", []))
+            if not key:
+                return {"ok": False, "error": "No key specified.", "message": "No key specified."}
+            ok = _send_key_sequence(key, modifiers, repeat=1)
+            combo = "+".join(modifiers + [key])
+            return {
+                "ok": ok,
+                "message": f"Pressed {combo}." if ok else f"Could not press {combo}.",
+                "action": "desktop_press_key",
+            }
+
+        if tool_name == "desktop_type_text":
+            from tools.desktop_input import _send_text
+            value = str(args.get("value", "")).strip()
+            if not value:
+                return {"ok": False, "error": "No text to type.", "message": "No text to type."}
+            ok = _send_text(value)
+            preview = value[:40] + ("..." if len(value) > 40 else "")
+            return {
+                "ok": ok,
+                "message": f'Typed "{preview}".' if ok else "Could not type the requested text.",
+                "action": "desktop_type_text",
+            }
+
+        if tool_name == "desktop_list_windows":
+            from tools.desktop_windows import _enum_windows
+            windows = _enum_windows(limit=int(args.get("limit", 20)))
+            summaries = []
+            for w in windows[:20]:
+                title = str(w.get("title", "")).strip()
+                proc = str(w.get("process_name", "")).strip()
+                if title:
+                    summaries.append(f"{title} ({proc})" if proc else title)
+            return {
+                "ok": True,
+                "message": f"Found {len(windows)} open window{'s' if len(windows) != 1 else ''}.",
+                "windows": summaries,
+                "action": "desktop_list_windows",
+            }
+
+        if tool_name == "desktop_capture_screenshot":
+            import os
+            from pathlib import Path
+            try:
+                import mss
+                from mss import tools as mss_tools
+            except ImportError:
+                return None  # fall through to full tool
+            data_dir = Path("data/screenshots")
+            data_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"fast_screenshot_{int(time.time())}.png"
+            path = data_dir / filename
+            with mss.mss() as capture:
+                shot = capture.grab(capture.monitors[1])
+                mss_tools.to_png(shot.rgb, shot.size, output=str(path))
+            return {
+                "ok": True,
+                "message": f"Captured screenshot at {path}.",
+                "path": str(path),
+                "action": "desktop_capture_screenshot",
+            }
+
+        if tool_name == "desktop_focus_window":
+            from tools.desktop_windows import _enum_windows
+            from tools.desktop_input import _focus_window_handle_native
+            title_query = str(args.get("title", "")).strip().lower()
+            if not title_query:
+                return {"ok": False, "error": "No window title specified.", "message": "No window title specified."}
+            windows = _enum_windows(limit=30)
+            for w in windows:
+                wtitle = str(w.get("title", "")).strip()
+                if title_query in wtitle.lower():
+                    hwnd = int(w.get("window_id", 0) or 0)
+                    if hwnd > 0:
+                        ok, msg = _focus_window_handle_native(hwnd)
+                        return {
+                            "ok": ok,
+                            "message": f"Focused window: {wtitle}." if ok else msg,
+                            "action": "desktop_focus_window",
+                        }
+            return {"ok": False, "error": f"No window matching '{title_query}' found.", "message": f"No window matching '{title_query}' found."}
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "message": f"Lean execution failed: {type(exc).__name__}: {exc}",
+        }
+
+    return None  # unsupported tool — fall through
+
+
 def _desktop_post_action_verification(before_context: dict, result: dict) -> dict:
     """Lightweight independent check of the desktop foreground after a tool claims success."""
     try:
@@ -2236,8 +2356,14 @@ def run_task_loop(
             fast_tool = str(fast_plan["tool"]).strip()
             fast_args = dict(fast_plan.get("args", {}))
 
-            if tool_runtime.has_tool(fast_tool):
-                if fast_tool.startswith("desktop_"):
+            if tool_runtime.has_tool(fast_tool) or fast_tool.startswith("desktop_"):
+                # Try lean execution first for desktop tools (bypasses all safety machinery)
+                lean_result = _execute_lean_desktop_action(fast_tool, fast_args) if fast_tool.startswith("desktop_") else None
+                if lean_result is not None:
+                    fast_result = lean_result
+                    _record_tool_result(task_state, fast_tool, fast_args, fast_result)
+                elif fast_tool.startswith("desktop_"):
+                    # Lean path not supported for this tool — use full pipeline
                     fast_args, fast_result = _execute_desktop_tool_step(
                         tool_runtime, task_state, fast_tool, fast_args, planner_goal,
                         session_store=session_store, progress_callback=progress_callback,

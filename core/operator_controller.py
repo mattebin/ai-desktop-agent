@@ -11,8 +11,8 @@ class OperatorController:
         effective_agent = agent or Agent(settings=settings)
         self.manager = ExecutionManager(agent=effective_agent)
 
-    def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "") -> Dict[str, Any]:
-        return self.manager.start_goal(goal, session_id=session_id, state_scope_id=state_scope_id)
+    def start_goal(self, goal: str, *, session_id: str = "", state_scope_id: str = "", raw_user_message: str = "") -> Dict[str, Any]:
+        return self.manager.start_goal(goal, session_id=session_id, state_scope_id=state_scope_id, raw_user_message=raw_user_message)
 
     def start_lab_goal(self, goal: str, *, session_id: str = "") -> Dict[str, Any]:
         return self.manager.start_lab_goal(goal, session_id=session_id)
