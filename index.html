@@ -13,7 +13,7 @@
   <title>AI Desktop Operator</title>
   <meta
     name="description"
-    content="AI Desktop Operator is a local-first desktop operator that can inspect the system, take controlled actions, work through Gmail and automations, and keep approvals and replay visible."
+    content="A local AI that controls your Windows desktop. Tell it what to do in plain language and it does it — opens files, runs commands, types text, manages email, and more."
   />
   <style>
     :root {
@@ -358,13 +358,13 @@
     <section class="hero">
       <div class="container hero-grid">
         <article class="card hero-copy">
-          <div class="eyebrow">Local-first | Chat-first | Controlled execution</div>
+          <div class="eyebrow">Local-first | Chat-first | Acts directly</div>
           <h1>AI Desktop Operator</h1>
           <p class="lead">
-            A local AI desktop operator that can understand your system, take actions, and work through tasks step by step with controlled execution.
+            A local AI that controls your Windows desktop. Tell it what to do in plain language and it does it — opens files, runs commands, types text, clicks things, manages email, and more.
           </p>
           <p class="lead muted">
-            It combines chat, approvals, desktop evidence, Gmail workflows, automations, replay, and short-horizon memory into one operator workflow that is meant to be useful in real work, not just interesting in a demo.
+            It works the way you'd expect. Say "open Downloads" and it opens Downloads. Say "run git status" and it runs it. No wizards, no extra steps. Just chat and it gets things done.
           </p>
           <div class="actions">
             <a class="button primary" href="https://github.com/mattebin/ai-desktop-agent" target="_blank" rel="noreferrer">Open repository</a>
@@ -378,23 +378,23 @@
           </div>
           <ul class="meta-list">
             <li>
-              <strong>Not a toy agent</strong>
-              It is built around approvals, replay, recovery, and bounded control instead of free-running automation.
+              <strong>An actual desktop operator</strong>
+              It doesn't just chat — it opens files, presses keys, runs commands, and controls your system.
             </li>
             <li>
               <strong>Local by default</strong>
-              The main control surface is a local API with a thin desktop app on top.
+              Everything runs on your machine. Your data stays on your machine.
             </li>
             <li>
-              <strong>Designed to adapt</strong>
-              It can evaluate whether actions worked, recover carefully, and remember what helped recently.
+              <strong>Fast where it counts</strong>
+              Common actions like opening folders or pressing keys happen instantly without waiting for the AI.
             </li>
           </ul>
           <div class="tag-row">
-            <span class="tag">Desktop interaction</span>
-            <span class="tag">Gmail workflows</span>
+            <span class="tag">Desktop control</span>
+            <span class="tag">Shell access</span>
+            <span class="tag">Gmail</span>
             <span class="tag">Automations</span>
-            <span class="tag">Run replay</span>
           </div>
         </aside>
       </div>
@@ -403,47 +403,47 @@
     <section id="capabilities">
       <div class="container">
         <div class="section-head">
-          <h2>Key capabilities</h2>
-          <p class="muted">High-level product capabilities, without forcing readers straight into implementation details.</p>
+          <h2>What it can do</h2>
+          <p class="muted">The short version — it controls your desktop through chat.</p>
         </div>
         <div class="two-col">
           <article class="card section-card">
             <ul class="feature-list">
               <li>
-                <strong>Desktop interaction</strong>
-                Inspect windows, browser state, and desktop evidence, then act through bounded controls.
+                <strong>Open anything</strong>
+                Files, folders, URLs, and apps — by name or full path. It figures out where things are.
+              </li>
+              <li>
+                <strong>Run shell commands</strong>
+                Full PowerShell and CMD access with a safety filter that blocks dangerous operations.
+              </li>
+              <li>
+                <strong>Control keyboard and mouse</strong>
+                Press keys, type text, click coordinates, scroll, and take screenshots.
               </li>
               <li>
                 <strong>Gmail workflows</strong>
-                Review inbox threads, prepare replies or forwards, and keep sending approval-gated.
-              </li>
-              <li>
-                <strong>Automations</strong>
-                Schedule recurring work, track watch conditions, and review triggered tasks.
-              </li>
-              <li>
-                <strong>Controlled shell lab</strong>
-                Experiment with sandbox-first shell access in a separate lab lane.
+                Read threads, draft replies, forward messages, and send with your approval.
               </li>
             </ul>
           </article>
           <article class="card section-card">
             <ul class="feature-list">
               <li>
-                <strong>Approval + safety</strong>
-                Sensitive actions are reviewed instead of silently executed.
+                <strong>Manage windows</strong>
+                List open windows, focus the one you need, inspect what's running.
               </li>
               <li>
-                <strong>Run history and replay</strong>
-                Inspect what happened later instead of trusting a black box.
+                <strong>Automations</strong>
+                Set up tasks that run on a schedule and review what happened later.
               </li>
               <li>
-                <strong>Memory and learning</strong>
-                Use short-horizon memory to reuse what worked and avoid repeating bad approaches.
+                <strong>Process control</strong>
+                List, inspect, start, and stop processes when you need to.
               </li>
               <li>
-                <strong>Workflows and extensions</strong>
-                Skills, commands, and local extensions are part of the same operator surface.
+                <strong>Multi-step tasks</strong>
+                It can chain actions together — open something, check the result, act on it.
               </li>
             </ul>
           </article>
@@ -460,27 +460,27 @@
           <article class="card section-card">
             <ul class="difference-list">
               <li>
-                <strong>Approval-gated and bounded</strong>
-                It is meant to stay useful without becoming reckless.
+                <strong>It acts directly</strong>
+                No planning phases, no "analyzing your request". It picks a tool and uses it, same as you would.
               </li>
               <li>
-                <strong>Evidence-based reasoning</strong>
-                Desktop state, scene context, and tool results help decide what to do next.
+                <strong>Common things are instant</strong>
+                "Open Downloads", "press Enter", "take a screenshot" — these skip the AI entirely and just happen.
               </li>
               <li>
-                <strong>Recovery-aware</strong>
-                It can retry carefully, recover, and stop when progress is unclear.
+                <strong>Shell access that isn't reckless</strong>
+                Full PowerShell and CMD, but with a tested safety filter that blocks credential theft, persistence attacks, and destructive commands.
               </li>
             </ul>
           </article>
           <article class="card section-card">
             <h3>How it works</h3>
             <p class="muted">
-              The simple version is:
+              The simple version:
             </p>
-            <p><strong>observe -> plan -> act -> evaluate -> adapt</strong></p>
+            <p><strong>you say it &#8594; it picks a tool &#8594; tool runs &#8594; done</strong></p>
             <p class="muted">
-              The operator gathers context, chooses a bounded step, executes it, checks what actually changed, and then either continues, recovers, asks for approval, or stops.
+              Same pattern that powers tools like Claude Code — your message goes to an LLM, the LLM picks the right tool, the tool executes, and you see the result. No unnecessary steps in between.
             </p>
           </article>
         </div>
@@ -490,18 +490,18 @@
     <section id="ui">
       <div class="container">
         <div class="section-head">
-          <h2>UI overview</h2>
-          <p class="muted">A chat-first interface with workspaces, approvals, and context kept visible without turning the app into a dashboard.</p>
+          <h2>The interface</h2>
+          <p class="muted">Chat in the center. Everything else stays out of the way until you need it.</p>
         </div>
         <article class="card section-card screenshot-card">
           <img src="images/ui-main.png" alt="AI Desktop Operator interface" />
           <div class="screenshot-meta">
             <span class="tag">Chat in the center</span>
             <span class="tag">Workspaces on the left</span>
-            <span class="tag">Approvals and context on the right</span>
+            <span class="tag">Context on the right</span>
           </div>
           <p class="muted">
-            The center stays focused on the task. Workspaces such as Gmail, Automations, Workflows, Runs, and the experimental lab are available without crowding the main conversation.
+            The conversation is the main interface. Workspaces like Gmail, Automations, and Runs are there when you need them. No dashboards, no clutter.
           </p>
         </article>
       </div>
@@ -510,37 +510,37 @@
     <section id="uses">
       <div class="container">
         <div class="section-head">
-          <h2>Example use cases</h2>
+          <h2>Things you can say</h2>
         </div>
         <div class="two-col">
           <article class="card section-card">
             <ul class="use-list">
               <li>
-                <strong>Open a file and send it by email</strong>
-                Inspect the result, draft the email, and wait for approval before sending.
+                <strong>"Open my Downloads folder"</strong>
+                Opens it instantly. No full path needed — it knows where common folders are.
               </li>
               <li>
-                <strong>Inspect something on the desktop and act</strong>
-                Recover focus, judge readiness, and continue based on what is actually visible.
+                <strong>"Run git status in my project"</strong>
+                Executes the command and shows you the output right in the chat.
               </li>
             </ul>
           </article>
           <article class="card section-card">
             <ul class="use-list">
               <li>
-                <strong>Run an approval-aware task</strong>
-                Keep the operator moving while still pausing at the right moments.
+                <strong>"Take a screenshot"</strong>
+                Captures the screen and saves it. Fast enough that you don't notice a delay.
               </li>
               <li>
-                <strong>Experiment in lab mode</strong>
-                Try safe shell tasks without promoting that capability into the normal operator path.
+                <strong>"Draft a reply to that email"</strong>
+                Works through Gmail, prepares the draft, and waits for you to say send.
               </li>
             </ul>
           </article>
         </div>
 
         <div class="status-callout">
-          <strong>Current status:</strong> the project has a serious working foundation and a real product shape, but it is still evolving. The main operator flow is usable today, while experimental areas such as shell lab mode are intentionally kept separate until they prove themselves further.
+          <strong>Current status:</strong> this is an active project with a real working product. The desktop operator is solid and genuinely usable today — it can open things, run commands, control the keyboard and mouse, and work through multi-step tasks. Still evolving, still getting better.
         </div>
       </div>
     </section>
@@ -548,21 +548,20 @@
     <section id="links" class="footer">
       <div class="container footer-grid">
         <article class="card footer-card">
-          <h2>Repository structure</h2>
+          <h2>Project structure</h2>
           <ul class="repo-list">
-            <li><strong>core/</strong> Operator runtime, state, approvals, evaluation, and API.</li>
+            <li><strong>core/</strong> The operator brain — execution loop, state, fast path, LLM client.</li>
             <li><strong>desktop-ui/</strong> Tauri + React desktop app.</li>
-            <li><strong>tools/</strong> Tool implementations used by the operator.</li>
-            <li><strong>docs/</strong> Deep-dive technical material and architecture notes.</li>
+            <li><strong>tools/</strong> Thin wrappers around Windows APIs — keyboard, mouse, shell, screenshots.</li>
+            <li><strong>docs/</strong> Deeper technical notes if you want to dig in.</li>
           </ul>
         </article>
         <aside class="card footer-card">
-          <h2>Read more</h2>
+          <h2>Get started</h2>
           <ul class="docs-list">
-            <li><strong><a href="README.md">README</a></strong> Start here for the project overview and quick setup.</li>
-            <li><strong><a href="docs/PROJECT_OVERVIEW.md">Project overview</a></strong> Higher-level project context.</li>
-            <li><strong><a href="docs/DESKTOP_EVIDENCE_ARCHITECTURE.md">Desktop evidence architecture</a></strong> Deeper technical detail.</li>
-            <li><strong><a href="docs/gmail-integration.md">Gmail integration</a></strong> Details on the Gmail workflow layer.</li>
+            <li><strong><a href="README.md">README</a></strong> Quick overview and setup instructions.</li>
+            <li><strong><a href="docs/PROJECT_OVERVIEW.md">Project overview</a></strong> Higher-level architecture context.</li>
+            <li><strong><a href="docs/ROADMAP.md">Roadmap</a></strong> Where this is going next.</li>
           </ul>
           <div class="actions">
             <a class="button primary" href="https://github.com/mattebin/ai-desktop-agent" target="_blank" rel="noreferrer">View on GitHub</a>
